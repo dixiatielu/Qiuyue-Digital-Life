@@ -208,6 +208,30 @@ test('life mode can plan and wake without new group messages, then complete the 
   } finally { await runtime.stop(); f.store.close(); }
 });
 
+test('life wakes show when available online activities were last done, other observations do not', async () => {
+  const f = fixture();
+  try {
+    f.store.setSetting('lifeEnabled', true);
+    const feeds = f.store.receive({ key: 'tool:feeds', kind: 'snowluma:get_qzone_feeds', at: Date.parse('2026-10-27T12:00:00Z'), text: '[]', payload: { result: [] } }, true)!;
+    const signature = f.store.beginAction('signature', 'set_self_longnick', { longNick: 'Practicing a new song' }, []);
+    f.store.finishAction(signature.action.id, 'success', {});
+    const status = f.store.beginAction('status', 'set_diy_online_status', { face_id: 1, wording: 'Humming along' }, []);
+    f.store.finishAction(status.action.id, 'success', {});
+    const diary = f.store.writeMemory({ kind: 'note', title: 'Today', content: 'A quiet day', importance: 3, sources: [feeds.id] }, false);
+    const prompts: string[] = [];
+    const observed = (messages: unknown[]) => JSON.stringify(messages.findLast(message => JSON.stringify(message).includes('New environment observations')));
+    f.faux.setResponses([context => { prompts.push(observed(context.messages)); return answer('Quiet'); }, context => { prompts.push(observed(context.messages)); return answer('Rest'); }]);
+    event(f.store, 'Hello'); await f.brain.run(f.store.claim(10)!);
+    f.store.schedule('Free time', 'life', Date.now()); f.store.enqueueDue(); await f.brain.run(f.store.claim(10)!);
+    assert.ok(!prompts[0]!.includes('Online activities'));
+    assert.ok(prompts[1]!.includes('Online activities'));
+    assert.ok(prompts[1]!.includes('2026-10-27T12:00:00.000Z'));
+    assert.ok(prompts[1]!.includes('Practicing a new song') && prompts[1]!.includes('Humming along'));
+    assert.ok(prompts[1]!.includes(new Date(diary.createdAt).toISOString()));
+    assert.ok(prompts[1]!.includes('Post to your Qzone') && !prompts[1]!.includes('Search or read something online'));
+  } finally { f.store.close(); }
+});
+
 test('memory maintenance continues with life mode disabled and stays in the main brain', async () => {
   const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   try {

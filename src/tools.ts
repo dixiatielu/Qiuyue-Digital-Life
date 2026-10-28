@@ -124,6 +124,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     'send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg',
     'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'delete_msg',
     'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone',
+    'get_ai_characters', 'send_group_ai_record',
   ]);
   const usage: Record<string, string> = {
     fetch_custom_face_detail: 'Returns saved emoji_id values, image URLs, and possibly empty descriptions. Choose based on actual content; do not guess image meanings.',
@@ -134,6 +135,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     get_qzone_msg_detail: 'Query using the actual post tid and its owner target_uin. Omitting target_uin refers to your own Qzone. Inline replies may be incomplete.',
     send_qzone_msg: 'When ugc_right is omitted, the default is visible to everyone; 4 means friends only, 64 means only yourself, and 16 or 128 also requires target_uins. For example, use ugc_right=64 for yourself only; choose a visibility matching the sharing scope.',
     like_qzone: 'Use tid and target_uin from an actual post; omitting target_uin refers to your own Qzone. abstime may be the actual posting time.',
+    send_group_ai_record: 'Sends the text as an AI voice message to the group directly; group chats only. Use a character_id from an actual get_ai_characters result unchanged. Keep the text short.',
     comment_qzone: 'tid and target_uin identify the post and its author. To reply to a top-level comment, provide both its comment_id and comment_uin (for example, comment_id="0" is valid). For a nested reply, use the parent comment ID and author and provide both target reply_uin and reply_name. Replies do not support images.',
   };
   const native = new Map(snowlumaCatalog.map(action => [action.name, nativeTool(action)]));

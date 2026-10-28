@@ -3,12 +3,34 @@ import { createModelBackend } from './model.js';
 import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import type { Monitor } from './monitor.js';
-import type { Action, EnvironmentEvent, Observation } from './domain.js';
+import type { Action, EnvironmentEvent, MemoryKind, Observation } from './domain.js';
 import { Store, digest } from './store.js';
 import { publicFetch } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint } from './context.js';
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
+
+/** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. */
+const onlineActivities: { activity: string; tools: string[]; memoryKind?: MemoryKind }[] = [
+  { activity: "Browse friends' Qzone feeds", tools: ['get_qzone_feeds'] },
+  { activity: "Like or comment on someone's Qzone post", tools: ['like_qzone', 'comment_qzone'] },
+  { activity: 'Check comments on your own Qzone posts', tools: ['get_qzone_msg_list', 'get_qzone_msg_detail'] },
+  { activity: 'Post to your Qzone', tools: ['send_qzone_msg'] },
+  { activity: 'Browse and like recommended Qzone posts', tools: ['get_qzone_public_feeds', 'get_qzone_public_feed_detail', 'get_qzone_public_comments', 'get_qzone_public_replies', 'set_qzone_public_like', 'set_qzone_public_comment_like'] },
+  { activity: 'Browse, like, comment on, or add to group albums', tools: ['get_group_album_list', 'get_group_album_media_list', 'set_group_album_media_like', 'do_group_album_comment', 'upload_image_to_qun_album'] },
+  { activity: 'Check in to a group', tools: ['set_group_sign', 'get_group_signed_list'] },
+  { activity: "Like a friend's QQ profile", tools: ['send_like'] },
+  { activity: 'Start a private chat with or poke someone you know', tools: ['send_private_msg', 'friend_poke', 'send_poke'] },
+  { activity: 'Change your QQ signature', tools: ['set_self_longnick'] },
+  { activity: 'Set a custom online status', tools: ['set_diy_online_status'] },
+  { activity: 'Change your avatar, nickname, Qzone name or description, or group card', tools: ['set_qq_avatar', 'set_qq_profile', 'set_qzone_profile', 'set_group_card'] },
+  { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'] },
+  { activity: 'Write or reread your diary', tools: ['remember', 'recall'], memoryKind: 'note' },
+  { activity: 'Search or read something online', tools: ['search_web', 'read_webpage'] },
+];
+const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : `snowluma:${tool}`;
+// Self-presentation the agent sets and later sees as current state.
+const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
 
 interface ObservationMessage { role: 'observation'; batchId: string; content: (TextContent | ImageContent)[]; eventIds: string[]; lifeOnly: boolean; timestamp: number }
 declare module '@earendil-works/pi-agent-core' { interface CustomAgentMessages { observation: ObservationMessage } }
@@ -220,6 +242,8 @@ Working context continues across thinking runs; when space is limited, a continu
   private async message(observation: Observation): Promise<ObservationMessage> {
     const preview = Math.max(80, Math.min(2000, Math.floor(this.config.limits.contextTokens / (observation.events.length * 8))));
     const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (use read_event to read truncated content):\n${JSON.stringify(observation.events.map(event => displayEvent(event, preview)))}` }];
+    const online = observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life') && this.onlineLife();
+    if (online) content.push({ type: 'text', text: online });
     let count = 0;
     for (const event of observation.events) for (const segment of Array.isArray(event.payload.message) ? event.payload.message : []) {
       if (segment.type !== 'image') continue;
@@ -235,6 +259,21 @@ Working context continues across thinking runs; when space is limited, a continu
       } catch { content.push({ type: 'text', text: `The image in event ${event.id} could not be read` }); }
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
+  }
+  /** When each available online activity was last done, so a life wake knows what it can actually do. */
+  private onlineLife() {
+    const available = new Set(this.tools.current().map(tool => tool.name));
+    const activities = onlineActivities.map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
+    if (!activities.length) return;
+    const last = this.store.lastExperienced(activities.flatMap(item => item.tools.map(experienceKind)));
+    const status = activities.map(({ activity, tools, memoryKind }) => {
+      const at = memoryKind ? this.store.lastMemoryAt(memoryKind) ?? 0 : Math.max(0, ...tools.map(name => last[experienceKind(name)] ?? 0));
+      const setter = tools.find(name => currentValue[name]);
+      const args = setter && this.store.lastSuccessfulAction(setter)?.args;
+      const current = args ? currentValue[setter!]!(args) : undefined;
+      return { activity, tools, lastDone: at ? new Date(at).toISOString() : `not in the last ${this.config.memory.retentionDays} days`, ...(current !== undefined ? { lastSetTo: current } : {}) };
+    });
+    return `Online activities available for your own life, with when you last did each; a record, not a to-do list. Life activities can be actual online activities like these, not only fictional daily life. Qzone posts, likes, and comments are never pushed to you; you only see them by checking. Use load_snowluma_tools for the parameters of unfamiliar tools.\n${JSON.stringify(status)}`;
   }
   async run(observation: Observation) {
     const generation = this.store.settings().generation;

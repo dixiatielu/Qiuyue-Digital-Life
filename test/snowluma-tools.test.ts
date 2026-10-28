@@ -22,7 +22,7 @@ test('generated native tools expose canonical SDK names and schemas directly', a
       assert.match(action.name, /^[a-zA-Z0-9_-]{1,64}$/);
       const tool = f.tools.current().find(tool => tool.name === action.name)!;
       assert.ok(tool, action.name); assert.deepEqual(tool.parameters, action.inputSchema);
-      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone'].includes(action.name)) assert.equal(tool.description, action.summary ?? action.name);
+      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record'].includes(action.name)) assert.equal(tool.description, action.summary ?? action.name);
       assert.equal(findSnowLumaAction(action.name), action);
     }
   } finally { f.store.close(); }

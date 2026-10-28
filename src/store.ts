@@ -324,6 +324,14 @@ export class Store {
   action(row: Record<string, any>): Action { return { id: row.id, key: row.action_key, fingerprint: row.fingerprint, kind: row.kind, args: parse(row.args), sources: parse(row.source_ids), status: row.status, result: row.result ? parse(row.result) : null, createdAt: row.created_at }; }
   actions(limit = 20): Action[] { return this.db.prepare('SELECT * FROM actions ORDER BY created_at DESC LIMIT ?').all(limit).map(row => this.action(row)); }
   actionById(actionId: string): Action | undefined { const row = this.db.prepare('SELECT * FROM actions WHERE id=?').get(actionId); return row ? this.action(row) : undefined; }
+  lastMemoryAt(kind: MemoryKind): number | undefined { const row = this.db.prepare('SELECT max(created_at) AS at FROM memories WHERE kind=?').get(kind); return row?.at == null ? undefined : Number(row.at); }
+  lastSuccessfulAction(kind: string): Action | undefined { const row = this.db.prepare("SELECT * FROM actions WHERE kind=? AND status='success' ORDER BY created_at DESC LIMIT 1").get(kind); return row ? this.action(row) : undefined; }
+  /** Latest time each experience kind was recorded; read-only tool calls leave an experience but no action. */
+  lastExperienced(kinds: string[]): Record<string, number> {
+    if (!kinds.length) return {};
+    const rows = this.db.prepare(`SELECT kind, max(at) AS at FROM events WHERE kind IN (${kinds.map(() => '?').join(',')}) GROUP BY kind`).all(...kinds);
+    return Object.fromEntries(rows.map(row => [String(row.kind), Number(row.at)]));
+  }
   beginAction(key: string, kind: string, args: Record<string, unknown>, sources: string[], triggers: string[] = [], hourlyLimit?: number | null): { action: Action; fresh: boolean } {
     return this.transaction(() => {
       const fingerprint = digest({ kind, args: canonical(args) });
