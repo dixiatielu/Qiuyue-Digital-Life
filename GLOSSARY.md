@@ -92,6 +92,22 @@ _Avoid_: a temporary role description the Agent can rewrite itself
 Changes in the digital life's preferences, relationships, and habits through experience.
 _Avoid_: a persona regenerated for each conversation
 
+**Personal Habit**:
+A way of behaving or expressing itself, including its own expression style, that the digital life has formed from experience and maintains itself. It refines life within the persona file and does not override it.
+_Avoid_: an edit to the operator's persona file, a rule another person imposed
+
+**Impression**:
+The digital life's current, revisable understanding of a specific person and its relationship with them; a kind of long-term understanding with traceable evidence.
+_Avoid_: a permanent label, an operator-facing user profile
+
+**Practice**:
+Know-how the digital life has formed about doing something in its environment, such as using an interface or following a group's norms, and revises through use.
+_Avoid_: operator-written tool documentation
+
+**External Evidence**:
+A source the digital life did not produce itself, such as others' messages, reactions, and recalls; action receipts; or operator corrections. Personal habits and impressions must rest on it.
+_Avoid_: its own messages, repeated recall of its own judgment
+
 **Autonomous Life Mode**:
 An optional mode that allows the digital life to pursue its own life according to its persona, which the operator can enable or disable.
 _Avoid_: background life that must always be enabled
