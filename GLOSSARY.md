@@ -24,6 +24,10 @@ _Avoid_: a request that must be answered
 A group of environment events that the digital life reads and understands together; it may include several occurrences over a period of time.
 _Avoid_: one event necessarily requiring one independent thought
 
+**Ambient Event**:
+An environment event that carries little information on its own, such as a notice that someone is typing or an emoji reaction to a message. It is still perceived and read together with the next observation that other events bring about, but it does not start or steer thinking by itself; if nothing else arrives, it is eventually observed on its own.
+_Avoid_: discarded noise, a connection heartbeat, an event that demands attention
+
 **Perception Gap**:
 A period for which the digital life cannot confirm that it has received all environment events, indicating that its knowledge of the experience may be incomplete.
 _Avoid_: fully recovered group chat history

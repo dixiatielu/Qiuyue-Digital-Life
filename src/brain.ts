@@ -7,7 +7,7 @@ import type { Action, EnvironmentEvent, MemoryKind, Observation } from './domain
 import { Store, digest } from './store.js';
 import { publicFetch } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint } from './context.js';
+import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 
 /** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. */
@@ -39,6 +39,7 @@ export interface Brain {
   readonly thought: ThoughtContext;
   run(observation: Observation): Promise<void>;
   steer(observation: Observation): Promise<boolean>;
+  consolidate(): Promise<void>;
   abort(): void;
 }
 
@@ -63,8 +64,10 @@ export class PiBrain implements Brain {
   private pendingRequest: AgentMessage[] = [];
   private pendingRoute = '';
   private compactions: Record<string, unknown>[] = [];
+  private readonly stream: StreamFn;
   constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor) {
     const { model, stream } = backend ?? createModelBackend(config.model);
+    this.stream = stream;
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = digest({ instructions: this.instructions(), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration) });
     this.legacyIdentity = digest({ instructions: this.instructions(true), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration) });
@@ -81,28 +84,10 @@ export class PiBrain implements Brain {
         const update = runtimeUpdate(runtime, this.runtimeSnapshot);
         if (update) messages.push(this.runtimeMessage(update));
         this.runtimeSnapshot = runtime;
-        const window = Math.min(config.limits.contextTokens, currentModel.contextWindow);
-        const budget = window - config.limits.outputReserveTokens - config.limits.contextSafetyTokens;
-        if (budget <= 0) throw new Error('The model window is too small for the output reserve and safety margin.');
+        const { window, budget } = this.budget(currentModel);
         const route = this.route(currentModel);
-        let measured = this.meter.measure(messages, route);
-        const before = measured.tokens;
-        if (measured.tokens > budget) {
-          store.archiveContext(messages, [...this.thought.sources]);
-          const recentTokens = Math.min(config.compaction.keepRecentTokens, budget);
-          const pruned = pruneToolResults(messages, recentTokens);
-          messages = pruned.messages;
-          measured = this.meter.measure(messages, route);
-          if (pruned.changed) store.log('context_pruned', { runId: this.runId, results: pruned.changed, beforeTokens: before, afterTokens: measured.tokens });
-          if (measured.tokens > budget) {
-            // A delta may depend on a base that compaction removes. Keep a complete current state.
-            const snapshot = this.runtimeMessage(runtimeUpdate(runtime)!);
-            const latest = messages.at(-1);
-            if (!(latest?.role === 'user' && latest.content === snapshot.content)) messages.push(snapshot);
-            messages = await this.compact(messages, budget, window, currentModel, stream, signal);
-            measured = this.meter.measure(messages, route);
-          }
-        }
+        let measured: TokenMeasurement;
+        ({ messages, measured } = await this.shrink(messages, budget, budget, window, currentModel, runtime, signal));
         if (measured.tokens > budget) throw new Error('Required state or the latest observation exceeds the context budget; reduce the batch size or organize pending items.');
         store.log('context_budget', { runId: this.runId, ...measured, inputBudget: budget, outputReserveTokens: config.limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
         ensureCurrent(store, this.thought, signal);
@@ -121,6 +106,7 @@ export class PiBrain implements Brain {
         for (const source of event.message.eventIds) this.thought.sources.add(source);
         this.thought.triggers = new Set(event.message.eventIds);
         this.thought.lifeOnly &&= event.message.lifeOnly;
+        store.log('observation_entered', { runId: this.runId, batchId: event.message.batchId });
       }
       if (event.type === 'turn_end' && event.message.role === 'assistant' && !['error', 'aborted'].includes(event.message.stopReason)) {
         ensureCurrent(store, this.thought);
@@ -156,6 +142,34 @@ Working context continues across thinking runs; when space is limited, a continu
     this.store.chargeCall(this.runId, this.config.limits.modelCallsPerDay);
   }
   private route(model: Model<any>) { return JSON.stringify([model.provider, model.id, model.api, model.baseUrl]); }
+  private budget(model: Model<any>) {
+    const window = Math.min(this.config.limits.contextTokens, model.contextWindow);
+    const budget = window - this.config.limits.outputReserveTokens - this.config.limits.contextSafetyTokens;
+    if (budget <= 0) throw new Error('The model window is too small for the output reserve and safety margin.');
+    return { window, budget };
+  }
+  /** Bring the context under limit: prune old tool results first, and summarize older exchanges only if that is not enough. */
+  private async shrink(messages: AgentMessage[], limit: number, budget: number, window: number, model: Model<any>, runtime: RuntimeSnapshot, signal?: AbortSignal) {
+    const route = this.route(model);
+    let measured = this.meter.measure(messages, route);
+    const before = measured.tokens;
+    if (measured.tokens <= limit) return { messages, measured };
+    this.store.archiveContext(messages, [...this.thought.sources]);
+    const pruned = pruneToolResults(messages, Math.min(this.config.compaction.keepRecentTokens, budget));
+    messages = pruned.messages;
+    measured = this.meter.measure(messages, route);
+    if (pruned.changed) this.store.log('context_pruned', { runId: this.runId, results: pruned.changed, beforeTokens: before, afterTokens: measured.tokens });
+    if (measured.tokens > limit) {
+      // A delta may depend on a base that compaction removes. Keep a complete current state.
+      const snapshot = this.runtimeMessage(runtimeUpdate(runtime)!);
+      const latest = messages.at(-1);
+      if (!(latest?.role === 'user' && latest.content === snapshot.content)) messages.push(snapshot);
+      this.runtimeSnapshot = runtime;
+      messages = await this.compact(messages, budget, window, model, this.stream, signal);
+      measured = this.meter.measure(messages, route);
+    }
+    return { messages, measured };
+  }
   private async compact(messages: AgentMessage[], budget: number, window: number, model: Model<any>, stream: StreamFn, signal?: AbortSignal): Promise<AgentMessage[]> {
     const summaryLimit = this.config.compaction.summaryMaxTokens;
     const { system, removed, kept } = compactionSplit(messages, Math.min(this.config.compaction.keepRecentTokens, budget), budget, summaryLimit + 100);
@@ -275,16 +289,23 @@ Working context continues across thinking runs; when space is limited, a continu
     });
     return `Online activities available for your own life, with when you last did each; a record, not a to-do list. Life activities can be actual online activities like these, not only fictional daily life. Qzone posts, likes, and comments are never pushed to you; you only see them by checking. Use load_snowluma_tools for the parameters of unfamiliar tools.\n${JSON.stringify(status)}`;
   }
-  async run(observation: Observation) {
-    const generation = this.store.settings().generation;
-    const fresh = this.contextGeneration !== generation;
-    if (fresh) {
+  /** Load the persisted working context unless this process already holds it for the current management state. */
+  private prepare(generation: number) {
+    if (this.contextGeneration !== generation) {
       this.resetContext();
       const saved = this.store.loadContext(this.identity) ?? this.store.loadContext(this.legacyIdentity);
       if (saved) { try { this.restore(saved); } catch { this.resetContext(); } }
     }
     this.agent.state.tools = this.tools.current();
     this.contextGeneration = generation;
+  }
+  private revert(checkpoint: ContextCheckpoint, generation: number) {
+    if (this.store.settings().generation === generation) this.restore(checkpoint);
+    else { this.resetContext(); this.thought.sources.clear(); this.contextGeneration = -1; }
+  }
+  async run(observation: Observation) {
+    const generation = this.store.settings().generation;
+    this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = [];
     this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.controller = new AbortController();
@@ -300,16 +321,32 @@ Working context continues across thinking runs; when space is limited, a continu
       this.store.saveContext(this.checkpoint(), [...this.seen], this.compactions);
       this.seen.clear();
     }
-    catch (error) {
-      if (this.store.settings().generation === generation) this.restore(rollback);
-      else { this.resetContext(); this.thought.sources.clear(); this.contextGeneration = -1; }
-      throw error;
-    }
+    catch (error) { this.revert(rollback, generation); throw error; }
     finally { this.agent.clearAllQueues(); this.display(monitor => monitor.endRun()); }
   }
+  /** Between runs, compact a context above compaction.idleRatio of its budget; runs still compact at the full budget. */
+  async consolidate() {
+    const generation = this.store.settings().generation;
+    this.prepare(generation);
+    const model = this.agent.state.model;
+    const { window, budget } = this.budget(model);
+    const limit = Math.floor(budget * this.config.compaction.idleRatio);
+    if (this.meter.measure(this.agent.state.messages, this.route(model)).tokens <= limit) return;
+    const rollback = this.checkpoint(); this.compactions = [];
+    this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [];
+    this.controller = new AbortController();
+    this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: false };
+    try {
+      const { messages } = await this.shrink(this.agent.state.messages.slice(), limit, budget, window, model, this.runtimeContext(), this.controller.signal);
+      this.agent.state.messages = messages;
+      this.store.saveContext(this.checkpoint(), [], this.compactions);
+    } catch (error) { this.revert(rollback, generation); throw error; }
+  }
   async steer(observation: Observation): Promise<boolean> {
+    const runId = this.runId;
     const message = await this.message(observation);
-    if (!this.streaming) return false;
+    // The run may have ended, or another begun, while images were downloading.
+    if (!this.streaming || this.runId !== runId) return false;
     this.observations.push(...observation.events);
     this.display(monitor => monitor.observation(observation));
     this.agent.steer(message); return true;

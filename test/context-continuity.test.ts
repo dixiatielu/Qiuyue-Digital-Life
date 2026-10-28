@@ -326,3 +326,58 @@ test('summary retries are bounded and charged, and only the valid replacement is
     assert.match(JSON.stringify(f.brain.agent.state.messages), /Complete candidate summary/);
   } finally { f.store.close(); }
 });
+
+async function idleFixture() {
+  const f = fixture();
+  smallWindow(f); f.cfg.compaction.keepRecentTokens = 200; f.cfg.compaction.idleRatio = 0.7;
+  event(f.store, 'Previous observation');
+  f.faux.setResponses([answer('Judgment from the previous run. ' + 'old working fact '.repeat(300))]);
+  await f.brain.run(f.store.claim(20)!);
+  event(f.store, 'Second observation', 200);
+  f.faux.setResponses([answer('Short reply')]);
+  await f.brain.run(f.store.claim(20)!);
+  return f;
+}
+
+test('idle consolidation compacts between runs and persists, so the next run does not compact', async () => {
+  const f = await idleFixture();
+  try {
+    const calls = f.faux.state.callCount;
+    f.faux.setResponses([context => { assert.ok(isSummary(context.messages)); return answer('Idle handoff summary of the previous judgment'); }]);
+    await f.brain.consolidate();
+    assert.equal(f.faux.state.callCount, calls + 1);
+    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /Judgment from the previous run/);
+    // Deltas kept after the summary need a complete base.
+    assert.match(String(snapshots(f.brain.agent.state.messages as Message[]).at(-1)?.content), /"format":"snapshot"/);
+    assert.ok(f.store.logs().some(log => log.kind === 'context_compacted'));
+    await f.brain.consolidate(); assert.equal(f.faux.state.callCount, calls + 1);
+    f.restart(); event(f.store, 'After restart');
+    f.faux.setResponses([context => {
+      assert.ok(!isSummary(context.messages));
+      assert.match(JSON.stringify(context.messages), /Idle handoff summary of the previous judgment/);
+      return answer('Continue');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(f.faux.state.callCount, calls + 2);
+  } finally { f.store.close(); }
+});
+
+test('idle consolidation stopped by an arriving event keeps the original working context', async () => {
+  const f = await idleFixture(); const entered = deferred(); const release = deferred();
+  try {
+    f.faux.setResponses([async () => { entered.resolve(); await release.promise; return answer('Summary that must be discarded'); }]);
+    const work = f.brain.consolidate();
+    await entered.promise; f.brain.abort(); release.resolve();
+    await assert.rejects(work);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /Judgment from the previous run/);
+    assert.ok(!f.store.logs().some(log => log.kind === 'context_compacted'));
+    event(f.store, 'Arrived during consolidation');
+    f.faux.setResponses([context => {
+      assert.ok(!isSummary(context.messages));
+      assert.match(JSON.stringify(context.messages), /Judgment from the previous run/);
+      assert.doesNotMatch(JSON.stringify(context.messages), /Summary that must be discarded/);
+      return answer('Continue');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+  } finally { release.resolve(); f.store.close(); }
+});

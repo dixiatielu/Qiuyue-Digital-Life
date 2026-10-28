@@ -157,7 +157,7 @@ export class Monitor {
     if (name === 'context_budget') { this.contextTokens = Number(detail.tokens); this.inputBudget = Number(detail.inputBudget); }
     if (live && name === 'connection_opened') this.connection = ui('Connected', '已连接');
     if (live && (name === 'connection_closed' || name === 'connection_error')) this.connection = ui('Disconnected', '已断开');
-    if (!['context_budget', 'action_result', 'thought_turn_completed'].includes(name)) this.put({ id: `trace:${id}`, at, type: 'system', title: name, text: this.describe(data), state: name.includes('error') ? 'error' : undefined }, live);
+    if (!['context_budget', 'action_result', 'thought_turn_completed', 'observation_dispatched', 'observation_entered'].includes(name)) this.put({ id: `trace:${id}`, at, type: 'system', title: name, text: this.describe(data), state: name.includes('error') ? 'error' : undefined }, live);
   }
   private loadHistory() {
     const history = this.store.visibleHistory();

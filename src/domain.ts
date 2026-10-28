@@ -9,6 +9,7 @@ export interface EnvironmentEvent {
   text: string;
   payload: Record<string, unknown>;
   status: 'pending' | 'processing' | 'processed';
+  receivedAt?: number;
 }
 export type MemoryKind = 'experience' | 'understanding' | 'fiction' | 'note';
 export interface Memory {
@@ -55,3 +56,5 @@ export interface LifeSettings {
 }
 export const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 export const isHeartbeat = (kind: string): boolean => kind === 'meta_event:heartbeat' || kind.startsWith('meta_event:heartbeat:');
+/** Low-information signals ride along with other observations; they never start or steer a thought on their own. */
+export const isAmbient = (kind: string): boolean => kind === 'notice:notify:input_status' || kind.startsWith('notice:group_msg_emoji_like:');
