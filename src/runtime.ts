@@ -2,6 +2,7 @@ import type { Config } from './config.js';
 import type { Brain } from './brain.js';
 import { Store, type PendingTiming } from './store.js';
 import { errorText } from './domain.js';
+import { recordTime } from './record.js';
 
 export class LifeRuntime {
   private timer?: ReturnType<typeof setInterval>;
@@ -35,20 +36,16 @@ export class LifeRuntime {
       if (now >= this.nextRetention) { this.store.retain(this.config.memory.retentionDays); this.nextRetention = now + 3_600_000; }
       this.store.enqueueDue(now);
       if ((this.config.limits.modelCallsPerDay !== null && this.store.dailyCalls() >= this.config.limits.modelCallsPerDay) || now < this.retryAfter) return;
-      const count = this.store.processedCount();
-      const watermark = this.store.setting<number>('reflectionWatermark');
-      if (count - watermark >= this.config.memory.reflectionEveryEvents) {
-        this.store.receive({ key: `maintenance:${watermark}:${count}`, kind: 'memory_maintenance', at: now, text: 'Review recent experiences and organize important understandings, relationship changes, and personal notes; there is no need to speak in a group.', payload: {} });
-        this.store.setSetting('reflectionWatermark', count);
-      }
-      const pending = this.store.pendingTiming(settings.lifeEnabled);
-      // Events received above (due wakes, maintenance) are stamped after `now`; time them against a later clock.
-      const checkedAt = Date.now();
+      let pending = this.store.pendingTiming(settings.lifeEnabled);
+      // Events received above (due wakes) are stamped after `now`; time them against a later clock.
+      let checkedAt = Date.now();
       // Consolidation is housekeeping: an event that can wake a thought takes attention back at once.
       if (this.consolidating) { if (pending.first !== undefined) this.brain.abort(); return; }
       if (this.work && !this.brain.streaming) return;
+      const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
+      if (this.queueReview(idle, now)) { pending = this.store.pendingTiming(settings.lifeEnabled); checkedAt = Date.now(); }
       if (!this.ready(pending, checkedAt)) {
-        if (!this.work && !this.consolidated && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs) this.consolidate();
+        if (idle && !this.consolidated && pending.first === undefined) this.consolidate();
         return;
       }
       const observation = this.store.claim(this.config.limits.batchSize, settings.lifeEnabled);
@@ -71,6 +68,19 @@ export class LifeRuntime {
       }
     } catch (error) { this.store.log('runtime_error', { message: errorText(error) }); }
     finally { this.ticking = false; }
+  }
+  /** Review waits for a quiet moment, unless the backlog has grown well past its threshold. */
+  private queueReview(idle: boolean, now: number) {
+    const count = this.store.processedCount();
+    const watermark = this.store.setting<number>('reflectionWatermark');
+    const every = this.config.memory.reflectionEveryEvents;
+    if (count - watermark < every || (!idle && count - watermark < every * 3)) return false;
+    const backlog = this.store.reviewBacklog(this.config.snowluma.selfId, now);
+    const chats = backlog.map(item => `${item.conversation}: ${item.messages} new messages since ${recordTime(item.since)}`).join('; ');
+    const text = `Time to consolidate memory; there is no need to speak in a group. ${chats ? `Unreviewed chat records: ${chats}. Read them with read_chat_record, which continues where your last review stopped; you decide how much to read. This review is about how as much as what: compare how others write and act with how you did in the same moments, including what they do that you never do, and how they responded to you. Record what you see as practices, keep what suits you as habits, and revise impressions of people.` : 'Review recent experiences and revise practices, habits, and impressions of people.'} Save important experiences too, and retire entries that no longer hold.`;
+    this.store.receive({ key: `maintenance:${watermark}:${count}`, kind: 'memory_maintenance', at: now, text, payload: { backlog } });
+    this.store.setSetting('reflectionWatermark', count);
+    return true;
   }
   /** A burst starts one thought once the environment goes quiet; ambient events never wake or steer on their own. */
   private ready({ first, last, ambient }: PendingTiming, now: number) {

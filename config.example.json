@@ -46,6 +46,12 @@
     "recentEvents": 30,
     "reflectionEveryEvents": 100
   },
+  "development": {
+    "scopeChars": 2000,
+    "personChars": 600,
+    "people": 8,
+    "recordLines": 200
+  },
   "web": {
     "enabled": true,
     "searchUrl": "https://api.deepseek.com/v1/tools/search",

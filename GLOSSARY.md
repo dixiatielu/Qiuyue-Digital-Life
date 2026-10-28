@@ -101,7 +101,7 @@ The digital life's current, revisable understanding of a specific person and its
 _Avoid_: a permanent label, an operator-facing user profile
 
 **Practice**:
-Know-how the digital life has formed about doing something in its environment, such as using an interface or following a group's norms, and revises through use.
+Know-how the digital life has formed about doing something in its environment, such as how the people in a group talk and act, using an interface, or following a group's norms. It is revised through use and fades when no longer observed.
 _Avoid_: operator-written tool documentation
 
 **External Evidence**:

@@ -9,8 +9,10 @@ import { publicFetch, WebReader } from './web.js';
 import { SnowLumaApiError } from '@snowluma/sdk';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLumaActionDefinition } from './snowluma-catalog.js';
 import { actionSummary } from './runtime-context.js';
+import { ChatRecord } from './record.js';
 
-export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean }
+/** reviewing: a memory_maintenance event is part of this thought. */
+export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean }
 export function ensureCurrent(store: Store, context: ThoughtContext, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const settings = store.settings();
@@ -70,7 +72,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       parameters: Type.Object({ id: string('Event ID', 100), index: Type.Integer({ minimum: 0 }) }), replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
-        const event = store.event(args.id);
+        const event = store.event(store.resolve(args.id));
         const segments = event?.payload.message;
         const image = Array.isArray(segments) ? segments.filter(segment => segment.type === 'image')[args.index] : undefined;
         if (typeof image?.data?.url !== 'string') throw new Error('The image does not exist or has no readable URL.');
@@ -96,7 +98,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       return { id: record.id, text: text.slice(offset, offset + 8000), nextOffset: offset + 8000 < text.length ? offset + 8000 : null };
     }),
     tool('read_event', 'Read an original experience record in chunks.', Type.Object({ id: string('Event source ID', 100), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), args => {
-      const event = store.event(args.id); if (!event) throw new Error('The experience does not exist or has been deleted.');
+      const event = store.event(store.resolve(args.id)); if (!event) throw new Error('The experience does not exist or has been deleted.');
       context().sources.add(event.id);
       const text = JSON.stringify(event); const offset = args.offset ?? 0;
       return { id: event.id, text: text.slice(offset, offset + 8000), nextOffset: offset + 8000 < text.length ? offset + 8000 : null };
@@ -106,7 +108,27 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       for (const memory of memories) context().sources.add(memory.id);
       return memories;
     }),
-    tool('remember', 'Save experiences, understandings, or diary entries based on real sources. Include source IDs; use supersedes to preserve revisions. Use fiction for permitted fictional life and note for personal diary entries and notes.', Type.Object({ kind: Type.Union(['experience', 'understanding', 'fiction', 'note'].map(x => Type.Literal(x))), title: string('Short title or note name', 200), content: string('Specific experience, understanding, or note', 12000), importance: Type.Integer({ minimum: 1, maximum: 10 }), sources: Type.Array(string('Supporting event or memory ID', 100), { maxItems: 50 }), subjects: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })), supersedes: Type.Optional(string('ID of the previous memory being updated', 100)) }), args => store.writeMemory(args, config.life.allowFiction)),
+    tool('remember', 'Save experiences, understandings, diary entries, or your own development, based on real sources. Include source IDs; #xxxxxxxx refs from read_chat_record work too. Use supersedes to preserve revisions. Use fiction for permitted fictional life and note for personal diary entries and notes. Development needs a scope: habit is a way of acting or expressing yourself that you keep (global, group:<id>, or person:<qq>); practice is what people in a group do in which situations (group:<id> or global); impression is your current understanding of one person and your relationship with them (person:<qq>; one per person, revised with supersedes).', Type.Object({ kind: Type.Union(['experience', 'understanding', 'fiction', 'note', 'habit', 'practice', 'impression'].map(x => Type.Literal(x))), title: string('Short title or note name', 200), content: string('Specific experience, understanding, note, or development', 12000), importance: Type.Integer({ minimum: 1, maximum: 10 }), sources: Type.Array(string('Supporting event or memory ID', 100), { maxItems: 50 }), subjects: Type.Optional(Type.Array(Type.String(), { maxItems: 20 })), supersedes: Type.Optional(string('ID of the previous memory being updated', 100)), scope: Type.Optional(string('For habit, practice, and impression: global, group:<id>, or person:<qq>', 40)) }), args => store.writeMemory(args, config.life.allowFiction, config.development)),
+    tool('retire_memory', 'Retire a habit, practice, or impression that no longer holds. It leaves everyday use; its history remains.', Type.Object({ id: string('Memory ID', 100) }), args => store.retireMemory(args.id)),
+    {
+      name: 'read_chat_record', label: 'read_chat_record',
+      description: "Read the complete record of a group or private chat in time order: everyone's messages, your own, reactions, recalls, and pokes, as they happened. Without from, it continues where your last review stopped, and reading on moves that point forward. from reads forward from any time. query or person instead returns the latest items containing a phrase or written by one person. Results are folded out of working context when the thought ends; read again whenever needed.",
+      parameters: Type.Object({ conversation: string('group:<group ID> or private:<QQ ID>', 40), from: Type.Optional(string('ISO time with timezone to read forward from', 100)), query: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })), person: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })) }),
+      replay: 'never', executionMode: 'sequential',
+      execute: async (_callId, args: any, signal) => {
+        ensureCurrent(store, context(), signal);
+        const record = new ChatRecord(store, config.snowluma.selfId, args.conversation);
+        const limit = args.limit ?? config.development.recordLines;
+        if (args.query || args.person) return { content: [{ type: 'text', text: record.matches(limit, { query: args.query, person: args.person }) }], details: {} };
+        if (args.from && (!/(Z|[+-]\d{2}:\d{2})$/.test(args.from) || !Number.isFinite(Date.parse(args.from)))) throw new Error('from must be an ISO time with a timezone.');
+        const mark = store.reviewMark(args.conversation);
+        const from = args.from ? Date.parse(args.from) : mark;
+        const page = record.page(from, limit);
+        // Reading on from the review point moves it. A jump ahead skips what lies between, which only a review means to do.
+        if (page.through !== undefined && (from <= mark || context().reviewing)) store.markReviewed(args.conversation, page.through);
+        return { content: [{ type: 'text', text: page.text }], details: {} };
+      },
+    },
     tool('set_activity', 'Record or clear the current activity.', Type.Object({ activity: Type.String({ maxLength: 2000 }) }), args => { store.setActivity(args.activity, [...context().sources]); return store.settings(); }),
     tool('schedule_activity', 'Schedule a life activity or an accepted social commitment.', Type.Object({ title: string('Activity and associated people or groups', 1000), kind: Type.Union([Type.Literal('life'), Type.Literal('commitment')]), at: string('ISO time with timezone, for example 2026-10-28T09:00:00+08:00', 100) }), args => {
       const dueAt = Date.parse(args.at);
