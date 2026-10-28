@@ -1,0 +1,3 @@
+# Preserve continuity outside the model's current context
+
+The digital life must retain its identity, relationships, memory, and current activities after context compaction and process restarts. These and unprocessed events must therefore be persisted, with the model reading what it needs each time. After a restart, the saved state is restored and the next action reassessed, so continuity does not depend on an indefinitely growing model context. See [ADR-0006](0006-experience-understanding-and-continuing-state.md) for the division between experiences, long-term understanding, and continuing state, and for memory formation, revision, recall, fading, and retention. The storage and retrieval implementation will be selected separately.

@@ -1,0 +1,7 @@
+# Maintain one primary thinking process while continuously receiving environment events
+
+To give the digital life a consistent current activity and attention across group chats, only one primary thinking process advances at a time. It decides whether to continue, shift attention, or set new matters aside; event reception and already-started tool tasks may continue. All environment events enter one perception pipeline and may be combined into observations for joint understanding, avoiding the fragmentation of a coherent group conversation into independent question-and-answer exchanges. The digital life still decides whether to pay attention or respond; mentions and pokes do not automatically create an obligation to reply.
+
+Ordinary environment events intervene at the thinking boundary after the current model call and its tool batch finish, and the same Agent decides whether to adjust or end the current activity. Explicit controls such as administrative stops and timeouts may attempt to cancel the current call. This boundary follows Pi's distinction between ordinary steering and a separate cancellation mechanism, avoiding automatic termination of an ongoing model call for every group event.
+
+Technical reference: [Pi Agent Core — Steering and Follow-up](https://github.com/earendil-works/pi/blob/main/packages/agent/README.md#steering-and-follow-up), checked 2026-10-27. Verify these semantics when integrating a specific version.

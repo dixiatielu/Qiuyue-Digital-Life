@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+config.json
+persona.md
+data/
+*.sqlite*
+*.sock
+coverage/
