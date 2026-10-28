@@ -73,6 +73,19 @@ export function persistableMessage(message: AgentMessage): AgentMessage {
   return message;
 }
 export function contextRecordId(message: AgentMessage): string { return `ctx:${hash(persistableMessage(message))}`; }
+const FOLDED = '[Folded when the thought ended;';
+/** Replace every result of one tool with a pointer to its archived original, keeping the first line as a label. */
+export function foldToolResults(messages: AgentMessage[], toolName: string): { messages: AgentMessage[]; changed: number } {
+  let changed = 0;
+  const folded = messages.map(message => {
+    if (message.role !== 'toolResult' || message.toolName !== toolName) return message;
+    const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
+    if (text.startsWith(FOLDED)) return message;
+    changed++;
+    return { ...message, content: [{ type: 'text' as const, text: `${FOLDED} read it again with ${toolName}, or read_context ${contextRecordId(message)} for this exact result]\n${text.split('\n', 1)[0]}` }] };
+  });
+  return { messages: folded, changed };
+}
 export interface ContextCheckpoint {
   identity: string;
   generation: number;

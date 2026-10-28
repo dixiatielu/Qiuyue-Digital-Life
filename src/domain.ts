@@ -11,7 +11,11 @@ export interface EnvironmentEvent {
   status: 'pending' | 'processing' | 'processed';
   receivedAt?: number;
 }
-export type MemoryKind = 'experience' | 'understanding' | 'fiction' | 'note';
+export type MemoryKind = 'experience' | 'understanding' | 'fiction' | 'note' | DevelopmentKind;
+/** The digital life's own development (ADR-0012): always supplied by scope, never left to chance recall. */
+export type DevelopmentKind = 'habit' | 'practice' | 'impression';
+export const developmentKinds: readonly DevelopmentKind[] = ['habit', 'practice', 'impression'];
+export const isDevelopment = (kind: string): kind is DevelopmentKind => (developmentKinds as readonly string[]).includes(kind);
 export interface Memory {
   id: string;
   kind: MemoryKind;
@@ -23,6 +27,8 @@ export interface Memory {
   fictional: boolean;
   sources: string[];
   supersedes?: string;
+  /** Where development applies: global, group:<id>, or person:<qq>. Absent for other kinds. */
+  scope?: string;
   active: boolean;
   createdAt: number;
 }
