@@ -122,14 +122,18 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
   const allowed = (action: SnowLumaActionDefinition) => allowedSnowLumaAction(action, config.snowluma.tools);
   const common = new Set([
     'send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg',
-    'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'delete_msg',
+    'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg',
     'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone',
     'get_ai_characters', 'send_group_ai_record',
   ]);
+  const quote = 'To quote a message, make the first segment {"type":"reply","data":{"id":"<messageId>"}} using the messageId of an actual message event or send receipt (negative values are valid), followed by text segments, for example [{"type":"reply","data":{"id":"-12"}},{"type":"text","data":{"text":"..."}}]. A plain string sends without a quote.';
   const usage: Record<string, string> = {
+    send_group_msg: quote,
+    send_private_msg: quote,
     fetch_custom_face_detail: 'Returns saved emoji_id values, image URLs, and possibly empty descriptions. Choose based on actual content; do not guess image meanings.',
     send_custom_face: 'Use an emoji_id from an actual fetch_custom_face_detail result. For a group pass group_id=<actual group ID> and emoji_id=<saved ID>; for a private chat use user_id instead. Specify only one target.',
-    add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success.',
+    add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success; after a successful save, use its returned emoji_id with modify_custom_face to add a description based on the image actually seen. If the outcome is unknown, verify it before taking further action.',
+    modify_custom_face: 'Set desc to a concise description of the actual image and its suitable emotional or conversational use. Use the emoji_id returned by a successful add_custom_face or an actual fetch_custom_face_detail result; do not guess image content.',
     delete_msg: 'The message_id must come from an actual message event or send receipt; negative values may also be valid.',
     get_qzone_feeds: 'A post tid may be null. For pagination use next_cursor unchanged; do not invent a missing tid or content.',
     get_qzone_msg_detail: 'Query using the actual post tid and its owner target_uin. Omitting target_uin refers to your own Qzone. Inline replies may be incomplete.',

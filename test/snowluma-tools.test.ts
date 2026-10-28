@@ -22,7 +22,7 @@ test('generated native tools expose canonical SDK names and schemas directly', a
       assert.match(action.name, /^[a-zA-Z0-9_-]{1,64}$/);
       const tool = f.tools.current().find(tool => tool.name === action.name)!;
       assert.ok(tool, action.name); assert.deepEqual(tool.parameters, action.inputSchema);
-      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record'].includes(action.name)) assert.equal(tool.description, action.summary ?? action.name);
+      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record'].includes(action.name)) assert.equal(tool.description, action.summary ?? action.name);
       assert.equal(findSnowLumaAction(action.name), action);
     }
   } finally { f.store.close(); }
@@ -32,10 +32,12 @@ test('common social tools include guidance for real identifiers and space visibi
   const f = fixture();
   try {
     const descriptions = new Map(f.tools.current().map(tool => [tool.name, tool.description]));
-    for (const name of ['fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone']) {
+    for (const name of ['fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone']) {
       assert.match(descriptions.get(name)!, new RegExp(`SnowLuma native interface ${name}`));
     }
     assert.match(descriptions.get('send_custom_face')!, /fetch_custom_face_detail.*actual/);
+    assert.match(descriptions.get('add_custom_face')!, /successful save.*emoji_id.*modify_custom_face/);
+    assert.match(descriptions.get('modify_custom_face')!, /desc.*actual image.*emoji_id/);
     assert.match(descriptions.get('delete_msg')!, /negative values may also be valid/);
     assert.match(descriptions.get('send_qzone_msg')!, /default is visible to everyone.*64 means only yourself.*target_uins/);
     assert.match(descriptions.get('comment_qzone')!, /parent comment ID.*reply_uin.*reply_name/);
