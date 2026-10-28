@@ -1,8 +1,8 @@
 import { ui } from './ui-language.js';
-import { Input, Markdown, ProcessTerminal, ScrollView, Text, TuiAltScreen, VStack, matchesKey, styleText, truncateToWidth, getTerminalColorMode, type Component, type MarkdownTheme, type Terminal, type TuiMouseEvent } from '@earendil-works/pi-tui';
+import { Input, Markdown, ProcessTerminal, ScrollView, Text, TuiAltScreen, VStack, indexedColor, matchesKey, styleText, truncateToWidth, getTerminalColorMode, type Component, type MarkdownTheme, type Terminal, type TuiMouseEvent } from '@earendil-works/pi-tui';
 import { callControl } from './control.js';
 import { followDisplay } from './display-client.js';
-import { plainText, type DisplayItem, type DisplayPacket, type DisplayStatus } from './monitor.js';
+import { busyLabel, plainText, type DisplayItem, type DisplayPacket, type DisplayStatus } from './monitor.js';
 
 const labels = (): Record<string, string> => ({
   pending: ui('Waiting for remote receipt', '等待远端回执'), success: ui('Success', '成功'), failed: ui('Failed', '失败'), unknown: ui('Unknown', '结果未知'),
@@ -14,6 +14,10 @@ const time = (at: number) => new Date(at).toLocaleTimeString('zh-CN', { hour12: 
 const humanTokens = (value: number | undefined) => value === undefined || !Number.isFinite(value) ? '—' : value >= 1024 ? `${(value / 1024).toFixed(1)}K` : String(value);
 const bold = (text: string) => styleText(text, { bold: true }, getTerminalColorMode());
 const dim = (text: string) => styleText(text, { dim: true }, getTerminalColorMode());
+const accent = (text: string) => styleText(text, { fg: indexedColor(6), bold: true }, getTerminalColorMode());
+const spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const spinnerMs = 80;
+const elapsed = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
 const theme: MarkdownTheme = {
   heading: bold, link: text => text, linkUrl: dim, code: text => text, codeBlock: text => text,
   codeBlockBorder: dim, quote: text => text, quoteBorder: dim, hr: dim, listBullet: text => text,
@@ -66,36 +70,49 @@ export class DisplayModel {
 export class Timeline implements Component {
   private rows = new Map<number, string>();
   private markdown = new Map<string, Markdown>();
+  private cache = new Map<string, { item: DisplayItem; width: number; selected: boolean; expanded: boolean; lines: string[] }>();
   constructor(readonly model: DisplayModel) {}
-  invalidate() { for (const markdown of this.markdown.values()) markdown.invalidate(); }
+  invalidate() { this.cache.clear(); for (const markdown of this.markdown.values()) markdown.invalidate(); }
   rowOf(id: string) { for (const [row, itemId] of this.rows) if (id === itemId) return row; return undefined; }
+  private renderItem(item: DisplayItem, width: number, selected: boolean, expanded: boolean) {
+    const lines: string[] = [];
+    const stateLabel = item.type === 'environment' ? ({ pending: ui('Waiting for observation', '等待观察'), processing: ui('Waiting to be included', '等待纳入'), accepted: ui('Included in observation', '已纳入观察'), processed: ui('Recorded', '已记录') } as Record<string, string>)[item.state ?? ''] : labels()[item.state ?? ''];
+    const state = item.state ? `[${stateLabel ?? item.state}] ` : '';
+    if (state && width < 40) lines.push(...new Text(state.trim(), 0, 0).render(Math.max(1, width)));
+    const title = `${selected ? '›' : ' '}${width < 40 ? '' : state}${time(item.at)}  ${plainText(item.title)}`;
+    lines.push(truncateToWidth(selected ? bold(title) : title, width));
+    let body = plainText(item.text);
+    if (!expanded && item.type !== 'assistant') body = body.split('\n').slice(0, 3).join('\n').slice(0, 400);
+    if (body) {
+      if (item.type === 'assistant') {
+        let markdown = this.markdown.get(item.id);
+        if (!markdown) { markdown = new Markdown(body, 2, 0, theme); this.markdown.set(item.id, markdown); }
+        else markdown.setText(body);
+        lines.push(...markdown.render(Math.max(1, width)));
+      } else lines.push(...new Text(body, width > 4 ? 2 : 0, 0).render(Math.max(1, width)));
+    }
+    if (expanded && item.details) lines.push(...new Text(plainText(item.details), width > 4 ? 2 : 0, 0).render(Math.max(1, width)));
+    if (item.details) lines.push(truncateToWidth(dim(`  [${expanded ? ui('Expanded', '已展开') : ui('Click or press Tab to expand details', '点击或 Tab 展开详情')}]`), width));
+    lines.push('');
+    return lines.map(line => truncateToWidth(line, width));
+  }
   render(width: number) {
     this.rows.clear();
     const items = this.model.visible(); const lines: string[] = [];
     const active = new Set(items.map(item => item.id));
     for (const id of this.markdown.keys()) if (!active.has(id)) this.markdown.delete(id);
+    for (const id of this.cache.keys()) if (!active.has(id)) this.cache.delete(id);
     for (const item of items) {
       const start = lines.length;
-      const selected = this.model.selected === item.id;
-      const stateLabel = item.type === 'environment' ? ({ pending: ui('Waiting for observation', '等待观察'), processing: ui('Waiting to be included', '等待纳入'), accepted: ui('Included in observation', '已纳入观察'), processed: ui('Recorded', '已记录') } as Record<string, string>)[item.state ?? ''] : labels()[item.state ?? ''];
-      const state = item.state ? `[${stateLabel ?? item.state}] ` : '';
-      if (state && width < 40) lines.push(...new Text(state.trim(), 0, 0).render(Math.max(1, width)));
-      const title = `${selected ? '›' : ' '}${width < 40 ? '' : state}${time(item.at)}  ${plainText(item.title)}`;
-      lines.push(truncateToWidth(selected ? bold(title) : title, width));
-      const expanded = this.model.expanded.has(item.id);
-      let body = plainText(item.text);
-      if (!expanded && item.type !== 'assistant') body = body.split('\n').slice(0, 3).join('\n').slice(0, 400);
-      if (body) {
-        if (item.type === 'assistant') {
-          let markdown = this.markdown.get(item.id);
-          if (!markdown) { markdown = new Markdown(body, 2, 0, theme); this.markdown.set(item.id, markdown); }
-          else markdown.setText(body);
-          lines.push(...markdown.render(Math.max(1, width)));
-        } else lines.push(...new Text(body, width > 4 ? 2 : 0, 0).render(Math.max(1, width)));
+      const selected = this.model.selected === item.id; const expanded = this.model.expanded.has(item.id);
+      // Packets replace an item object whenever it changes, so identity is a sufficient cache key;
+      // this keeps spinner frames from re-wrapping the whole timeline.
+      let cached = this.cache.get(item.id);
+      if (cached?.item !== item || cached.width !== width || cached.selected !== selected || cached.expanded !== expanded) {
+        cached = { item, width, selected, expanded, lines: this.renderItem(item, width, selected, expanded) };
+        this.cache.set(item.id, cached);
       }
-      if (expanded && item.details) lines.push(...new Text(plainText(item.details), width > 4 ? 2 : 0, 0).render(Math.max(1, width)));
-      if (item.details) lines.push(truncateToWidth(dim(`  [${expanded ? ui('Expanded', '已展开') : ui('Click or press Tab to expand details', '点击或 Tab 展开详情')}]`), width));
-      lines.push('');
+      lines.push(...cached.lines);
       for (let row = start; row < lines.length; row++) this.rows.set(row, item.id);
     }
     if (!items.length) lines.push(...new Text(this.model.filter ? ui('No matching records; use /filter all to clear the filter.', '没有匹配的记录；/filter all 清除筛选。') : ui('Waiting for environment events and model activity…', '等待环境事件和模型活动……'), 0, 0).render(Math.max(1, width)));
@@ -103,7 +120,7 @@ export class Timeline implements Component {
       const quiet = [...this.model.items.values()].filter(item => item.quiet).length;
       if (quiet) lines.push(truncateToWidth(dim(ui(`${quiet} heartbeat records collapsed; use /filter heartbeat to view`, `已折叠 ${quiet} 条心跳记录；/filter heartbeat 查看`)), width));
     }
-    return lines.map(line => truncateToWidth(line, width));
+    return lines;
   }
   handleMouse(event: TuiMouseEvent) {
     if (event.type !== 'click' || event.button !== 'left') return;
@@ -112,11 +129,25 @@ export class Timeline implements Component {
   }
 }
 
+/** Shown above the footer only while a thinking run is in progress, like a coding agent's spinner row. */
+export class ActivityLine implements Component {
+  constructor(readonly model: DisplayModel, private now = Date.now) {}
+  get active() { return Boolean(this.model.connected && this.model.status?.busy); }
+  invalidate() {}
+  render(width: number) {
+    const busy = this.model.connected ? this.model.status?.busy : undefined;
+    if (!busy) return [];
+    const now = this.now();
+    return [truncateToWidth(`${accent(spinner[Math.floor(now / spinnerMs) % spinner.length]!)} ${accent(`${plainText(busyLabel(busy))}…`)} ${dim(`(${elapsed(now - busy.since)})`)}`, width)];
+  }
+}
+
 export interface TuiSession { tui: TuiAltScreen; model: DisplayModel; close(): void }
 export function createTui(path: string, terminal: Terminal = new ProcessTerminal()): TuiSession {
   const model = new DisplayModel();
   const tui = new TuiAltScreen(terminal, true, undefined, { mouse: true, scrollToEndIndicator: () => ui(`↓ ${model.unseen} new · Ctrl+End to follow`, `↓ 新增 ${model.unseen} 条 · Ctrl+End 跟随`) });
   const timeline = new Timeline(model);
+  const activity = new ActivityLine(model);
   const scroll = new ScrollView(timeline, { follow: 'end', primary: true });
   const header: Component = { invalidate() {}, render(width) {
     const s = model.status;
@@ -134,13 +165,21 @@ export function createTui(path: string, terminal: Terminal = new ProcessTerminal
   tui.setLayoutRoot(new VStack([
     { component: header, basis: 'auto', shrink: 1 },
     { component: scroll, basis: 0, grow: 1, minSize: 1 },
+    { component: activity, basis: 'auto', shrink: 0 },
     { component: footer, basis: 'auto', shrink: 1 },
     { component: input, basis: 1, minSize: 1 },
   ]));
   tui.setFocus(input);
   let stopped = false;
   let stopFollowing = () => {};
-  const close = () => { if (stopped) return; stopped = true; stopFollowing(); tui.stop(); };
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  // Animate only while busy; the terminal tab's progress indicator mirrors the same state.
+  const syncActivity = () => {
+    if (activity.active === Boolean(ticker) || stopped) return;
+    if (ticker) { clearInterval(ticker); ticker = undefined; } else ticker = setInterval(() => tui.requestRender(), spinnerMs);
+    terminal.setProgress(activity.active);
+  };
+  const close = () => { if (stopped) return; stopped = true; clearInterval(ticker); stopFollowing(); tui.stop(); };
   const localCommands = (value: string) => {
     const [command, ...rest] = value.trim().split(/\s+/u);
     if (command === '/quit' || command === '/exit') { close(); return; }
@@ -171,12 +210,12 @@ export function createTui(path: string, terminal: Terminal = new ProcessTerminal
   stopFollowing = followDisplay(path, packet => {
     model.apply(packet, scroll.isFollowingEnd);
     if (packet.type === 'snapshot') { timeline.invalidate(); tui.resetTextSelection(); }
-    tui.requestRender();
+    syncActivity(); tui.requestRender();
   }, (connected, message) => {
     const previous = model.connectionMessage;
     model.connected = connected; model.connectionMessage = plainText(message);
     if (!connected || model.note === previous) model.note = model.connectionMessage;
-    tui.requestRender();
+    syncActivity(); tui.requestRender();
   });
   return { tui, model, close };
 }
