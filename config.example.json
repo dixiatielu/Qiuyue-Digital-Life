@@ -1,0 +1,59 @@
+{
+  "database": "data/life.sqlite",
+  "socket": "data/control.sock",
+  "personaFile": "persona.example.md",
+  "model": {
+    "provider": "openai",
+    "id": "REPLACE_WITH_A_VISION_MODEL_FROM_MODELS_COMMAND",
+    "apiKeyEnv": "MODEL_API_KEY"
+  },
+  "snowluma": {
+    "url": "ws://127.0.0.1:3001",
+    "tokenEnv": "SNOWLUMA_TOKEN",
+    "selfId": 123456789,
+    "groups": [
+      123456789
+    ],
+    "tools": {
+      "allow": "*",
+      "deny": []
+    },
+    "maxStreamBytes": 32000000
+  },
+  "life": {
+    "enabled": false,
+    "allowFiction": false,
+    "minWakeMs": 60000
+  },
+  "limits": {
+    "batchSize": 20,
+    "debounceMs": 800,
+    "tickMs": 500,
+    "modelCallsPerDay": null,
+    "actionsPerHour": null,
+    "runTimeoutMs": null,
+    "maxTurnsPerRun": null,
+    "maxImages": 4,
+    "contextTokens": 262144,
+    "outputReserveTokens": 32768,
+    "contextSafetyTokens": 2048
+  },
+  "memory": {
+    "retentionDays": 90,
+    "recallLimit": 8,
+    "recentEvents": 30,
+    "reflectionEveryEvents": 100
+  },
+  "web": {
+    "enabled": true,
+    "searchUrl": "https://api.deepseek.com/v1/tools/search",
+    "searchKeyEnv": "DEEPSEEK_API_KEY",
+    "timeoutMs": 15000,
+    "maxBytes": 2000000
+  },
+  "compaction": {
+    "keepRecentTokens": 12000,
+    "summaryMaxTokens": 2048,
+    "retries": 1
+  }
+}

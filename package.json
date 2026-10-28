@@ -1,0 +1,31 @@
+{
+  "name": "qiuyue-digital-life",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^24.22.1 || >=26.12.1"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "sync:snowluma": "node scripts/sync-snowluma-catalog.mjs",
+    "test": "tsx --test test/*.test.ts",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
+    "@snowluma/sdk": "2.2.1",
+    "typebox": "1.3.27"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "8.18.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "ws": "8.22.0"
+  }
+}
