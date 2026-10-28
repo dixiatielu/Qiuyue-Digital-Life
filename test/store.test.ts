@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
 import { handleControl } from '../src/control.js';
@@ -119,4 +120,19 @@ test('whole pause stops wakes; life off keeps commitments and blocks life plans'
     store.setSetting('lifeEnabled', true); store.enqueueDue(); assert.equal(store.pending(), 1);
     store.setSetting('lifeEnabled', false); assert.equal(store.claim(10, false), undefined);
   } finally { store.close(); }
+});
+
+test('events from before receive times were recorded count as overdue, and ambient events are timed separately', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'life-received-')); const path = join(dir, 'life.sqlite');
+  const legacy = new DatabaseSync(path);
+  legacy.exec("CREATE TABLE events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, group_id INTEGER, actor_id INTEGER, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT); INSERT INTO events(id,source_key,kind,at,text,payload) VALUES ('e:old','old','message',1,'Before upgrade','{}')");
+  legacy.close();
+  const store = new Store(path);
+  try {
+    assert.deepEqual(store.pendingTiming(), { first: 0, last: 0, ambient: undefined });
+    assert.equal(store.event('e:old')?.receivedAt, undefined);
+    const typing = store.receive({ key: 'typing', kind: 'notice:notify:input_status', at: 2000, actorId: 7, text: 'notify', payload: {} })!;
+    assert.deepEqual(store.pendingTiming(), { first: 0, last: typing.receivedAt, ambient: typing.receivedAt });
+    assert.equal(store.event(typing.id)?.receivedAt, typing.receivedAt);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });

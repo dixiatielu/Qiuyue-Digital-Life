@@ -1,13 +1,16 @@
 import type { Config } from './config.js';
 import type { Brain } from './brain.js';
-import { Store } from './store.js';
+import { Store, type PendingTiming } from './store.js';
 import { errorText } from './domain.js';
 
 export class LifeRuntime {
   private timer?: ReturnType<typeof setInterval>;
   private work?: Promise<void>;
+  private steering: Promise<void> = Promise.resolve();
+  private consolidating = false;
+  private consolidated = false;
+  private settledAt = 0;
   private ticking = false;
-  private lastDispatch = 0;
   private retryAfter = 0;
   private stopped = false;
   private started = false;
@@ -38,12 +41,24 @@ export class LifeRuntime {
         this.store.receive({ key: `maintenance:${watermark}:${count}`, kind: 'memory_maintenance', at: now, text: 'Review recent experiences and organize important understandings, relationship changes, and personal notes; there is no need to speak in a group.', payload: {} });
         this.store.setSetting('reflectionWatermark', count);
       }
-      if (now - this.lastDispatch < this.config.limits.debounceMs || (this.work && !this.brain.streaming)) return;
+      const pending = this.store.pendingTiming(settings.lifeEnabled);
+      // Events received above (due wakes, maintenance) are stamped after `now`; time them against a later clock.
+      const checkedAt = Date.now();
+      // Consolidation is housekeeping: an event that can wake a thought takes attention back at once.
+      if (this.consolidating) { if (pending.first !== undefined) this.brain.abort(); return; }
+      if (this.work && !this.brain.streaming) return;
+      if (!this.ready(pending, checkedAt)) {
+        if (!this.work && !this.consolidated && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs) this.consolidate();
+        return;
+      }
       const observation = this.store.claim(this.config.limits.batchSize, settings.lifeEnabled);
       if (!observation) return;
-      this.lastDispatch = now;
+      this.store.log('observation_dispatched', { batchId: observation.batchId, mode: this.work ? 'steer' : 'run', events: observation.events.length, waitedMs: checkedAt - Math.min(...observation.events.map(event => event.receivedAt ?? checkedAt)) });
       if (this.work) {
-        if (!await this.brain.steer(observation)) this.store.releaseBatch(observation.batchId);
+        // Image downloads must not hold the tick; chaining keeps steered observations in arrival order.
+        this.steering = this.steering.then(() => this.brain.steer(observation)).then(accepted => { if (!accepted) this.store.releaseBatch(observation.batchId); }, error => {
+          this.store.log('runtime_error', { message: errorText(error) }); this.store.releaseBatch(observation.batchId);
+        });
       } else {
         const timeout = this.config.limits.runTimeoutMs === null ? undefined : setTimeout(() => this.brain.abort(), this.config.limits.runTimeoutMs);
         this.work = this.brain.run(observation).catch(error => {
@@ -51,13 +66,27 @@ export class LifeRuntime {
         }).finally(() => {
           if (timeout !== undefined) clearTimeout(timeout);
           this.store.releaseClaims(); this.work = undefined;
+          this.settledAt = Date.now(); this.consolidated = false;
         });
       }
     } catch (error) { this.store.log('runtime_error', { message: errorText(error) }); }
     finally { this.ticking = false; }
   }
-  async idle() { await this.work; }
-  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); await this.work; }
+  /** A burst starts one thought once the environment goes quiet; ambient events never wake or steer on their own. */
+  private ready({ first, last, ambient }: PendingTiming, now: number) {
+    const { debounceMs, maxDelayMs, ambientDelayMs } = this.config.limits;
+    if (first === undefined) return !this.work && ambient !== undefined && now - ambient >= ambientDelayMs;
+    return this.work !== undefined || now - (last ?? first) >= debounceMs || now - first >= maxDelayMs;
+  }
+  /** Compact an oversized working context once per idle period, so a later observation does not wait for it. */
+  private consolidate() {
+    this.consolidated = true; this.consolidating = true;
+    this.work = this.brain.consolidate().catch(error => { this.store.log('consolidation_stopped', { message: errorText(error) }); }).finally(() => {
+      this.consolidating = false; this.work = undefined;
+    });
+  }
+  async idle() { await this.work; await this.steering; }
+  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); await this.work; await this.steering; }
   control(command: string, value?: boolean) {
     this.store.transaction(() => {
       if (command === 'pause' || command === 'resume') this.store.setSetting('paused', command === 'pause');
@@ -66,7 +95,7 @@ export class LifeRuntime {
       this.store.bumpGeneration();
     });
     this.brain.abort();
-    if (command === 'resume') { this.retryAfter = 0; this.lastDispatch = 0; }
+    if (command === 'resume') this.retryAfter = 0;
     if (command === 'life' && value && !this.store.wakes().some(wake => wake.kind === 'life')) this.store.schedule('Plan your own life according to your current persona and interests.', 'life', Date.now());
     this.store.log('control', { command, value });
     return this.store.status();

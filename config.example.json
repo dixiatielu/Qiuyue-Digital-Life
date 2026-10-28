@@ -27,7 +27,9 @@
   },
   "limits": {
     "batchSize": 20,
-    "debounceMs": 800,
+    "debounceMs": 1200,
+    "maxDelayMs": 4000,
+    "ambientDelayMs": 120000,
     "tickMs": 500,
     "modelCallsPerDay": null,
     "actionsPerHour": null,
@@ -54,6 +56,8 @@
   "compaction": {
     "keepRecentTokens": 12000,
     "summaryMaxTokens": 2048,
-    "retries": 1
+    "retries": 1,
+    "idleRatio": 0.85,
+    "idleAfterMs": 30000
   }
 }

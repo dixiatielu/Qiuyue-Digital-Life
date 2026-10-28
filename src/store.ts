@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Action, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Wake } from './domain.js';
-import { isHeartbeat } from './domain.js';
+import { isAmbient, isHeartbeat } from './domain.js';
 import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 
@@ -11,8 +11,11 @@ const json = (value: unknown) => JSON.stringify(value);
 const parse = <T>(value: unknown): T => JSON.parse(String(value)) as T;
 const id = (prefix: string) => `${prefix}:${randomUUID()}`;
 export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
+const claimable = "status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life')";
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
 
+/** Local receive times of claimable events: the earliest waking one, the latest of any kind, and the earliest ambient one. */
+export interface PendingTiming { first?: number; last?: number; ambient?: number }
 export type StoreNotice =
   | { kind: 'environment'; event: EnvironmentEvent }
   | { kind: 'action'; action: Action }
@@ -26,9 +29,10 @@ export class Store {
   constructor(path: string, lifeEnabled = false) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
+    this.db.function('ambient', { deterministic: true }, kind => isAmbient(String(kind)) ? 1 : 0);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, group_id INTEGER, actor_id INTEGER, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT);
+      CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, group_id INTEGER, actor_id INTEGER, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT, received_at INTEGER);
       CREATE INDEX IF NOT EXISTS events_pending ON events(status, at);
       CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, importance INTEGER NOT NULL, subjects TEXT NOT NULL, groups_json TEXT NOT NULL, fictional INTEGER NOT NULL, supersedes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sources(owner_id TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(owner_id,source_id));
@@ -48,6 +52,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS context_records(id TEXT PRIMARY KEY, at INTEGER NOT NULL, message TEXT NOT NULL, source_ids TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS working_context(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
     `);
+    // Source timestamps have second precision and remote clocks; scheduling needs the local receive time.
+    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='received_at'").get()) this.db.exec('ALTER TABLE events ADD COLUMN received_at INTEGER');
     for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0 })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
   }
   close() { this.db.close(); }
@@ -145,21 +151,21 @@ export class Store {
       for (const compacted of compactions) this.log('context_compacted', compacted);
     });
   }
-  receive(input: Omit<EnvironmentEvent, 'id' | 'status'>, processed = false): EnvironmentEvent | undefined {
+  receive(input: Omit<EnvironmentEvent, 'id' | 'status' | 'receivedAt'>, processed = false): EnvironmentEvent | undefined {
     processed ||= isHeartbeat(input.kind);
     if (this.db.prepare('SELECT 1 FROM tombstones WHERE source_key=?').get(input.key)) return;
-    const eventId = id('e');
-    const result = this.db.prepare('INSERT OR IGNORE INTO events(id,source_key,kind,at,group_id,actor_id,text,payload,status) VALUES (?,?,?,?,?,?,?,?,?)').run(eventId, input.key, input.kind, input.at, input.groupId ?? null, input.actorId ?? null, input.text, json(input.payload), processed ? 'processed' : 'pending');
+    const eventId = id('e'); const receivedAt = Date.now();
+    const result = this.db.prepare('INSERT OR IGNORE INTO events(id,source_key,kind,at,group_id,actor_id,text,payload,status,received_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(eventId, input.key, input.kind, input.at, input.groupId ?? null, input.actorId ?? null, input.text, json(input.payload), processed ? 'processed' : 'pending', receivedAt);
     if (!result.changes) return;
-    const event: EnvironmentEvent = { ...input, id: eventId, status: processed ? 'processed' : 'pending' };
+    const event: EnvironmentEvent = { ...input, id: eventId, status: processed ? 'processed' : 'pending', receivedAt };
     this.notify({ kind: 'environment', event }); return event;
   }
-  private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, groupId: row.group_id ?? undefined, actorId: row.actor_id ?? undefined, text: row.text, payload: parse(row.payload), status: row.status }; }
+  private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, groupId: row.group_id ?? undefined, actorId: row.actor_id ?? undefined, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined }; }
   event(eventId: string): EnvironmentEvent | undefined { const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(eventId); return row ? this.eventRow(row) : undefined; }
   recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
   claim(limit: number, allowLife = true): { batchId: string; events: EnvironmentEvent[] } | undefined {
     return this.transaction(() => {
-      const rows = this.db.prepare("SELECT * FROM events WHERE status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') ORDER BY at,rowid LIMIT ?").all(allowLife ? 1 : 0, limit);
+      const rows = this.db.prepare(`SELECT * FROM events WHERE ${claimable} ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, limit);
       if (!rows.length) return;
       const batchId = id('b');
       for (const row of rows) this.db.prepare("UPDATE events SET status='processing',batch_id=? WHERE id=?").run(batchId, String(row.id));
@@ -188,6 +194,12 @@ export class Store {
       for (const row of pending) this.notify({ kind: 'action', action: this.actionById(String(row.id))! });
       this.notify({ kind: 'state' });
     });
+  }
+  pendingTiming(allowLife = true): PendingTiming {
+    // Rows from before received_at existed count as long overdue.
+    const row = this.db.prepare(`SELECT min(CASE WHEN ambient(kind) THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient(kind) THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0)!;
+    const time = (value: unknown) => value == null ? undefined : Number(value);
+    return { first: time(row.first), last: time(row.last), ambient: time(row.ambient) };
   }
   pending() { return Number(this.db.prepare("SELECT count(*) AS n FROM events WHERE status='pending'").get()!.n); }
   processedCount() { return this.setting<number>('processedTotal'); }

@@ -8,7 +8,7 @@ import type { SocialAdapter } from '../src/snowluma.js';
 export function config() {
   const value = loadConfig(new URL('../config.example.json', import.meta.url).pathname);
   value.snowluma.selfId = 900; value.snowluma.groups = [100, 200]; value.web.enabled = false;
-  value.limits.tickMs = 10000; value.limits.debounceMs = 1;
+  value.limits.tickMs = 10000; value.limits.debounceMs = 0;
   return value;
 }
 export function event(store: Store, text = 'Hello', groupId = 100, key = crypto.randomUUID()) {
