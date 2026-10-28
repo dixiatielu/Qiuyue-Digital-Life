@@ -7,7 +7,7 @@ import { visibleWidth, type Terminal, type ProgramStatus } from '@earendil-works
 import { Store } from '../src/store.js';
 import { Monitor, plainText } from '../src/monitor.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
-import { createTui, DisplayModel, Timeline } from '../src/tui.js';
+import { ActivityLine, createTui, DisplayModel, Timeline } from '../src/tui.js';
 import { config, event } from './helpers.js';
 
 async function waitFor(predicate: () => boolean, message: string) {
@@ -20,6 +20,7 @@ class TestTerminal implements Terminal {
   private input?: (data: string) => void;
   private resize?: () => void;
   output = '';
+  progress: boolean[] = [];
   start(input: (data: string) => void, resize: () => void) { this.input = input; this.resize = resize; }
   stop() { this.stopped = true; }
   async drainInput() {}
@@ -28,7 +29,7 @@ class TestTerminal implements Terminal {
   type(data: string) { for (const char of data) this.key(char); }
   size(columns: number, rows: number) { this.columns = columns; this.rows = rows; this.resize?.(); }
   moveBy(_lines: number) {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {}
-  setTitle(_title: string) {} setProgress(_active: boolean) {} setProgramStatus(_status: ProgramStatus) {}
+  setTitle(_title: string) {} setProgress(active: boolean) { this.progress.push(active); } setProgramStatus(_status: ProgramStatus) {}
 }
 
 test('timeline renders Chinese, emoji and markdown at narrow widths, and filters without deleting records', () => {
@@ -56,6 +57,31 @@ test('timeline renders Chinese, emoji and markdown at narrow widths, and filters
   } finally { monitor.close(); store.close(); }
 });
 
+test('activity line animates while thinking and disappears when idle or disconnected', () => {
+  const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
+  try {
+    const model = new DisplayModel(); model.connected = true;
+    let now = Date.now();
+    const activity = new ActivityLine(model, () => now);
+    model.apply(monitor.snapshot()); assert.deepEqual(activity.render(80), []);
+    monitor.startRun('run:test', { batchId: 'batch:test', events: [] });
+    monitor.agentEvent({ type: 'turn_start' });
+    model.apply(monitor.snapshot());
+    now = model.status!.busy!.since + 75_000;
+    const first = activity.render(80);
+    assert.equal(first.length, 1);
+    assert.match(plainText(first[0]!), /^\S Thinking… \(1m 15s\)$/);
+    now += 80; assert.notEqual(activity.render(80)[0], first[0]);
+    for (const width of [1, 5, 12]) assert.ok(activity.render(width).every(line => visibleWidth(line) <= width), `width ${width}`);
+    monitor.agentEvent({ type: 'tool_execution_start', toolCallId: 't:1', toolName: 'recall', args: {} });
+    model.apply(monitor.snapshot());
+    assert.match(plainText(activity.render(80)[0]!), /Running recall…/);
+    model.connected = false; assert.deepEqual(activity.render(80), []);
+    model.connected = true; monitor.endRun(); model.apply(monitor.snapshot());
+    assert.deepEqual(activity.render(80), []);
+  } finally { monitor.close(); store.close(); }
+});
+
 test('interactive TUI scrolls, follows output, confirms controls and detaches without stopping the daemon', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'life-tui-')); const path = join(dir, 'control.sock');
   const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
@@ -76,6 +102,10 @@ test('interactive TUI scrolls, follows output, confirms controls and detaches wi
     assert.equal(session.tui.viewportTop, top);
     terminal.key('\x1b[1;5F');
     await waitFor(() => session.tui.isFollowingOutput, 'Ctrl+End resumes following');
+    monitor.startRun('run:tui', { batchId: 'batch:tui', events: [] }); monitor.agentEvent({ type: 'turn_start' }); monitor.flush();
+    await waitFor(() => session.tui.getScreenLines().some(line => plainText(line).includes('Thinking…')) && terminal.progress.at(-1) === true, 'thinking indicator');
+    monitor.endRun(); monitor.flush();
+    await waitFor(() => !session.tui.getScreenLines().some(line => plainText(line).includes('Thinking…')) && terminal.progress.at(-1) === false, 'indicator cleared');
     terminal.type('/pause\r');
     await waitFor(() => store.settings().paused && session.model.note.includes('confirmed'), 'pause acknowledgement');
     terminal.type('/resume\r');

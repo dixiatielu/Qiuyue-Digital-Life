@@ -63,6 +63,9 @@ test('real Pi deltas, queued steering and tool execution appear live while unkno
     assert.equal(store.event(source.id)?.status, 'processing');
     await entered.promise;
     assert.ok(monitor.snapshot().items.some(item => item.type === 'tool' && item.state === 'running'));
+    assert.deepEqual({ ...monitor.snapshot().status.busy, since: 0 }, { stage: 'tool', tool: 'send_group_msg', since: 0 });
+    const stages = packets.flatMap(packet => packet.type === 'event' && packet.change.type === 'status' && packet.change.status.busy ? [packet.change.status.busy.stage] : []);
+    assert.ok(stages.includes('thinking') && stages.includes('writing'), stages.join());
     event(store, 'New message from another setting', 200);
     const steering = store.claim(10)!;
     assert.equal(await brain.steer(steering), true);
@@ -73,6 +76,7 @@ test('real Pi deltas, queued steering and tool execution appear live while unkno
     assert.ok(snapshot.items.some(item => item.type === 'action' && item.state === 'unknown'));
     assert.ok(snapshot.items.some(item => item.type === 'tool' && item.state === 'error'));
     assert.equal(snapshot.status.phase, 'Idle');
+    assert.equal(snapshot.status.busy, undefined);
     assert.ok(!JSON.stringify(packets).includes('private-thought-never-publish'));
     assert.equal(store.pending(), 0);
     assert.equal(snapshot.items.find(item => item.id === source.id)?.state, 'processed');
