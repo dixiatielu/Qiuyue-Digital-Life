@@ -3,6 +3,7 @@ import { conversationOf, eventRef, type Store } from './store.js';
 
 const ZONE_OFFSET = 8 * 3_600_000;
 const LINE_LIMIT = 300;
+const QUOTE_LIMIT = 40;
 /** Asia/Shanghai wall-clock time; the record is read in the same zone as runtime_data. */
 const local = (at: number) => new Date(at + ZONE_OFFSET).toISOString();
 export const recordTime = (at: number) => local(at).replace('Z', '+08:00');
@@ -15,7 +16,8 @@ interface Page { lines: string[]; last?: number }
 /** Render one conversation faithfully and in order; what to learn from it is left to the reader. */
 export class ChatRecord {
   private names = new Map<number, string>();
-  constructor(private store: Store, private selfId: number, private conversation: string) { conversationOf(conversation); }
+  /** faces names QQ system faces by ID, so reactions read as what they show. */
+  constructor(private store: Store, private selfId: number, private conversation: string, private faces: Record<string, string> = {}) { conversationOf(conversation); }
 
   /** Read forward from a time; reports the time of the first item not included. */
   page(from: number, limit: number): { text: string; next?: number; through?: number } {
@@ -82,7 +84,7 @@ export class ChatRecord {
       const line = reaction && messages.get(reaction.messageId);
       if (line !== undefined) { lines[line] += `\n  ↳ ${reaction!.text}`; continue; }
       if (day(item.at) !== date) { date = day(item.at); lines.push(`— ${date} —`); }
-      lines.push(`${clock(item.at)} ${reaction ? `${reaction.text} to ${this.target(reaction.messageId)}` : this.line(item)}`);
+      lines.push(`${clock(item.at)} ${reaction ? `${reaction.text} to ${this.target(reaction.messageId, true)}` : this.line(item)}`);
       const messageId = item.event?.kind === 'message' ? Number(item.event.payload.message_id) : isSend(item.action) ? Number((item.action!.result as { message_id?: unknown } | null)?.message_id) : NaN;
       if (Number.isFinite(messageId)) messages.set(messageId, lines.length - 1);
     }
@@ -95,13 +97,25 @@ export class ChatRecord {
     if (event?.kind.startsWith('notice:group_msg_emoji_like:')) {
       const likes = Array.isArray(event.payload.likes) ? event.payload.likes as { emoji_id?: unknown; count?: unknown }[] : [];
       const who = this.name(Number(event.payload.operator_id ?? event.actorId));
-      return { messageId: Number(event.payload.message_id), text: `${who} ${event.kind.endsWith(':remove') ? 'removed reaction' : 'reacted'} ${likes.map(like => `[emoji ${like.emoji_id}]`).join('') || '[emoji]'}` };
+      return { messageId: Number(event.payload.message_id), text: `${who} ${event.kind.endsWith(':remove') ? 'removed reaction' : 'reacted'} ${likes.map(like => `[emoji ${this.face(like.emoji_id)}]`).join('') || '[emoji]'}` };
     }
-    if (action?.kind === 'set_group_reaction') return { messageId: Number(action.args.message_id), text: `me ${action.args.is_set === false ? 'removed reaction' : 'reacted'} [emoji ${action.args.code}]` };
+    if (action?.kind === 'set_group_reaction') return { messageId: Number(action.args.message_id), text: `me ${action.args.is_set === false ? 'removed reaction' : 'reacted'} [emoji ${this.face(action.args.code)}]` };
   }
-  private target(messageId: number): string {
+  /** Larger codes are Unicode emoji. */
+  private face(id: unknown): string {
+    const code = String(id);
+    let name = this.faces[code];
+    if (!name && Number(code) >= 1000) { try { name = String.fromCodePoint(Number(code)); } catch { /* not a code point */ } }
+    return name ? `${code} ${name}` : code;
+  }
+  /** quote adds the start of the message, for a reaction shown apart from it. */
+  private target(messageId: number, quote = false): string {
     const event = this.store.messageById(this.conversation, messageId);
-    if (event) return event.actorId === this.selfId ? 'my message' : `${eventRef(event.id)} (${this.name(event.actorId ?? 0)})`;
+    if (event && event.actorId !== this.selfId) {
+      const text = quote ? this.segments(Array.isArray(event.payload.message) ? event.payload.message : event.text).replace(/\s+/g, ' ') : '';
+      return `${eventRef(event.id)} (${this.name(event.actorId ?? 0)}${text ? `: ${text.length > QUOTE_LIMIT ? `${text.slice(0, QUOTE_LIMIT)}…` : text}` : ''})`;
+    }
+    if (event) return 'my message';
     return this.store.sentMessage(messageId) ? 'my message' : `message ${messageId}`;
   }
   private line(item: Item): string {
@@ -122,7 +136,7 @@ export class ChatRecord {
   private actionLine(action: Action): string {
     const args = action.args;
     if (action.kind === 'send_group_msg' || action.kind === 'send_private_msg') return `me: ${clip(this.segments(args.message))}`;
-    if (action.kind === 'send_custom_face') return 'me: [saved sticker]';
+    if (action.kind === 'send_custom_face') { const note = this.store.stickerNote(String(args.emoji_id ?? '')); return `me: [saved sticker${note ? `: ${clip(note)}` : ''}]`; }
     if (action.kind === 'send_group_ai_record') return `me: [AI voice] ${clip(String(args.text ?? ''))}`;
     if (['group_poke', 'friend_poke', 'send_poke'].includes(action.kind)) return `me poked ${this.name(Number(args.user_id ?? args.target_id))}`;
     if (action.kind === 'delete_msg') return `me recalled ${this.target(Number(args.message_id))}`;
@@ -138,7 +152,7 @@ export class ChatRecord {
         case 'at': return data.qq === 'all' ? '@all ' : `@${this.name(Number(data.qq))} `;
         case 'reply': return `[reply to ${this.target(Number(data.id))}] `;
         case 'image': return data.summary && data.summary !== '[图片]' ? `[image ${data.summary}]` : '[image]';
-        case 'face': return `[face ${data.id}]`;
+        case 'face': return `[face ${this.face(data.id)}]`;
         case 'mface': return `[sticker ${data.summary ?? ''}]`;
         case 'record': return '[voice]';
         case 'video': return '[video]';
