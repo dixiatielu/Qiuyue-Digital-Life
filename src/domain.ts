@@ -72,5 +72,11 @@ export interface LifeSettings {
 }
 export const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 export const isHeartbeat = (kind: string): boolean => kind === 'meta_event:heartbeat' || kind.startsWith('meta_event:heartbeat:');
-/** Low-information signals ride along with other observations; they never start or steer a thought on their own. */
-export const isAmbient = (kind: string): boolean => kind === 'notice:notify:input_status' || kind.startsWith('notice:group_msg_emoji_like:');
+/** Low-information signals ride along with other observations; they never start or steer a thought on their own. QQ pushes the digital life's own pokes back as notices that say no more than the poke's receipt. */
+export const isAmbient = (kind: string, actorId?: number, selfId?: number): boolean => kind === 'notice:notify:input_status' || kind.startsWith('notice:group_msg_emoji_like:') || (kind === 'notice:notify:poke' && actorId !== undefined && actorId === selfId);
+/** The chat a message or notice happened in: group:<id> or private:<qq>. */
+export function eventChat(event: EnvironmentEvent): string | undefined {
+  if (event.kind !== 'message' && !event.kind.startsWith('notice:')) return;
+  if (event.groupId !== undefined && event.payload.message_type !== 'private') return `group:${event.groupId}`;
+  return event.actorId === undefined ? undefined : `private:${event.actorId}`;
+}

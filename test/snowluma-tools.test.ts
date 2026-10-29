@@ -133,15 +133,18 @@ test('native sends preserve rich messages, optional fields, private targets and 
   const message = [{ type: 'image', data: { file: 'base64://aGVsbG8=', summary: 'Image' } }, { type: 'face', data: { id: '14' } }];
   try {
     event(f.store);
+    f.faux.setResponses([answer(call('send_group_msg', { group_id: 999, message, auto_escape: false, custom_field: { keep: true } }))]);
+    await f.brain.run(f.store.claim(10)!);
+    // The send ended that thought; its raw receipt comes with the next one.
+    event(f.store, 'Next');
     f.faux.setResponses([
-      answer(call('send_group_msg', { group_id: 999, message, auto_escape: false, custom_field: { keep: true } })),
       context => {
         const result = context.messages.filter(item => item.role === 'toolResult').at(-1)!;
         assert.equal(result.content[0]?.type, 'text');
         assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), { message_id: -42 });
         return answer(call('load_snowluma_tools', { names: ['send_private_msg'] }));
       },
-      answer(call('send_private_msg', { user_id: 7, message: 'Private greeting' })), answer('Done'),
+      answer(call('send_private_msg', { user_id: 7, message: 'Private greeting' })),
     ]);
     await f.brain.run(f.store.claim(10)!);
     assert.deepEqual(f.sent[0], { kind: 'send_group_msg', args: { group_id: 999, message, auto_escape: false, custom_field: { keep: true } } });
@@ -158,9 +161,11 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
   try {
     event(f.store);
     f.faux.setResponses([
-      answer(call('send_private_msg', { user_id: 7, message: [{ type: 'image', data: { file: avif } }] })),
-      answer(call('send_private_forward_msg', { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') })),
-      answer(call('send_group_msg', { group_id: 100, message: [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }] })),
+      answer([
+        call('send_private_msg', { user_id: 7, message: [{ type: 'image', data: { file: avif } }] }),
+        call('send_private_forward_msg', { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') }),
+        call('send_group_msg', { group_id: 100, message: [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }] }),
+      ]),
       answer('Done'),
     ]);
     await f.brain.run(f.store.claim(10)!);

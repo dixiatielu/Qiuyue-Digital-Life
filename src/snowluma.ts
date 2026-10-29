@@ -14,7 +14,8 @@ export function normalizeEvent(raw: Record<string, any>, config: Config['snowlum
   const isMessage = ['message', 'message_sent'].includes(raw.post_type);
   const optionalId = (value: unknown) => value != null && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : undefined;
   const groupId = optionalId(raw.group_id);
-  const actorId = optionalId(raw.user_id);
+  // A private poke names the other person as user_id even when this account poked; sender_id is who poked.
+  const actorId = optionalId(raw.notice_type === 'notify' && raw.sub_type === 'poke' ? raw.sender_id ?? raw.user_id : raw.user_id);
   const segments = !isMessage ? [] : typeof raw.message === 'string' ? fromCQString(raw.message).toSegments() : raw.message;
   const message = Array.isArray(segments) ? segments : [];
   const text = message.map((segment: any) => {

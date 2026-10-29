@@ -1,10 +1,10 @@
-import { Agent, type AgentMessage, type StreamFn } from '@earendil-works/pi-agent-core';
+import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend } from './model.js';
 import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import type { Monitor } from './monitor.js';
 import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
-import { developmentKinds, errorText } from './domain.js';
+import { developmentKinds, errorText, eventChat, isAmbient } from './domain.js';
 import { Store, conversationOf, digest } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
@@ -53,6 +53,14 @@ const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
 const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : tool === 'share_qzone_feed' ? 'qzone_share' : `snowluma:${tool}`;
 // Self-presentation the agent sets and later sees as current state.
 const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
+/** Messages, stickers, reactions, and pokes (ADR-0002): their success receipts need no call of their own, and a newer message in their chat makes an unsent one stale. */
+const socialActions = new Set(['send_private_msg', 'send_group_msg', 'send_msg', 'send_custom_face', 'send_group_ai_record', 'set_group_reaction', 'set_msg_emoji_like', 'send_poke', 'friend_poke', 'group_poke']);
+/** The chat an action is aimed at: group:<id> or private:<qq>. */
+function targetChat(args: unknown): string | undefined {
+  const { group_id: group, user_id: user, message_type: type } = (args ?? {}) as Record<string, unknown>;
+  if (group != null && type !== 'private') return `group:${Number(group)}`;
+  return user != null ? `private:${Number(user)}` : undefined;
+}
 
 interface ObservationMessage { role: 'observation'; batchId: string; content: (TextContent | ImageContent)[]; eventIds: string[]; lifeOnly: boolean; timestamp: number }
 declare module '@earendil-works/pi-agent-core' { interface CustomAgentMessages { observation: ObservationMessage } }
@@ -91,6 +99,17 @@ export class PiBrain implements Brain {
   private pendingRoute = '';
   private compactions: Record<string, unknown>[] = [];
   private readonly stream: StreamFn;
+  /** Where the thought is: preparing a model request, waiting on the model, or acting on its answer. */
+  private phase: 'idle' | 'preparing' | 'calling' | 'acting' = 'idle';
+  /** Chats this thought has acted in or was started from (ADR-0002). */
+  private engaged = new Set<string>();
+  /** Chats where an addressed message arrived while tools ran; actions there not yet started are stale. */
+  private stale = new Set<string>();
+  private preempted = false;
+  private skipped = false;
+  /** Preemptions since a decision was last carried out as made. */
+  private preemptions = 0;
+  private callStartedAt = 0;
   constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor) {
     const { model, stream } = backend ?? createModelBackend(config.model);
     this.stream = stream;
@@ -103,8 +122,12 @@ export class PiBrain implements Brain {
       getApiKey: () => process.env[config.model.apiKeyEnv], toolExecution: 'sequential', steeringMode: 'all',
       convertToLlm: toModelMessages,
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
+      beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
+      afterToolCall: async ({ toolCall, isError }) => socialActions.has(toolCall.name) && !isError ? { terminate: true } : undefined,
       prepareRequest: async ({ context, model: currentModel }, signal) => {
         const first = this.turns === 0;
+        // Observations steered in for stale chats have entered by now.
+        this.phase = 'preparing'; this.stale.clear(); this.skipped = false;
         ensureCurrent(store, this.thought, signal);
         const runtime = this.runtimeContext();
         let messages = [...context.messages];
@@ -120,10 +143,12 @@ export class PiBrain implements Brain {
         if (measured.tokens > budget) throw new Error('Required state or the latest observation exceeds the context budget; reduce the batch size or organize pending items.');
         store.log('context_budget', { runId: this.runId, ...measured, inputBudget: budget, outputReserveTokens: config.limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
         ensureCurrent(store, this.thought, signal);
-        this.chargeCall();
+        // A preemption that came during preparation ends the thought before its call; what preparation did is kept.
+        if (this.preempted) this.agent.abort(); else this.chargeCall();
         // Pi keeps its event transcript separately from the prepared request context.
         this.pendingRequest = messages.slice(); this.pendingRoute = route;
         this.agent.state.messages = messages.slice();
+        this.phase = 'calling'; this.callStartedAt = Date.now();
         return { context: { ...context, messages } };
       },
       finishTurn: () => config.limits.maxTurnsPerRun !== null && this.turns >= config.limits.maxTurnsPerRun ? { action: 'end' } : undefined,
@@ -137,7 +162,12 @@ export class PiBrain implements Brain {
         this.thought.lifeOnly &&= event.message.lifeOnly;
         store.log('observation_entered', { runId: this.runId, batchId: event.message.batchId });
       }
+      if (event.type === 'message_end' && event.message.role === 'assistant') this.phase = 'acting';
+      if (event.type === 'tool_execution_start' && (socialActions.has(event.toolName) || event.toolName === 'share_qzone_feed')) {
+        const chat = targetChat(event.args); if (chat) this.engaged.add(chat);
+      }
       if (event.type === 'turn_end' && event.message.role === 'assistant' && !['error', 'aborted'].includes(event.message.stopReason)) {
+        if (!this.skipped) this.preemptions = 0;
         ensureCurrent(store, this.thought);
         this.meter.observe(this.pendingRequest, event.message, this.pendingRoute);
         store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
@@ -145,7 +175,8 @@ export class PiBrain implements Brain {
       }
     });
   }
-  get streaming() { return this.agent.state.isStreaming; }
+  /** A preempted thought takes no more steering while it winds down. */
+  get streaming() { return this.agent.state.isStreaming && !this.preempted; }
   private display(update: (monitor: Monitor) => void) { if (this.monitor) { try { update(this.monitor); } catch {} } }
   abort() { this.controller.abort(); this.agent.abort(); }
   private instructions(legacy = false) {
@@ -153,7 +184,7 @@ export class PiBrain implements Brain {
 The operator defines your core persona:\n${this.config.persona}\n
 Decide whether to participate based on observations, persona, relationships, interests, and current activity. Silence is also an option. selfId is your QQ account; your own messages are feedback on your actions.
 Native SnowLuma tools perform QQ operations; your ordinary text is not sent to QQ. Do not output chain of thought. You may end briefly or act through tools.
-Each send_group_msg or send_private_msg call sends one message. Line breaks or multiple segments in message still form one message. To send two messages, call the corresponding tool twice in order, with only the relevant content in each call. You need not wait for a reply between messages, but each send must respect the pace of the current setting and actual action receipts.
+Each send_group_msg or send_private_msg call sends one message. Line breaks or multiple segments in message still form one message. To send two messages, call the corresponding tool twice in order, with only the relevant content in each call. You need not wait for a reply between messages, but each send must respect the pace of the current setting and actual action receipts. A batch made only of messages, stickers, reactions, or pokes ends your thought once all of them succeed, and their receipts come with your next observation, so put whatever else you mean to do now, such as another message, a sticker, or a note, in the same batch.
 All enabled SnowLuma interfaces can be called directly using their original names and parameters, including private chats, group members, message deletion, files, emoji, and Qzone. Use search_snowluma_tools to find interfaces and load_snowluma_tools for detailed usage; these queries do not change the tool set. Preserve parameters as provided; file paths belong to the SnowLuma server. Streaming interfaces return ordered arrays of data frames. Both read-only queries and external actions are subject to interface permissions; actions are also subject to budgets and deduplication. Large results retain their source; use read_event to continue reading truncated results. A tool's sourceId can be used with remember or read_event.
 New observations can change your activity. Consider the target, setting, and information-sharing scope when acting. historyGroups specifies which groups are checked for missed messages after a disconnect; the operator configures interface permissions. Check action receipts and investigate unknown outcomes first; the runtime handles action identifiers and deduplication.
 Distinguish actual experiences, reported claims, inferences, fictional daily life, and tool results. runtime_data provides the life-mode switch; when disabled, stop autonomous life activities, but continue social commitments and memory maintenance.
@@ -401,6 +432,9 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = [];
     this.seen.clear(); this.facesSeen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    const self = this.config.snowluma.selfId;
+    this.engaged = new Set(observation.events.filter(event => event.actorId !== self && !isAmbient(event.kind, event.actorId, self)).map(eventChat).filter((chat): chat is string => chat !== undefined));
+    this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true, reviewing: reviewing(observation) };
     this.display(monitor => monitor.startRun(this.runId, observation));
@@ -408,7 +442,9 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       const message = await this.message(observation);
       this.controller.signal.throwIfAborted();
       await this.agent.prompt(message);
-      if (this.agent.state.errorMessage) throw new Error(this.agent.state.errorMessage);
+      // A preempted thought ends without its unfinished call and is saved like any other (ADR-0002).
+      if (this.preempted) this.agent.state.messages = this.agent.state.messages.filter(item => !(item.role === 'assistant' && item.stopReason === 'aborted'));
+      else if (this.agent.state.errorMessage) throw new Error(this.agent.state.errorMessage);
       this.controller.signal.throwIfAborted();
       ensureCurrent(this.store, this.thought);
       this.fold();
@@ -416,7 +452,35 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       this.seen.clear();
     }
     catch (error) { this.revert(rollback, generation); throw error; }
-    finally { this.agent.clearAllQueues(); this.display(monitor => monitor.endRun()); }
+    finally { this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; this.display(monitor => monitor.endRun()); }
+  }
+  /** A message to the digital life in a chat this thought is engaged in: anything in a private chat, or a mention of or reply to it in a group. */
+  private addressed(event: EnvironmentEvent): boolean {
+    const self = this.config.snowluma.selfId; const chat = eventChat(event);
+    if (event.kind !== 'message' || event.actorId === self || !chat || !this.engaged.has(chat)) return false;
+    if (chat.startsWith('private:')) return true;
+    const segments = (Array.isArray(event.payload.message) ? event.payload.message : []) as { type?: string; data?: Record<string, unknown> }[];
+    return segments.some(segment => (segment.type === 'at' && Number(segment.data?.qq) === self) || (segment.type === 'reply' && this.store.sentMessage(Number(segment.data?.id))));
+  }
+  /** Stop a thought whose model is deciding without a newer addressed message; a call already answered is left to its tools. */
+  private preempt(event: EnvironmentEvent): boolean {
+    if ((this.phase !== 'preparing' && this.phase !== 'calling') || this.preemptions >= this.config.limits.maxPreemptions) return false;
+    this.preempted = true; this.preemptions++;
+    this.store.log('thought_preempted', { runId: this.runId, phase: this.phase, eventId: event.id, ...(this.phase === 'calling' ? { callMs: Date.now() - this.callStartedAt } : {}) });
+    // Preparation, such as compaction, finishes first; prepareRequest then ends the thought.
+    if (this.phase === 'calling') this.agent.abort();
+    return true;
+  }
+  /** A message, sticker, reaction, or poke not yet sent when an addressed message arrived in its chat is skipped, so the model decides again. */
+  private async skipStale(tool: string, args: unknown): Promise<BeforeToolCallResult | undefined> {
+    const chat = socialActions.has(tool) ? targetChat(args) : undefined;
+    if (!chat || !this.stale.has(chat)) return;
+    if (!this.skipped) {
+      if (this.preemptions >= this.config.limits.maxPreemptions) return;
+      this.skipped = true; this.preemptions++;
+      this.store.log('thought_preempted', { runId: this.runId, phase: 'acting', chat });
+    }
+    return { block: true, reason: `Not sent: a new message arrived in ${chat} after you decided this. It follows as a new observation; decide again with it in view.` };
   }
   /** Chat records read and images seen in a thought leave working context when it ends. Both sit within this thought, so the cached prefix before it stays valid. */
   private fold() {
@@ -447,6 +511,11 @@ Your development is yours to keep alongside the operator's persona. Habits are y
   }
   async steer(observation: Observation): Promise<boolean> {
     const runId = this.runId;
+    if (!this.streaming) return false;
+    const addressed = observation.events.filter(event => this.addressed(event));
+    // Declined here, the observation returns to pending and starts the next thought.
+    if (addressed.length && this.preempt(addressed[0]!)) return false;
+    if (this.preemptions < this.config.limits.maxPreemptions) for (const event of addressed) this.stale.add(eventChat(event)!);
     const message = await this.message(observation);
     // The run may have ended, or another begun, while images were downloading.
     if (!this.streaming || this.runId !== runId) return false;

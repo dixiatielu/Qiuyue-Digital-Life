@@ -3,6 +3,16 @@ import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-works/pi-ai';
 import { deferred, event, fixture } from './helpers.js';
 import { LifeRuntime } from '../src/runtime.js';
+import { ActionNotDispatchedError } from '../src/snowluma.js';
+import type { Store } from '../src/store.js';
+
+/** A private message from person 7. */
+const say = (store: Store, text: string) => store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, actorId: 7, payload: { message_type: 'private', message: [{ type: 'text', data: { text } }] } })!;
+/** A model call that is still deciding when it is cancelled. */
+const deciding = (started: { resolve: () => void }, decision: string) => async (_context: unknown, options?: { signal?: AbortSignal }) => {
+  started.resolve(); await new Promise(resolve => options?.signal?.addEventListener('abort', resolve));
+  return answer(call('send_private_msg', { user_id: 7, message: decision }));
+};
 
 test('real Pi loop can choose silence and never forwards ordinary assistant text', async () => {
   const f = fixture();
@@ -95,11 +105,11 @@ test('default unlimited budgets keep scheduling and acting beyond the former cap
       f.store.finishAction(attempt.action.id, 'success', {});
     }
     event(f.store, 'Keep reasoning with unlimited default budgets');
-    f.faux.setResponses([answer(call('send_group_msg', { group_id: 100, message: 'Received' })), answer('Done')]);
+    f.faux.setResponses([answer(call('send_group_msg', { group_id: 100, message: 'Received' }))]);
     runtime.start(); await runtime.idle();
     assert.deepEqual(f.sent.map(item => item.kind), ['send_group_msg']);
     assert.equal(f.store.processedCount(), 1); assert.equal(f.store.pending(), 0);
-    assert.equal(f.store.dailyCalls(), 203); assert.equal(f.store.hourlyActions(), 32);
+    assert.equal(f.store.dailyCalls(), 202); assert.equal(f.store.hourlyActions(), 32);
     assert.ok(!f.store.logs().some(log => log.kind === 'thought_error'));
   } finally { await runtime.stop(); f.store.close(); }
 });
@@ -310,4 +320,97 @@ test('memory maintenance continues with life mode disabled and stays in the main
     runtime.start(); await runtime.idle();
     assert.equal(f.store.settings().lifeEnabled, false); assert.equal(f.store.search('reading').length, 1); assert.equal(f.sent.length, 0);
   } finally { await runtime.stop(); f.store.close(); }
+});
+
+test('a batch of successful messages, reactions, or pokes ends the thought; another tool or a failure keeps it going', async () => {
+  const f = fixture();
+  try {
+    event(f.store); f.faux.setResponses([answer([call('send_group_msg', { group_id: 100, message: 'Hi' }), call('group_poke', { group_id: 100, user_id: 7 })]), answer('Must not be called')]);
+    await f.brain.run(f.store.claim(10)!); assert.equal(f.faux.state.callCount, 1);
+    event(f.store); f.faux.setResponses([answer([call('send_group_msg', { group_id: 100, message: 'Noted' }), call('set_activity', { activity: 'Chatting' })]), answer('Rest')]);
+    await f.brain.run(f.store.claim(10)!); assert.equal(f.faux.state.callCount, 3);
+  } finally { f.store.close(); }
+  const failing = fixture({ execute: async () => { throw new ActionNotDispatchedError('SnowLuma is not connected'); } });
+  try {
+    event(failing.store); failing.faux.setResponses([answer(call('send_group_msg', { group_id: 100, message: 'Hi' })), answer('Try later')]);
+    await failing.brain.run(failing.store.claim(10)!); assert.equal(failing.faux.state.callCount, 2);
+  } finally { failing.store.close(); }
+});
+
+test('a reply from the person being answered cancels the call deciding the reply, keeps finished turns, and starts the next thought', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain); const calling = deferred();
+  try {
+    say(f.store, 'What are you having for dinner?');
+    f.faux.setResponses([
+      answer(call('set_activity', { activity: 'Chatting about dinner' })),
+      deciding(calling, 'Stale reply'),
+      context => {
+        const seen = JSON.stringify(context.messages);
+        assert.match(seen, /Did you never eat xiaolongbao/); assert.match(seen, /Chatting about dinner/); assert.doesNotMatch(seen, /Stale reply/);
+        return answer(call('send_private_msg', { user_id: 7, message: 'Fresh reply' }));
+      },
+    ]);
+    runtime.start(); await calling.promise;
+    say(f.store, 'Did you never eat xiaolongbao?'); await runtime.tick(); await runtime.idle();
+    assert.equal(f.sent.length, 0); assert.equal(f.store.pending(), 1); assert.equal(f.store.processedCount(), 1);
+    assert.equal((f.store.logs().find(log => log.kind === 'thought_preempted')?.data as { phase: string }).phase, 'calling');
+    await runtime.tick(); await runtime.idle();
+    assert.deepEqual(f.sent.map(item => item.args.message), ['Fresh reply']); assert.equal(f.store.processedCount(), 2);
+    assert.ok(!f.store.logs().some(log => log.kind === 'thought_error'));
+  } finally { await runtime.stop(); f.store.close(); }
+});
+
+test('in a group only a mention of or reply to the digital life cancels the call; other messages steer at the boundary', async () => {
+  const f = fixture(); const groupMessage = (actorId: number, text: string, segments: unknown[]) => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, groupId: 100, actorId, payload: { message: segments } })!;
+  try {
+    const earlier = f.store.beginAction('earlier-send', 'send_group_msg', { group_id: 100, message: 'Tea is nice' }, []);
+    f.store.finishAction(earlier.action.id, 'success', { message_id: -42 });
+    for (const addressed of [[{ type: 'at', data: { qq: '900' } }, { type: 'text', data: { text: ' you?' } }], [{ type: 'reply', data: { id: '-42' } }, { type: 'text', data: { text: 'Which tea?' } }]]) {
+      const calling = deferred();
+      event(f.store, 'Anyone like tea?', 100); f.faux.setResponses([deciding(calling, 'unused')]);
+      const work = f.brain.run(f.store.claim(10)!); await calling.promise;
+      groupMessage(8, 'I prefer coffee', [{ type: 'text', data: { text: 'I prefer coffee' } }]);
+      assert.equal(await f.brain.steer(f.store.claim(10)!), true);
+      groupMessage(8, 'addressed', addressed);
+      const preempting = f.store.claim(10)!;
+      assert.equal(await f.brain.steer(preempting), false); f.store.releaseBatch(preempting.batchId);
+      await work; f.store.releaseClaims();
+      assert.equal(f.store.pending(), 2); f.store.acknowledge(f.store.claim(10)!.batchId);
+    }
+    assert.equal(f.sent.length, 0); assert.equal(f.store.logs().filter(log => log.kind === 'thought_preempted').length, 2);
+  } finally { f.store.close(); }
+});
+
+test('a message that arrives while tools run skips sends to that chat not yet made, and the model decides again', async () => {
+  const poked = deferred(); const release = deferred(); const sent: string[] = [];
+  const f = fixture({ execute: async (kind, args) => { sent.push(String(args.message ?? kind)); if (kind === 'send_poke') { poked.resolve(); await release.promise; } return { message_id: -42 }; } });
+  try {
+    say(f.store, 'Guess what I had');
+    f.faux.setResponses([
+      answer([call('send_poke', { user_id: 7 }), call('send_private_msg', { user_id: 7, message: 'Stale guess' })]),
+      context => { const seen = JSON.stringify(context.messages); assert.match(seen, /Not sent/); assert.match(seen, /It was hotpot/); return answer(call('send_private_msg', { user_id: 7, message: 'Hotpot, nice' })); },
+    ]);
+    const work = f.brain.run(f.store.claim(10)!); await poked.promise;
+    say(f.store, 'It was hotpot'); assert.equal(await f.brain.steer(f.store.claim(10)!), true);
+    release.resolve(); await work;
+    assert.deepEqual(sent, ['send_poke', 'Hotpot, nice']);
+    assert.equal((f.store.logs().find(log => log.kind === 'thought_preempted')?.data as { phase: string }).phase, 'acting');
+  } finally { release.resolve(); f.store.close(); }
+});
+
+test('after maxPreemptions in a row the next decision is carried out as made', async () => {
+  const f = fixture(); f.cfg.limits.maxPreemptions = 1; const cancelled = deferred(); const calling = deferred(); const release = deferred();
+  try {
+    say(f.store, 'One');
+    f.faux.setResponses([deciding(cancelled, 'unused')]);
+    const first = f.brain.run(f.store.claim(10)!); await cancelled.promise;
+    say(f.store, 'Two'); const preempting = f.store.claim(10)!;
+    assert.equal(await f.brain.steer(preempting), false); f.store.releaseBatch(preempting.batchId); await first;
+    f.faux.setResponses([async () => { calling.resolve(); await release.promise; return answer(call('send_private_msg', { user_id: 7, message: 'As decided' })); }, answer('Quiet')]);
+    const second = f.brain.run(f.store.claim(10)!); await calling.promise;
+    say(f.store, 'Three'); assert.equal(await f.brain.steer(f.store.claim(10)!), true);
+    release.resolve(); await second;
+    assert.deepEqual(f.sent.map(item => item.args.message), ['As decided']);
+    assert.equal(f.store.logs().filter(log => log.kind === 'thought_preempted').length, 1);
+  } finally { release.resolve(); f.store.close(); }
 });

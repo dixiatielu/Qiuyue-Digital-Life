@@ -30,6 +30,7 @@
     "debounceMs": 1200,
     "maxDelayMs": 4000,
     "ambientDelayMs": 120000,
+    "maxPreemptions": 2,
     "tickMs": 500,
     "modelCallsPerDay": null,
     "actionsPerHour": null,

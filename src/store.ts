@@ -37,10 +37,11 @@ export class Store {
   readonly db: DatabaseSync;
   private listeners = new Set<(notice: StoreNotice) => void>();
   private notices: StoreNotice[] = [];
+  private selfId?: number;
   constructor(path: string, lifeEnabled = false) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
-    this.db.function('ambient', { deterministic: true }, kind => isAmbient(String(kind)) ? 1 : 0);
+    this.db.function('ambient', (kind, actor) => isAmbient(String(kind), actor == null ? undefined : Number(actor), this.selfId) ? 1 : 0);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, group_id INTEGER, actor_id INTEGER, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT, received_at INTEGER);
@@ -68,12 +69,14 @@ export class Store {
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='received_at'").get()) this.db.exec('ALTER TABLE events ADD COLUMN received_at INTEGER');
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name='scope'").get()) this.db.exec('ALTER TABLE memories ADD COLUMN scope TEXT');
     for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {} })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
+    const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
+    if (self) this.selfId = parse<number>(self.value);
   }
   close() { this.db.close(); }
   bindAccount(selfId: number) {
     const row = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
     if (row && parse<number>(row.value) !== selfId) throw new Error('This database belongs to another QQ account; check the configured account and database path.');
-    this.setSetting('selfId', selfId);
+    this.setSetting('selfId', selfId); this.selfId = selfId;
   }
   transaction<T>(work: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
@@ -217,7 +220,7 @@ export class Store {
   }
   pendingTiming(allowLife = true): PendingTiming {
     // Rows from before received_at existed count as long overdue.
-    const row = this.db.prepare(`SELECT min(CASE WHEN ambient(kind) THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient(kind) THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0)!;
+    const row = this.db.prepare(`SELECT min(CASE WHEN ambient(kind,actor_id) THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient(kind,actor_id) THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0)!;
     const time = (value: unknown) => value == null ? undefined : Number(value);
     return { first: time(row.first), last: time(row.last), ambient: time(row.ambient) };
   }
