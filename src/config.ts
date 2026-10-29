@@ -10,7 +10,7 @@ export interface Config {
   model: ModelConfig;
   snowluma: { url: string; tokenEnv: string; selfId: number; groups: number[]; tools: SnowLumaPermissions; maxStreamBytes: number };
   life: { enabled: boolean; allowFiction: boolean; minWakeMs: number };
-  limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
+  limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; maxPreemptions: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
   compaction: { keepRecentTokens: number; summaryMaxTokens: number; retries: number; idleRatio: number; idleAfterMs: number };
   memory: { retentionDays: number; recallLimit: number; recentEvents: number; reflectionEveryEvents: number };
   development: { scopeChars: number; personChars: number; people: number; recordLines: number };
@@ -29,7 +29,7 @@ export function loadConfig(path: string): Config {
     model: { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...raw.model },
     snowluma: { url: 'ws://127.0.0.1:3001', tokenEnv: 'SNOWLUMA_TOKEN', selfId: 0, groups: [], maxStreamBytes: 32_000_000, ...raw.snowluma, tools: { allow: '*', deny: [], ...raw.snowluma?.tools } },
     life: { enabled: false, allowFiction: false, minWakeMs: 60_000, ...raw.life },
-    limits: { batchSize: 20, debounceMs: 1200, maxDelayMs: 4000, ambientDelayMs: 120_000, tickMs: 500, modelCallsPerDay: null, actionsPerHour: null, runTimeoutMs: null, maxTurnsPerRun: null, maxImages: 4, contextTokens: 262144, outputReserveTokens: 32768, contextSafetyTokens: 2048, ...raw.limits },
+    limits: { batchSize: 20, debounceMs: 1200, maxDelayMs: 4000, ambientDelayMs: 120_000, maxPreemptions: 2, tickMs: 500, modelCallsPerDay: null, actionsPerHour: null, runTimeoutMs: null, maxTurnsPerRun: null, maxImages: 4, contextTokens: 262144, outputReserveTokens: 32768, contextSafetyTokens: 2048, ...raw.limits },
     compaction: { keepRecentTokens: 12000, summaryMaxTokens: 2048, retries: 1, idleRatio: 0.85, idleAfterMs: 30_000, ...raw.compaction },
     memory: { retentionDays: 90, recallLimit: 8, recentEvents: 30, reflectionEveryEvents: 100, ...raw.memory },
     development: { scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
@@ -43,11 +43,12 @@ export function loadConfig(path: string): Config {
   if (!Array.isArray(config.snowluma.groups) || config.snowluma.groups.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('snowluma.groups must be an array of group IDs for history recovery; it may be empty.');
   const url = new URL(config.snowluma.url);
   if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password) throw new Error('SnowLuma must use a ws/wss URL without credentials.');
-  const { modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun, debounceMs, ...runLimits } = config.limits;
+  const { modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun, debounceMs, maxPreemptions, ...runLimits } = config.limits;
   for (const [key, value] of Object.entries({ modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun })) {
     if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) throw new Error(`${key} must be a positive integer or null (unlimited).`);
   }
   if (!Number.isSafeInteger(debounceMs) || debounceMs < 0) throw new Error('debounceMs must be a non-negative integer; 0 starts thinking without waiting for quiet.');
+  if (!Number.isSafeInteger(maxPreemptions) || maxPreemptions < 0) throw new Error('maxPreemptions must be a non-negative integer; 0 turns preemption off.');
   for (const values of [runLimits, config.memory, config.development, { minWakeMs: config.life.minWakeMs }, { timeoutMs: config.web.timeoutMs, maxBytes: config.web.maxBytes, maxStreamBytes: config.snowluma.maxStreamBytes }]) {
     for (const [key, value] of Object.entries(values)) if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${key} must be a positive integer.`);
   }

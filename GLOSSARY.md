@@ -12,6 +12,10 @@ _Avoid_: one Agent per group, group chatbot instance
 What the digital life currently prioritizes and focuses its thinking on; there is only one primary focus of attention at a time.
 _Avoid_: independent thinking subject per group
 
+**Engaged Conversation**:
+A group or private chat that the digital life's current thought has acted in, or that an event starting the thought came from. A message addressed to the digital life there can stop the thought early, so the digital life decides again with that message in view.
+_Avoid_: the current message awaiting a reply, a per-chat session
+
 **Group Environment**:
 An external social setting that the digital life perceives and participates in; each QQ group is one such setting.
 _Avoid_: group conversation, group session

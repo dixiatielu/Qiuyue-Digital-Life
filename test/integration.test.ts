@@ -136,6 +136,20 @@ test('normalization preserves rich messages from all groups while rejecting othe
   assert.equal(normalizeEvent({ ...raw, post_type: '' }, cfg), undefined);
 });
 
+test('the digital life\'s own pokes come back as ambient notices attributed to it', () => {
+  const cfg = config().snowluma; const store = new Store(':memory:'); store.bindAccount(900);
+  const poke = (fields: Record<string, unknown>) => normalizeEvent({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', self_id: 900, time: 100, ...fields }, cfg)!;
+  try {
+    // In a private chat QQ names the other person as user_id and target_id; sender_id is who poked.
+    const privateEcho = poke({ user_id: 7, target_id: 7, sender_id: 900 }); const groupEcho = poke({ group_id: 100, user_id: 900, target_id: 7 });
+    const incoming = poke({ user_id: 7, target_id: 900, sender_id: 7 });
+    assert.deepEqual([privateEcho.actorId, groupEcho.actorId, incoming.actorId], [900, 900, 7]);
+    store.receive(privateEcho); store.receive(groupEcho);
+    assert.equal(store.pendingTiming().first, undefined); assert.notEqual(store.pendingTiming().ambient, undefined);
+    store.receive(incoming); assert.notEqual(store.pendingTiming().first, undefined);
+  } finally { store.close(); }
+});
+
 test('private message keys separate peers and groups, preserve direction, and deduplicate redelivery', () => {
   const cfg = config().snowluma; const store = new Store(':memory:');
   const raw = { post_type: 'message', message_type: 'private', self_id: 900, user_id: 7, time: 1, message_id: -3, message: 'Private chat' };
