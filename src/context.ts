@@ -93,6 +93,15 @@ export function foldToolResults(messages: AgentMessage[], toolName: string): { m
   });
   return { messages: folded, changed };
 }
+/** Replace every image in observations and tool results with a note; the label before each names its event and index. */
+export function foldImages(messages: AgentMessage[]): { messages: AgentMessage[]; changed: number } {
+  let changed = 0;
+  const folded = messages.map(message => {
+    if ((message.role !== 'observation' && message.role !== 'toolResult') || !message.content.some(block => block.type === 'image')) return message;
+    return { ...message, content: message.content.map(block => block.type !== 'image' ? block : (changed++, { type: 'text' as const, text: `${FOLDED} view it again with view_event_image]` })) };
+  });
+  return { messages: folded as AgentMessage[], changed };
+}
 export interface ContextCheckpoint {
   identity: string;
   generation: number;

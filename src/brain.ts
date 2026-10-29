@@ -8,7 +8,7 @@ import { developmentKinds, errorText } from './domain.js';
 import { Store, digest } from './store.js';
 import { publicFetch } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
+import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { recordTime } from './record.js';
 
@@ -302,18 +302,18 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const online = observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life') && this.onlineLife();
     if (online) content.push({ type: 'text', text: online });
     let count = 0;
-    for (const event of observation.events) for (const segment of Array.isArray(event.payload.message) ? event.payload.message : []) {
-      if (segment.type !== 'image') continue;
+    for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
       if (count++ >= this.config.limits.maxImages || estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS > this.config.limits.contextTokens * 0.4) {
-        content.push({ type: 'text', text: `The image from event ${event.id} was not loaded due to the context limit; use view_event_image to view it.` }); continue;
+        content.push({ type: 'text', text: `Image ${index} from event ${event.id} was not loaded due to the context limit; use view_event_image to view it.` }); continue;
       }
       const url = segment.data?.url;
-      if (typeof url !== 'string') { content.push({ type: 'text', text: `The image in event ${event.id} has no readable URL; the original event is retained.` }); continue; }
+      if (typeof url !== 'string') { content.push({ type: 'text', text: `Image ${index} in event ${event.id} has no readable URL; the original event is retained.` }); continue; }
       try {
         const image = await publicFetch(url, { timeoutMs: 10_000, maxBytes: 5_000_000, signal: this.controller.signal });
         if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(image.type)) throw new Error('Unsupported image type');
-        content.push({ type: 'text', text: `The following image is from event ${event.id}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
-      } catch { content.push({ type: 'text', text: `The image in event ${event.id} could not be read` }); }
+        // The label outlives the image, which is folded when the thought ends.
+        content.push({ type: 'text', text: `The following is image ${index} from event ${event.id}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
+      } catch { content.push({ type: 'text', text: `Image ${index} in event ${event.id} could not be read` }); }
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
   }
@@ -368,13 +368,14 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     catch (error) { this.revert(rollback, generation); throw error; }
     finally { this.agent.clearAllQueues(); this.display(monitor => monitor.endRun()); }
   }
-  /** Chat records read in a thought leave working context when it ends. They sit at its tail, so the cached prefix before them stays valid. */
+  /** Chat records read and images seen in a thought leave working context when it ends. Both sit within this thought, so the cached prefix before it stays valid. */
   private fold() {
-    const folded = foldToolResults(this.agent.state.messages, 'read_chat_record');
-    if (!folded.changed) return;
+    const records = foldToolResults(this.agent.state.messages, 'read_chat_record');
+    const images = foldImages(records.messages);
+    if (!records.changed && !images.changed) return;
     this.store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
-    this.agent.state.messages = folded.messages;
-    this.store.log('context_folded', { runId: this.runId, results: folded.changed });
+    this.agent.state.messages = images.messages;
+    this.store.log('context_folded', { runId: this.runId, results: records.changed, images: images.changed });
   }
   /** Between runs, compact a context above compaction.idleRatio of its budget; the first request of a run does the same, later ones compact at the full budget. */
   async consolidate() {

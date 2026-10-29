@@ -167,3 +167,22 @@ test('heartbeats are persisted but never wake, steer, recall or trigger memory m
     assert.equal(f.faux.state.callCount, 1); assert.equal(f.store.processedCount(), 1);
   } finally { await runtime.stop(); f.store.close(); }
 });
+
+test('images seen in a thought are folded when it ends, so later thoughts and restarts do not carry them', async () => {
+  const f = fixture();
+  try {
+    event(f.store, 'First observation'); f.faux.setResponses([answer('Seen')]);
+    await f.brain.run(f.store.claim(20)!);
+    // Loading an image needs a public URL, so place an observed image in the working context directly.
+    f.brain.agent.state.messages.push({ role: 'observation', batchId: 'b:image', eventIds: ['e:image'], lifeOnly: false, timestamp: Date.now(), content: [{ type: 'text', text: 'The following is image 0 from event e:image' }, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }] });
+    event(f.store, 'Second observation');
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /aGVsbG8=/); return answer('Looked at it'); }]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /aGVsbG8=/);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /image 0 from event e:image.*view it again with view_event_image/);
+    assert.equal((f.store.logs().find(log => log.kind === 'context_folded')?.data as { images?: number }).images, 1);
+    f.restart(); event(f.store, 'After restart');
+    f.faux.setResponses([context => { assert.doesNotMatch(JSON.stringify(context.messages), /aGVsbG8=/); return answer('Continue'); }]);
+    await f.brain.run(f.store.claim(20)!);
+  } finally { f.store.close(); }
+});
