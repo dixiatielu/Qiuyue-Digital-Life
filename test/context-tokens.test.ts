@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { contextRecordId, estimatedContextTokens, fitLines, IMAGE_TOKENS, messageTokens, persistableMessage, pruneToolResults, TokenMeter } from '../src/context.js';
+import { contextRecordId, estimatedContextTokens, fitLines, foldImages, IMAGE_TOKENS, messageTokens, persistableMessage, pruneToolResults, TokenMeter } from '../src/context.js';
 
 const system: AgentMessage = { role: 'system', content: 'Fixed instructions', timestamp: 1 };
 const input: AgentMessage = { role: 'user', content: 'Hello', timestamp: 2 };
@@ -75,3 +75,15 @@ test('fitted text keeps whole lines from the start and drops an unfinished last 
   assert.equal(fitLines('一行就超出了限制', 3), '');
 });
 
+test('folding images keeps each label and tool pairing while dropping the image data', () => {
+  const observed = { role: 'observation', batchId: 'b:1', eventIds: ['e:1'], lifeOnly: false, timestamp: 3, content: [{ type: 'text', text: 'The following is image 0 from event e:1' }, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }] } as AgentMessage;
+  const viewed = { role: 'toolResult', toolCallId: 't:1', toolName: 'view_event_image', isError: false, timestamp: 4, content: [{ type: 'text', text: 'Image 1 from event e:1' }, { type: 'image', data: 'd29ybGQ=', mimeType: 'image/png' }] } as AgentMessage;
+  const { messages, changed } = foldImages([system, observed, input, viewed]);
+  assert.equal(changed, 2);
+  assert.doesNotMatch(JSON.stringify(messages), /aGVsbG8=|d29ybGQ=|image\/png/);
+  assert.match(JSON.stringify(messages[1]), /image 0 from event e:1.*Folded when the thought ended; view it again with view_event_image/);
+  assert.match(JSON.stringify(messages[3]), /Image 1 from event e:1.*view_event_image/);
+  assert.equal((messages[3] as { toolCallId: string }).toolCallId, 't:1');
+  assert.equal(messages[0], system); assert.equal(messages[2], input);
+  assert.equal(foldImages(messages).changed, 0);
+});
