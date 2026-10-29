@@ -60,6 +60,17 @@
     "timeoutMs": 15000,
     "maxBytes": 2000000
   },
+  "embedding": {
+    "enabled": false,
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "REPLACE_WITH_AN_EMBEDDING_MODEL",
+    "apiKeyEnv": "MODEL_API_KEY",
+    "threshold": 0.65,
+    "searchThreshold": 0.55,
+    "limit": 3,
+    "timeoutMs": 15000,
+    "selfNames": []
+  },
   "compaction": {
     "keepRecentTokens": 12000,
     "summaryMaxTokens": 2048,

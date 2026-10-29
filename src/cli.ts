@@ -15,6 +15,7 @@ import { errorText } from './domain.js';
 import { resolveModel } from './model.js';
 import { Monitor } from './monitor.js';
 import { followDisplay } from './display-client.js';
+import { EmbeddingClient, SemanticRecall } from './recall.js';
 
 async function main() {
   process.umask(0o077);
@@ -50,6 +51,8 @@ async function main() {
       if (Math.min(config.limits.contextTokens, model.contextWindow) <= config.limits.outputReserveTokens + config.limits.contextSafetyTokens) problems.push(ui('The model window is too small for the output reserve and safety margin.', '模型窗口不足以容纳输出预留与安全余量。'));
     } catch (error) { problems.push(errorText(error)); }
     if (!process.env[config.model.apiKeyEnv]) problems.push(ui(`Missing ${config.model.apiKeyEnv}.`, `缺少 ${config.model.apiKeyEnv}。`));
+    if (config.embedding.enabled && !process.env[config.embedding.apiKeyEnv]) problems.push(ui(`Missing ${config.embedding.apiKeyEnv} for embedding.`, `缺少 embedding 所需的 ${config.embedding.apiKeyEnv}。`));
+    if (!config.embedding.enabled) warnings.push(ui('embedding is disabled; thoughts will not recall memories on their own, though recall still works when asked for.', 'embedding 未启用；思考时不会自动想起记忆，主动回忆仍可用。'));
     if (config.web.enabled && !process.env[config.web.searchKeyEnv]) warnings.push(ui(`Missing ${config.web.searchKeyEnv}; web search is unavailable, but known webpages can still be read.`, `缺少 ${config.web.searchKeyEnv}；联网搜索不可用，已知网页仍可阅读。`));
     console.log(JSON.stringify({ valid: problems.length === 0, problems, warnings, runtime: process.version, snowlumaConfigured: Boolean(config.snowluma.selfId) }, null, 2));
     if (problems.length) process.exitCode = 1; return;
@@ -69,28 +72,31 @@ async function main() {
   let runtime: LifeRuntime | undefined;
   let brain: PiBrain;
   const social = new SnowLumaAdapter(config.snowluma, store, () => { void runtime?.tick(); });
+  const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding)) : undefined;
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   try {
     store.bindAccount(config.snowluma.selfId);
-    brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought), undefined, monitor);
+    brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought, undefined, recall), undefined, monitor, recall);
     runtime = new LifeRuntime(config, store, brain);
     server = await serveControl(config.socket, request => handleControl(store, request, runtime), monitor);
     // Recovery must precede live collection; perception keeps running even if paused.
     store.recover();
+    // Messages are embedded as they arrive, so recall starts listening before perception does.
+    recall?.start();
     await social.connect();
     runtime.start();
     console.log(ui(`Digital life started; management socket: ${config.socket}`, `数字生命已启动；管理入口 ${config.socket}`));
     let stopping = false;
     const shutdown = async () => {
       if (stopping) return; stopping = true;
-      await Promise.all([social.close(), runtime!.stop()]);
+      await Promise.all([social.close(), runtime!.stop(), recall?.stop()]);
       monitor.close(); server!.closeClients();
       await new Promise<void>(resolve => server!.close(() => resolve()));
       release(); store.close();
     };
     process.once('SIGINT', () => { void shutdown(); }); process.once('SIGTERM', () => { void shutdown(); });
   } catch (error) {
-    await Promise.all([social.close(), runtime?.stop()]); monitor.close(); server?.closeClients(); server?.close(); release(); store.close(); throw error;
+    await Promise.all([social.close(), runtime?.stop(), recall?.stop()]); monitor.close(); server?.closeClients(); server?.close(); release(); store.close(); throw error;
   }
 }
 

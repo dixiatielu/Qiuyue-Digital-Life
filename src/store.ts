@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Action, DevelopmentKind, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Pursuit, Wake } from './domain.js';
-import { isAmbient, isDevelopment, isHeartbeat } from './domain.js';
+import { developmentKinds, isAmbient, isDevelopment, isHeartbeat } from './domain.js';
 import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
 import type { Face } from './faces.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -13,6 +13,8 @@ const parse = <T>(value: unknown): T => JSON.parse(String(value)) as T;
 const id = (prefix: string) => `${prefix}:${randomUUID()}`;
 export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
 const claimable = "status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life')";
+/** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
+const recallable = `active=1 AND kind NOT IN (${developmentKinds.map(kind => `'${kind}'`).join(',')})`;
 /** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
 const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+)$/, practice: /^(global|group:\d+)$/, impression: /^person:\d+$/ };
 /** A conversation is group:<id> or private:<qq>; its record is what happened there. */
@@ -52,6 +54,8 @@ export class Store {
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED, title, content, tokenize='trigram');
       CREATE TRIGGER IF NOT EXISTS memory_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(id,title,content) VALUES(new.id,new.title,new.content); END;
       CREATE TRIGGER IF NOT EXISTS memory_delete AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE id=old.id; END;
+      CREATE TABLE IF NOT EXISTS memory_vectors(memory_id TEXT NOT NULL, chunk INTEGER NOT NULL, model TEXT NOT NULL, line TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(memory_id,chunk));
+      CREATE TRIGGER IF NOT EXISTS memory_vectors_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_vectors WHERE memory_id=old.id; END;
       CREATE TABLE IF NOT EXISTS tombstones(source_key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
       CREATE TABLE IF NOT EXISTS pursuits(id TEXT PRIMARY KEY, title TEXT NOT NULL, progress TEXT NOT NULL, fictional INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -330,6 +334,30 @@ export class Store {
       const recency = Math.exp(-(now - memory.createdAt) / (30 * 86_400_000));
       return { memory, score: matches * 5 + person + place + memory.importance / 3 + recency, relevant: !query.trim() || matches > 0 || person > 0 || place > 0 };
     }).filter(x => x.relevant && !exclude.includes(x.memory.kind)).sort((a, b) => b.score - a.score).slice(0, limit).map(x => x.memory);
+  }
+  recallableIds(): Set<string> { return new Set(this.db.prepare(`SELECT id FROM memories WHERE ${recallable}`).all().map(row => String(row.id))); }
+  /** Memories a deliberate search may find: current ones of every kind, and with historical their earlier versions too. */
+  searchableIds(historical: boolean): Set<string> { return new Set(this.db.prepare(`SELECT id FROM memories${historical ? '' : ' WHERE active=1'}`).all().map(row => String(row.id))); }
+  /** Vectors from another embedding model cannot be compared with this one's. */
+  dropOtherVectors(model: string) { this.db.prepare('DELETE FROM memory_vectors WHERE model!=?').run(model); }
+  /** Vectors of each memory's lines for one embedding model, in line order. */
+  memoryVectors(model: string): { memoryId: string; line: string; vector: Float32Array }[] {
+    return this.db.prepare('SELECT * FROM memory_vectors WHERE model=? ORDER BY memory_id,chunk').all(model)
+      .map(row => ({ memoryId: String(row.memory_id), line: String(row.line), vector: new Float32Array(Uint8Array.from(row.vector as Uint8Array).buffer) }));
+  }
+  /** Memories with no vectors for this model yet, oldest first. Every kind and version is embedded, since a deliberate search can reach them all. */
+  unindexedMemories(model: string, limit: number): Memory[] {
+    return this.db.prepare(`SELECT * FROM memories WHERE NOT EXISTS (SELECT 1 FROM memory_vectors v WHERE v.memory_id=memories.id AND v.model=?) ORDER BY created_at,rowid LIMIT ?`).all(model, limit).map(row => this.memoryRow(row));
+  }
+  /** Replace a memory's vectors; a memory deleted meanwhile keeps none. */
+  saveMemoryVectors(memoryId: string, model: string, lines: { line: string; vector: Float32Array }[]): boolean {
+    return this.transaction(() => {
+      if (!this.db.prepare('SELECT 1 FROM memories WHERE id=?').get(memoryId)) return false;
+      this.db.prepare('DELETE FROM memory_vectors WHERE memory_id=?').run(memoryId);
+      const insert = this.db.prepare('INSERT INTO memory_vectors VALUES (?,?,?,?,?)');
+      lines.forEach(({ line, vector }, chunk) => insert.run(memoryId, chunk, model, line, new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength)));
+      return true;
+    });
   }
   forgetPlan(root: string): string[] {
     if (!this.memory(root) && !this.event(root)) throw new Error('Record does not exist.');

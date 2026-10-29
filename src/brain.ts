@@ -4,7 +4,7 @@ import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type I
 import type { Config } from './config.js';
 import type { Monitor } from './monitor.js';
 import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
-import { developmentKinds, errorText, eventChat, isAmbient } from './domain.js';
+import { errorText, eventChat, isAmbient } from './domain.js';
 import { Store, conversationOf, digest } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
@@ -12,6 +12,7 @@ import { compactionSplit, contextRecordId, estimatedContextTokens, estimateToken
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { recordTime } from './record.js';
 import { faceCaption, faceIds, nameFaces } from './faces.js';
+import type { SemanticRecall } from './recall.js';
 
 /** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. A new platform joins the digital life's days by adding its tools here. */
 const onlineActivities: { activity: string; tools: string[]; memoryKind?: MemoryKind }[] = [
@@ -110,7 +111,7 @@ export class PiBrain implements Brain {
   /** Preemptions since a decision was last carried out as made. */
   private preemptions = 0;
   private callStartedAt = 0;
-  constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor) {
+  constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall) {
     const { model, stream } = backend ?? createModelBackend(config.model);
     this.stream = stream;
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
@@ -190,7 +191,7 @@ New observations can change your activity. Consider the target, setting, and inf
 Distinguish actual experiences, reported claims, inferences, fictional daily life, and tool results. runtime_data provides the life-mode switch; when disabled, stop autonomous life activities, but continue social commitments and memory maintenance.
 Decide which experiences are important and save them with remember. When revising an understanding, retain its sources and previous version.
 Record what you are doing with set_activity. After accepting a future obligation, save it with schedule_activity as commitment; use life for your own plans. Call finish_activity when a plan is completed or cancelled. What you pursue over days, such as a song you are learning or a series you follow, is kept with update_pursuit and ended with finish_pursuit; runtime_data lists those under way. Progress takes time and may stall; record it when it moves or stalls.${this.config.life.allowFiction ? ' Save fictional daily life with remember as fiction, or set fictional on a diary entry that includes it.' : ''} What you say about your own day must agree with your recorded activity and pursuits, and anything you say you did online, such as posting or sharing, must be an action you actually took. You may rest when nothing is pending.
-Working context continues across thinking runs; when space is limited, a continuity summary replaces earlier exchanges. runtime_data provides timestamped state and observations; later snapshots update earlier state. Current activity, commitments, and actual action outcomes in the latest snapshot take precedence over old exchanges and summaries. Use recall, read_event, or inspect_actions for detailed evidence. Working context and summaries are persisted; still use remember to save important experiences, understandings, and notes. Use read_context with ctx: record IDs in the summary to read pre-compaction originals in chunks. A memory_maintenance event means it is time to organize your memories.`;
+Working context continues across thinking runs; when space is limited, a continuity summary replaces earlier exchanges. runtime_data provides timestamped state and observations; later snapshots update earlier state. Current activity, commitments, and actual action outcomes in the latest snapshot take precedence over old exchanges and summaries. Use recall, read_event, or inspect_actions for detailed evidence. recalled holds at most a few memories that what was just said calls to mind, each with the matchedLine that matched; they can be only loosely related, so follow them or let them pass. It is often empty, which does not mean you have no memory of the matter; use recall to look deliberately. Working context and summaries are persisted; still use remember to save important experiences, understandings, and notes. Use read_context with ctx: record IDs in the summary to read pre-compaction originals in chunks. A memory_maintenance event means it is time to organize your memories.`;
     return legacy ? base : base + `\nruntime_data format=snapshot represents the complete current state; format=delta contains only changed fields, and omitted fields retain their previous values. Apply upserts by id and remove removedIds in recentEvents, recalled, actualActions, activeCommitmentsAndPlans, pursuits, myHabits, practices, and impressions. Replace other fields directly. Action summaries omit internal provenance; use inspect_actions with an id for full evidence. Heartbeats are saved as connection records.
 Your development is yours to keep alongside the operator's persona. Habits are your own ways of acting and expressing yourself, including your own expression style. Practices are what the people around you do in which situations: how long and how often they write, punctuation and tone words, slang, stickers and reactions, joining chains, or anything else you notice. Habits and practices hold everywhere by default; give one a group:<id> scope only when it clearly belongs to that group alone, such as its rules. An impression is your current understanding of one person and your relationship with them, including what they want from you. runtime_data supplies myHabits, practices, and impressions for the current settings and people. Knowing a practice does not mean adopting it, and the persona above takes precedence over your habits where they disagree. Each scope has a size limit: merge with supersedes or retire with retire_memory instead of piling entries up. A habit or impression cannot rest only on your own messages. When a memory_maintenance event lists unreviewed chats, read them with read_chat_record and revise your development from what you see.`;
   }
@@ -327,13 +328,11 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     this.thought.sources = new Set(checkpoint.sources);
   }
   private runtimeContext() {
-    const subjects = this.observations.map(event => String(event.actorId ?? '')).filter(Boolean);
     const groups = this.observations.map(event => event.groupId).filter((x): x is number => x !== undefined);
-    const query = this.observations.map(event => event.text).join(' ').slice(-1000);
     const recent = this.store.recent(this.config.memory.recentEvents);
-    // Development is supplied by scope below, so recall leaves it out.
-    const recalled = this.store.search(query, this.config.memory.recallLimit, subjects, groups, false, developmentKinds);
-    for (const source of [...recent, ...recalled]) this.thought.sources.add(source.id);
+    // What is said calls memories to mind, not merely where it is said (ADR-0009); development is supplied by scope below.
+    const recalled = this.recall?.recall(this.observations) ?? [];
+    for (const source of [...recent, ...recalled.map(item => item.memory)]) this.thought.sources.add(source.id);
     // A review looks at the chats it lists, so their groups and the people who spoke there count as present.
     const chats = this.observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
     const reviewed = chats.map(chat => conversationOf(chat.conversation));
@@ -342,7 +341,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const settings = new Set([...groups, ...reviewed.filter(chat => chat.type === 'group').map(chat => chat.id)]);
     const development = this.store.development(['global', ...[...settings].map(id => `group:${id}`), ...people.map(id => `person:${id}`)]);
     const entries = (kind: MemoryKind) => development.filter(memory => memory.kind === kind).map((memory: Memory) => ({ id: memory.id, scope: memory.scope, title: memory.title, content: memory.content }));
-    const runtime = { now: new Date().toISOString(), timeZone: 'Asia/Shanghai', selfId: this.config.snowluma.selfId, settings: this.store.settings(), allowFiction: this.config.life.allowFiction, historyGroups: this.config.snowluma.groups, snowlumaPermissions: this.config.snowluma.tools, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, groupId: event.groupId, actorId: event.actorId, text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(memory => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000 })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
+    const runtime = { now: new Date().toISOString(), timeZone: 'Asia/Shanghai', selfId: this.config.snowluma.selfId, settings: this.store.settings(), allowFiction: this.config.life.allowFiction, historyGroups: this.config.snowluma.groups, snowlumaPermissions: this.config.snowluma.tools, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, groupId: event.groupId, actorId: event.actorId, text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
     // Commitments, current activity, pursuits, and development are never selected by probabilistic recall.
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
