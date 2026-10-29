@@ -6,6 +6,7 @@ import type { SocialAdapter } from './snowluma.js';
 import { definitelyFailed } from './snowluma.js';
 import { errorText } from './domain.js';
 import { fetchImage, preferJpeg, WebReader } from './web.js';
+import { findFeed, QzoneShare, type QzonePost } from './qzone.js';
 import { SnowLumaApiError } from '@snowluma/sdk';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLumaActionDefinition } from './snowluma-catalog.js';
 import { actionSummary } from './runtime-context.js';
@@ -69,8 +70,9 @@ function jpegImages(value: unknown): unknown {
 }
 export interface ToolSet { current(): AgentTool[] }
 
-export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext): ToolSet {
+export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, qzonePost?: QzonePost): ToolSet {
   const web = new WebReader(config.web);
+  const qzone = new QzoneShare(social, config.snowluma.selfId, qzonePost);
   // Reactions in a chat record read better by name. The catalog is read from SnowLuma once and kept; a failed read is retried later.
   let facesTried = 0;
   async function faceNames(signal?: AbortSignal): Promise<Record<string, string>> {
@@ -176,6 +178,44 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       return store.schedule(args.title, args.kind, dueAt, [...context().sources]);
     }),
     tool('finish_activity', 'Mark a commitment or life plan as completed or cancelled.', Type.Object({ id: string('Activity ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('cancelled')]) }), args => { store.finishWake(args.id, args.status); return store.wakes(); }),
+    {
+      name: 'share_qzone_feed', label: 'share_qzone_feed',
+      description: "Share a Qzone post into a private or group chat as the card QQ itself sends when sharing a post: Qzone signs the card, and the send returns a receipt. For a recommended (空友爱看) post, pass its cell_common.feed_id as tid and the ID of the get_qzone_public_feeds or get_qzone_public_feed_detail result it appears in as source. For one of your own posts, pass its tid alone. Specify exactly one of user_id or group_id. Qzone warns that anyone holding a shared card can open the post, even in a restricted space, and a recommended post's card carries its author's QQ number; share only what the post's original audience permits.",
+      parameters: Type.Object({ tid: string('feed_id of the post; for your own post, its tid', 100), source: Type.Optional(string('Event ID of the result listing a recommended post; omit for your own post', 100)), user_id: Type.Optional(Type.Integer({ minimum: 1 })), group_id: Type.Optional(Type.Integer({ minimum: 1 })) }),
+      replay: 'never', executionMode: 'sequential',
+      execute: async (_callId, args: any, signal) => {
+        ensureCurrent(store, context(), signal);
+        if ((args.user_id === undefined) === (args.group_id === undefined)) throw new Error('Specify exactly one of user_id or group_id.');
+        let listed: Record<string, unknown> | undefined;
+        if (args.source !== undefined) {
+          const event = store.event(store.resolve(args.source));
+          if (!event) throw new Error('The experience does not exist or has been deleted.');
+          listed = findFeed(event.payload.result, args.tid);
+          if (!listed) throw new Error('That post does not appear in the event.');
+          context().sources.add(event.id);
+        }
+        const target = args.group_id !== undefined ? { group_id: args.group_id } : { user_id: args.user_id };
+        const attempt = store.beginAction(`qzone_share:${crypto.randomUUID()}`, 'share_qzone_feed', { ...target, tid: args.tid }, [...context().sources], [...context().triggers], config.limits.actionsPerHour);
+        const actionId = attempt.action.id;
+        if (attempt.fresh) {
+          // Nothing reaches the chat before the card is sent, so an earlier failure is a definite one.
+          let card: string | undefined;
+          try {
+            const cookies = await qzone.cookies(signal);
+            card = await qzone.card(cookies, listed ?? await qzone.ownFeed(cookies, args.tid, signal), signal);
+          } catch (error) { store.finishAction(actionId, 'failed', { message: errorText(error) }); }
+          if (card !== undefined) {
+            try { store.finishAction(actionId, 'success', { receipt: await social.execute(args.group_id !== undefined ? 'send_group_msg' : 'send_private_msg', { ...target, message: [{ type: 'json', data: { data: card } }] }, signal), card }); }
+            catch (error) { store.finishAction(actionId, definitelyFailed(error) ? 'failed' : 'unknown', { error: error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }, card }); }
+          }
+        }
+        const outcome = store.actionById(actionId)!;
+        if (outcome.status !== 'success') throw new Error(JSON.stringify({ actionId, outcome: outcome.status, reused: !attempt.fresh, error: outcome.result, instruction: 'Use inspect_actions to check the action record.' }));
+        const experience = recordToolExperience('qzone_share', outcome.result);
+        const metadata = { sourceId: experience.sourceId, actionId, outcome: 'success', reused: !attempt.fresh };
+        return { content: [{ type: 'text', text: JSON.stringify(outcome.result) }, { type: 'text', text: `Local execution information: ${JSON.stringify(metadata)}` }], details: metadata };
+      },
+    },
     tool('read_webpage', 'Read a public webpage.', Type.Object({ url: string('Public webpage URL', 2000) }), async (args, signal) => recordToolExperience('reading', await web.read(args.url, signal))),
     tool('search_web', 'Search the web for public information.', Type.Object({ query: string('Search query, at most 128 Unicode characters', 128) }), async (args, signal) => recordToolExperience('search', await web.search(args.query, signal))),
   ];
@@ -262,5 +302,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     }),
   );
   const base = result.filter(tool => config.web.enabled || !['read_webpage', 'search_web'].includes(tool.name));
-  return { current: () => [...base, ...snowlumaCatalog.filter(allowed).map(action => native.get(action.name)!)] };
+  // Sharing reads the account's Qzone cookies and sends a message, so it follows the permissions of those interfaces.
+  const shareable = () => allowed(findSnowLumaAction('get_cookies')) && ['send_private_msg', 'send_group_msg'].some(name => allowed(findSnowLumaAction(name)));
+  return { current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(action => native.get(action.name)!)] };
 }
