@@ -147,7 +147,7 @@ test('deletion during summarization invalidates its result before any further mo
   } finally { release.resolve(); f.store.close(); }
 });
 
-test('an incomplete summary preserves the previous window without acknowledging new observations', async () => {
+test('a summary lost to a transport error fails the run and keeps the previous window without acknowledging new observations', async () => {
   const f = fixture();
   try {
     smallWindow(f);
@@ -157,13 +157,13 @@ test('an incomplete summary preserves the previous window without acknowledging 
     const source = event(f.store, 'New observation triggering consolidation');
     f.faux.setResponses([context => {
       assert.ok(isSummary(context.messages));
-      return { ...answer('Incomplete summary'), stopReason: 'length' };
+      return { ...answer('Partial summary'), stopReason: 'error', errorMessage: 'gateway timeout' };
     }]);
-    await assert.rejects(f.brain.run(f.store.claim(20)!), /continuity summary was not generated completely/);
+    await assert.rejects(f.brain.run(f.store.claim(20)!), /continuity summary was not generated completely: gateway timeout/);
     assert.equal(f.store.event(source.id)?.status, 'processing');
     assert.equal(f.store.processedCount(), 1);
     assert.equal(f.store.dailyCalls(), 2);
-    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /Incomplete summary/);
+    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /Partial summary/);
     assert.match(JSON.stringify(f.brain.agent.state.messages), /Judgment not yet saved to long-term memory/);
     f.store.releaseClaims();
     f.faux.setResponses([answer('Complete replacement summary preserving the earlier judgment'), answer('Read again')]);
@@ -328,15 +328,139 @@ test('summary retries are bounded and charged, and only the valid replacement is
   } finally { f.store.close(); }
 });
 
+const compactedLog = (f: ReturnType<typeof fixture>) => f.store.logs(100).find(log => log.kind === 'context_compacted')?.data as Record<string, unknown> | undefined;
+const references = (messages: unknown) => JSON.stringify(messages).match(/Original record IDs: ([^"\\]+)/)![1]!.split(', ');
+
+test('a summary cut off at the limit keeps its complete lines', async () => {
+  const f = fixture();
+  try {
+    smallWindow(f);
+    event(f.store, 'Previous observation'); f.faux.setResponses([answer(longReply('Judgment before the cut.'))]);
+    await f.brain.run(f.store.claim(20)!);
+    const source = event(f.store, 'Consolidation needed');
+    f.faux.setResponses([
+      context => { assert.ok(isSummary(context.messages)); return { ...answer('Most important: the judgment before the cut.\nLess important: an unfinished li'), stopReason: 'length' }; },
+      answer('Continued'),
+    ]);
+    await f.brain.run(f.store.claim(20)!);
+    const state = JSON.stringify(f.brain.agent.state.messages);
+    assert.match(state, /Most important: the judgment before the cut\./);
+    assert.doesNotMatch(state, /unfinished li/);
+    assert.equal(f.store.event(source.id)?.status, 'processed');
+    assert.equal(compactedLog(f)?.truncated, true);
+    assert.equal(compactedLog(f)?.setAside, undefined);
+  } finally { f.store.close(); }
+});
+
+test('a summary that cannot be completed sets older exchanges aside instead of failing the run', async () => {
+  const f = fixture();
+  try {
+    smallWindow(f);
+    event(f.store, 'Previous observation');
+    f.faux.setResponses([answer(longReply('Judgment not yet saved to long-term memory.'))]);
+    await f.brain.run(f.store.claim(20)!);
+    const source = event(f.store, 'New observation triggering consolidation');
+    f.faux.setResponses([
+      context => { assert.ok(isSummary(context.messages)); return { ...answer('Incomplete summary'), stopReason: 'length' }; },
+      context => {
+        assert.ok(!isSummary(context.messages));
+        assert.match(JSON.stringify(context.messages), /No summary was written for \d+ older messages from .+ to .+ \(The continuity summary was not generated completely: length\)/);
+        return answer('Continue from the latest observation');
+      },
+    ]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(f.store.event(source.id)?.status, 'processed');
+    assert.equal(f.store.dailyCalls(), 3);
+    const state = JSON.stringify(f.brain.agent.state.messages);
+    assert.doesNotMatch(state, /Incomplete summary|Judgment not yet saved to long-term memory/);
+    assert.match(String(compactedLog(f)?.setAside), /not generated completely: length/);
+    // Set aside, not lost: the originals stay readable through the summary's references.
+    assert.ok(references(f.brain.agent.state.messages).some(id => JSON.stringify(f.store.contextRecord(id)).includes('Judgment not yet saved to long-term memory')));
+  } finally { f.store.close(); }
+});
+
+test('setting exchanges aside carries the previous summary forward', async () => {
+  const f = fixture(); let summaries = 0;
+  try {
+    smallWindow(f);
+    f.faux.setResponses(Array.from({ length: 40 }, () => context => {
+      if (!isSummary(context.messages)) return answer(longReply('Ordinary judgment.'));
+      return ++summaries === 1 ? answer('Handoff: keep the lunar topic going.') : { ...answer('Cut off'), stopReason: 'length' };
+    }));
+    for (let index = 0; index < 8 && summaries < 2; index++) {
+      event(f.store, `Observation ${index}`);
+      await f.brain.run(f.store.claim(20)!);
+    }
+    assert.equal(summaries, 2);
+    const state = JSON.stringify(f.brain.agent.state.messages);
+    assert.match(state, /Handoff: keep the lunar topic going\.\\n\[No summary was written/);
+    assert.match(state, /the earlier summary carried forward above is ctx:[0-9a-f]{64} in full/);
+    assert.equal(f.store.logs(100).filter(log => log.kind === 'context_compacted').length, 2);
+  } finally { f.store.close(); }
+});
+
+test('a first request that cannot make room ahead of time goes on within the full budget', async () => {
+  const f = fixture();
+  try {
+    smallWindow(f); f.cfg.compaction.idleRatio = 0.05;
+    const source = event(f.store, 'Only observation');
+    f.faux.setResponses([context => { assert.ok(!isSummary(context.messages)); return answer('Continue'); }]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(f.store.event(source.id)?.status, 'processed');
+    const skipped = f.store.logs(100).find(log => log.kind === 'context_compaction_skipped')?.data as Record<string, unknown> | undefined;
+    assert.match(String(skipped?.message), /No older exchanges can be safely compacted/);
+  } finally { f.store.close(); }
+});
+
+test('history too large for one summary request is set aside without a summary call', async () => {
+  const f = fixture();
+  try {
+    smallWindow(f); f.cfg.limits.contextTokens = 64000;
+    f.faux.setResponses(Array.from({ length: 4 }, () => answer(longReply('Judgment from a roomy window.'))));
+    for (let index = 0; index < 4; index++) { event(f.store, `Observation ${index}`); await f.brain.run(f.store.claim(20)!); }
+    f.cfg.limits.contextTokens = 12800;
+    const source = event(f.store, 'Observation after the window shrank');
+    f.faux.setResponses([context => { assert.ok(!isSummary(context.messages)); return answer('Continue'); }]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(f.store.event(source.id)?.status, 'processed');
+    assert.ok(!f.store.logs(100).some(log => log.kind === 'context_summary_completed'));
+    assert.match(String(compactedLog(f)?.setAside), /exceeds the context budget/);
+  } finally { f.store.close(); }
+});
+
+test("a run's first request compacts above idleRatio, while later requests compact only at the full budget", async () => {
+  const f = fixture(); let summaries = 0;
+  try {
+    smallWindow(f); f.cfg.compaction.keepRecentTokens = 200;
+    for (const text of ['Previous observation', 'Another observation']) {
+      event(f.store, text); f.faux.setResponses([answer('Short previous judgment')]);
+      await f.brain.run(f.store.claim(20)!);
+    }
+    // Any context is crowded at this ratio; only the first request may act on it.
+    f.cfg.compaction.idleRatio = 0.05;
+    event(f.store, 'Next observation');
+    f.faux.setResponses([
+      context => { assert.ok(isSummary(context.messages)); summaries++; return answer('Handoff of the short previous judgment'); },
+      context => { assert.ok(!isSummary(context.messages)); return answer(call('set_activity', { activity: 'Chatting' })); },
+      context => { assert.ok(!isSummary(context.messages)); return answer('Done'); },
+    ]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(summaries, 1);
+    assert.equal(f.store.logs(100).filter(log => log.kind === 'context_compacted').length, 1);
+  } finally { f.store.close(); }
+});
+
 async function idleFixture() {
   const f = fixture();
-  smallWindow(f); f.cfg.compaction.keepRecentTokens = 200; f.cfg.compaction.idleRatio = 0.7;
+  smallWindow(f); f.cfg.compaction.keepRecentTokens = 200;
   event(f.store, 'Previous observation');
   f.faux.setResponses([answer('Judgment from the previous run. ' + 'old working fact '.repeat(300))]);
   await f.brain.run(f.store.claim(20)!);
   event(f.store, 'Second observation', 200);
   f.faux.setResponses([answer('Short reply')]);
   await f.brain.run(f.store.claim(20)!);
+  // A run's first request compacts at the same ratio, so lower it only once the runs are done.
+  f.cfg.compaction.idleRatio = 0.7;
   return f;
 }
 
@@ -373,12 +497,13 @@ test('idle consolidation stopped by an arriving event keeps the original working
     assert.match(JSON.stringify(f.brain.agent.state.messages), /Judgment from the previous run/);
     assert.ok(!f.store.logs().some(log => log.kind === 'context_compacted'));
     event(f.store, 'Arrived during consolidation');
+    // The context is still crowded, so the run compacts it on its first request instead.
     f.faux.setResponses([context => {
-      assert.ok(!isSummary(context.messages));
+      assert.ok(isSummary(context.messages));
       assert.match(JSON.stringify(context.messages), /Judgment from the previous run/);
       assert.doesNotMatch(JSON.stringify(context.messages), /Summary that must be discarded/);
-      return answer('Continue');
-    }]);
+      return answer('Handoff written by the run');
+    }, answer('Continue')]);
     await f.brain.run(f.store.claim(20)!);
   } finally { release.resolve(); f.store.close(); }
 });

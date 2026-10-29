@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { contextRecordId, estimatedContextTokens, IMAGE_TOKENS, messageTokens, persistableMessage, pruneToolResults, TokenMeter } from '../src/context.js';
+import { contextRecordId, estimatedContextTokens, fitLines, IMAGE_TOKENS, messageTokens, persistableMessage, pruneToolResults, TokenMeter } from '../src/context.js';
 
 const system: AgentMessage = { role: 'system', content: 'Fixed instructions', timestamp: 1 };
 const input: AgentMessage = { role: 'user', content: 'Hello', timestamp: 2 };
@@ -66,3 +66,12 @@ test('old tool results retain provenance and unknown status while the latest too
   assert.ok(messageTokens(result.messages[2]!) < messageTokens(firstResult));
   assert.equal(pruneToolResults(result.messages, 100).changed, 0);
 });
+
+test('fitted text keeps whole lines from the start and drops an unfinished last line', () => {
+  const text = '最重要的事\nsecond line\n第三行写到一半';
+  assert.equal(fitLines(text, 100), text);
+  assert.equal(fitLines(text, 100, false), '最重要的事\nsecond line');
+  assert.equal(fitLines(text, 5), '最重要的事');
+  assert.equal(fitLines('一行就超出了限制', 3), '');
+});
+

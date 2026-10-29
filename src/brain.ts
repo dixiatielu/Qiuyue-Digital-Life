@@ -4,12 +4,13 @@ import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type I
 import type { Config } from './config.js';
 import type { Monitor } from './monitor.js';
 import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
-import { developmentKinds } from './domain.js';
+import { developmentKinds, errorText } from './domain.js';
 import { Store, digest } from './store.js';
 import { publicFetch } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
+import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
+import { recordTime } from './record.js';
 
 /** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. */
 const onlineActivities: { activity: string; tools: string[]; memoryKind?: MemoryKind }[] = [
@@ -29,6 +30,13 @@ const onlineActivities: { activity: string; tools: string[]; memoryKind?: Memory
   { activity: 'Write or reread your diary', tools: ['remember', 'recall'], memoryKind: 'note' },
   { activity: 'Search or read something online', tools: ['search_web', 'read_webpage'] },
 ];
+/** The summarized text of a continuity summary, without its framing line and record references. */
+function summaryBody(message: AgentMessage) {
+  if (message.role !== 'user' || typeof message.content !== 'string' || !message.content.startsWith(SUMMARY_PREFIX)) return;
+  const body = message.content.slice(message.content.indexOf('\n') + 1);
+  const end = body.lastIndexOf('\nOriginal record IDs: ');
+  return end < 0 ? body : body.slice(0, end);
+}
 const reviewing = (observation: Observation) => observation.events.some(event => event.kind === 'memory_maintenance');
 const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : `snowluma:${tool}`;
 // Self-presentation the agent sets and later sees as current state.
@@ -80,6 +88,7 @@ export class PiBrain implements Brain {
       convertToLlm: toModelMessages,
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
       prepareRequest: async ({ context, model: currentModel }, signal) => {
+        const first = this.turns === 0;
         ensureCurrent(store, this.thought, signal);
         const runtime = this.runtimeContext();
         let messages = [...context.messages];
@@ -89,7 +98,9 @@ export class PiBrain implements Brain {
         const { window, budget } = this.budget(currentModel);
         const route = this.route(currentModel);
         let measured: TokenMeasurement;
-        ({ messages, measured } = await this.shrink(messages, budget, budget, window, currentModel, runtime, signal));
+        // The first request leaves room for the observations steered in after it; later ones may fill the budget.
+        const limit = first ? Math.floor(budget * config.compaction.idleRatio) : budget;
+        ({ messages, measured } = await this.shrink(messages, limit, budget, window, currentModel, runtime, signal));
         if (measured.tokens > budget) throw new Error('Required state or the latest observation exceeds the context budget; reduce the batch size or organize pending items.');
         store.log('context_budget', { runId: this.runId, ...measured, inputBudget: budget, outputReserveTokens: config.limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
         ensureCurrent(store, this.thought, signal);
@@ -168,7 +179,13 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       const latest = messages.at(-1);
       if (!(latest?.role === 'user' && latest.content === snapshot.content)) messages.push(snapshot);
       this.runtimeSnapshot = runtime;
-      messages = await this.compact(messages, budget, window, model, this.stream, signal);
+      try { messages = await this.compact(messages, budget, window, model, this.stream, signal); }
+      catch (error) {
+        // Below the full budget, compaction only makes room ahead of time; the request can go on without it.
+        if (measured.tokens > budget || signal?.aborted) throw error;
+        ensureCurrent(this.store, this.thought, signal);
+        this.store.log('context_compaction_skipped', { runId: this.runId, message: errorText(error) });
+      }
       measured = this.meter.measure(messages, route);
     }
     return { messages, measured };
@@ -182,36 +199,55 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const references = `\nOriginal record IDs: ${ids.slice(-8).join(', ')}`;
     const outputLimit = summaryLimit - textTokens(framing + references) - 16;
     if (outputLimit < 64) throw new Error('The summary token limit is too small to retain the required source references.');
-    const instructions = `Internal working context consolidation: Produce a brief continuity summary of at most ${outputLimit} tokens for the same digital life. Summarize only the first ${removed.length} older messages after the system message, including any existing summary. If recent exchanges follow, use them only to correct outdated judgments; their originals are retained separately. Do not call tools or take external action. Preserve people, times, group or private settings, changes in relationship impressions and their evidence, current topics, unfinished matters, and actual action outcomes. Distinguish reported claims, inferences, fiction, success, failure, and unknown outcomes. Old state may be outdated; follow later runtime_data. Update outdated judgments in existing summaries. Use read_context to retrieve originals when needed; older records include ${ids.slice(-12).join(', ')}. Retain relevant source IDs and necessary ctx: record IDs in the summary.`;
+    // Models cannot count their own tokens; aiming well below the cut-off leaves room to finish.
+    const target = Math.floor(outputLimit * 0.6);
+    const instructions = `Internal working context consolidation: Produce a brief continuity summary for the same digital life, aiming for about ${target} tokens (Chinese runs about one token per character); output stops at ${outputLimit}. Summarize only the first ${removed.length} older messages after the system message. An existing summary among them is material to condense, not a prefix to keep: the limit covers it too, so merge it in and shorten it, dropping what is settled, superseded, or already saved with remember. Put the most important first; if output stops early, only the end is lost. If recent exchanges follow, use them only to correct outdated judgments; their originals are retained separately. Do not call tools or take external action. Preserve people, times, group or private settings, changes in relationship impressions and their evidence, current topics, unfinished matters, and actual action outcomes. Distinguish reported claims, inferences, fiction, success, failure, and unknown outcomes. Old state may be outdated; follow later runtime_data. Update outdated judgments in existing summaries. Use read_context to retrieve originals when needed; older records include ${ids.slice(-12).join(', ')}. Retain relevant source IDs and necessary ctx: record IDs in the summary.`;
     const directive: Message = { role: 'user', content: instructions, timestamp: Date.now() };
     // Reuse the complete warm prefix when it fits; the old prefix remains a fallback for oversized new input.
     let request: AgentMessage[] = [system, ...removed, ...kept, directive];
     const fits = (candidate: AgentMessage[]) => this.meter.measure(candidate, this.route(model)).tokens + summaryLimit + this.config.limits.contextSafetyTokens <= window;
     const includedRecentContext = fits(request);
     if (!includedRecentContext) request = [system, ...removed, directive];
-    if (!fits(request)) throw new Error('The history to consolidate exceeds the context budget; a continuity summary cannot be generated safely.');
-    let lastError: unknown;
-    for (let attempt = 0; attempt <= this.config.compaction.retries; attempt++) {
+    const sized = includedRecentContext || fits(request);
+    const replacement = (text: string) => {
+      const summary: Message = { role: 'user', content: framing + text + references, timestamp: Date.now() };
+      const compacted = [system, summary, ...kept];
+      const before = estimatedContextTokens(messages); const after = estimatedContextTokens(compacted);
+      return after < before && after <= budget ? { summary, compacted, before, after } : undefined;
+    };
+    let result: ReturnType<typeof replacement>; let truncated = false; let transient = false;
+    let failure = 'The history to consolidate exceeds the context budget; a continuity summary cannot be generated safely.';
+    for (let attempt = 0; sized && !result && attempt <= this.config.compaction.retries; attempt++) {
       ensureCurrent(this.store, this.thought, signal);
       this.chargeCall();
       const response = await (await stream(model, normalizeContext({ messages: toModelMessages(request) }), { apiKey: process.env[this.config.model.apiKeyEnv], signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result();
       ensureCurrent(this.store, this.thought, signal);
       this.store.log('context_summary_completed', { runId: this.runId, attempt, usage: response.usage, stopReason: response.stopReason });
-      try {
-        if (response.stopReason !== 'stop' || response.content.some(item => item.type === 'toolCall')) throw new Error(`The continuity summary was not generated completely: ${response.errorMessage ?? response.stopReason}`);
-        const text = response.content.filter((item): item is TextContent => item.type === 'text').map(item => item.text).join('\n').trim();
-        if (!text || textTokens(text) > outputLimit) throw new Error('The continuity summary is empty or exceeds the token budget.');
-        const summary: Message = { role: 'user', content: framing + text + references, timestamp: Date.now() };
-        const compacted = [system, summary, ...kept];
-        const before = estimatedContextTokens(messages); const after = estimatedContextTokens(compacted);
-        if (after >= before || after > budget) throw new Error('The continuity summary did not reduce the context or still exceeds the budget.');
-        this.store.archiveContext([summary], [...this.thought.sources]);
-        this.meter.reset();
-        this.compactions.push({ runId: this.runId, beforeTokens: before, afterTokens: after, removedMessages: removed.length, includedRecentContext, firstKeptRecordId: kept[0] ? contextRecordId(kept[0]) : undefined, summaryRecordId: contextRecordId(summary) });
-        return compacted;
-      } catch (error) { lastError = error; }
+      transient = response.stopReason === 'error' || response.stopReason === 'aborted';
+      const written = transient || response.content.some(item => item.type === 'toolCall') ? '' : response.content.filter((item): item is TextContent => item.type === 'text').map(item => item.text).join('\n').trim();
+      // A summary cut off at the limit keeps its complete lines, which come in order of importance.
+      const text = fitLines(written, outputLimit, response.stopReason === 'stop');
+      result = text ? replacement(text) : undefined;
+      truncated = text !== written;
+      failure = result ? '' : text ? 'The continuity summary did not reduce the context or still exceeds the budget.' : `The continuity summary was not generated completely: ${response.errorMessage ?? response.stopReason}`;
     }
-    throw lastError;
+    // The same history would fail the same way on every retry, so set it aside rather than fail the run.
+    // Only a transport failure, which a later run may not meet, still fails it.
+    if (!result && !transient) { result = replacement(this.setAside(removed, ids, outputLimit, failure)); truncated = false; }
+    if (!result) throw new Error(failure);
+    this.store.archiveContext([result.summary], [...this.thought.sources]);
+    this.meter.reset();
+    this.compactions.push({ runId: this.runId, beforeTokens: result.before, afterTokens: result.after, removedMessages: removed.length, includedRecentContext, ...(truncated ? { truncated } : {}), ...(failure ? { setAside: failure } : {}), firstKeptRecordId: kept[0] ? contextRecordId(kept[0]) : undefined, summaryRecordId: contextRecordId(result.summary) });
+    return result.compacted;
+  }
+  /** Without a summary, older messages leave under a note; their originals stay archived and their events recallable. */
+  private setAside(removed: AgentMessage[], ids: string[], limit: number, reason: string) {
+    const index = removed.findIndex(message => summaryBody(message) !== undefined);
+    const times = removed.map(message => message.timestamp);
+    const span = times.length ? ` from ${recordTime(Math.min(...times))} to ${recordTime(Math.max(...times))}` : '';
+    const note = `[No summary was written for ${removed.length} older messages${span} (${reason}). Use recall, read_event, or read_chat_record for that period, or read_context for the originals${index >= 0 ? `; the earlier summary carried forward above is ${ids[index]} in full` : ''}.]`;
+    const previous = index >= 0 ? fitLines(summaryBody(removed[index]!)!, limit - textTokens(note) - 1) : '';
+    return previous ? `${previous}\n${note}` : note;
   }
   private resetContext() {
     this.agent.reset(); this.agent.state.tools = this.tools.current();
@@ -340,7 +376,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     this.agent.state.messages = folded.messages;
     this.store.log('context_folded', { runId: this.runId, results: folded.changed });
   }
-  /** Between runs, compact a context above compaction.idleRatio of its budget; runs still compact at the full budget. */
+  /** Between runs, compact a context above compaction.idleRatio of its budget; the first request of a run does the same, later ones compact at the full budget. */
   async consolidate() {
     const generation = this.store.settings().generation;
     this.prepare(generation);
