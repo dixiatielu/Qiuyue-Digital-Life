@@ -1,6 +1,6 @@
 # Expose native SnowLuma APIs
 
-A later change to perception scope is described in [ADR-0011](0011-perceive-all-snowluma-push-events.md): the restriction below that group configuration determines continuous perception scope has been removed; group configuration is used only for historical recovery.
+A later change to perception scope is described in [ADR-0011](0011-perceive-all-snowluma-push-events.md): the restriction below that group configuration determines continuous perception scope has been removed; group configuration is used only for historical recovery. One tool outside the SnowLuma catalog, for sharing Qzone posts, is described in [ADR-0013](0013-share-qzone-posts-through-qzone-share-service.md).
 
 The digital life autonomously combines actions using SnowLuma's native API names, parameters, and business results. An atomic tool catalog is generated from a fixed version of the official definitions and uses the original API names directly. The catalog filters upstream compatibility placeholder APIs, dotted APIs, historical misspellings, and compatibility field declarations; streaming APIs retain ordered data frames. All enabled APIs are provided directly to the model with their original names and complete parameters. Common APIs retain full descriptions, while the rest have short descriptions to reduce context use. `search_snowluma_tools` searches the catalog, and `load_snowluma_tools` returns detailed usage, parameters, results, and examples without changing the available tool set.
 

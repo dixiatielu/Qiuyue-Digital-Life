@@ -19,6 +19,7 @@ const onlineActivities: { activity: string; tools: string[]; memoryKind?: Memory
   { activity: 'Check comments on your own Qzone posts', tools: ['get_qzone_msg_list', 'get_qzone_msg_detail'] },
   { activity: 'Post to your Qzone', tools: ['send_qzone_msg'] },
   { activity: 'Browse and like recommended Qzone posts', tools: ['get_qzone_public_feeds', 'get_qzone_public_feed_detail', 'get_qzone_public_comments', 'get_qzone_public_replies', 'set_qzone_public_like', 'set_qzone_public_comment_like'] },
+  { activity: 'Share a Qzone post with someone or a group', tools: ['share_qzone_feed'] },
   { activity: 'Browse, like, comment on, or add to group albums', tools: ['get_group_album_list', 'get_group_album_media_list', 'set_group_album_media_like', 'do_group_album_comment', 'upload_image_to_qun_album'] },
   { activity: 'Check in to a group', tools: ['set_group_sign', 'get_group_signed_list'] },
   { activity: "Like a friend's QQ profile", tools: ['send_like'] },
@@ -38,7 +39,7 @@ function summaryBody(message: AgentMessage) {
   return end < 0 ? body : body.slice(0, end);
 }
 const reviewing = (observation: Observation) => observation.events.some(event => event.kind === 'memory_maintenance');
-const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : `snowluma:${tool}`;
+const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : tool === 'share_qzone_feed' ? 'qzone_share' : `snowluma:${tool}`;
 // Self-presentation the agent sets and later sees as current state.
 const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
 
