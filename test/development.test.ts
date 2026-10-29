@@ -23,18 +23,21 @@ function sent(store: Store, kind: string, args: Record<string, unknown>, message
 const updates = (messages: Message[]) => messages.flatMap(message => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<runtime_data>')
   ? [JSON.parse(message.content.slice('<runtime_data>'.length, message.content.lastIndexOf('</runtime_data>')))] : []);
 
-test('development needs a scope for its kind, one impression per person, and support beyond its own messages', () => {
+test('development holds everywhere unless it belongs to one group, with one impression per person and support beyond its own messages', () => {
   const store = new Store(':memory:'); store.bindAccount(900);
   try {
     const other = say(store, 7, '你这也太长了吧');
     const mine = say(store, 900, '（叉腰）我就是要说很长很长的一段话！');
     const echo = store.receive({ key: 'tool:1', kind: 'snowluma:send_group_msg', at: Date.now(), text: '{}', payload: { result: {} } }, true)!;
     const base = { title: 'Short replies', content: 'Keep group replies short', importance: 5 };
-    assert.throws(() => store.writeMemory({ ...base, kind: 'habit', sources: [other.id] }, false), /habit scope is global/);
-    assert.throws(() => store.writeMemory({ ...base, kind: 'practice', scope: 'person:7', sources: [other.id] }, false), /practice scope is global or group/);
-    assert.throws(() => store.writeMemory({ ...base, kind: 'habit', scope: 'global', sources: [mine.id, echo.id] }, false), /cannot rest only on your own messages/);
-    const habit = store.writeMemory({ ...base, kind: 'habit', scope: 'global', sources: [mine.id, other.id] }, false);
+    // What one person wants belongs to the impression of them, not to a habit.
+    assert.throws(() => store.writeMemory({ ...base, kind: 'habit', scope: 'person:7', sources: [other.id] }, false), /habit or practice scope is global/);
+    assert.throws(() => store.writeMemory({ ...base, kind: 'practice', scope: 'person:7', sources: [other.id] }, false), /habit or practice scope is global/);
+    assert.throws(() => store.writeMemory({ ...base, kind: 'impression', sources: [other.id] }, false), /impression scope is person/);
+    assert.throws(() => store.writeMemory({ ...base, kind: 'habit', sources: [mine.id, echo.id] }, false), /cannot rest only on your own messages/);
+    const habit = store.writeMemory({ ...base, kind: 'habit', sources: [mine.id, other.id] }, false);
     assert.equal(habit.scope, 'global');
+    assert.equal(store.writeMemory({ ...base, kind: 'practice', sources: [other.id] }, false).scope, 'global');
     // A practice describes others; citing what it saw itself do is allowed.
     assert.ok(store.writeMemory({ ...base, kind: 'practice', scope: 'group:100', sources: [mine.id] }, false));
     const impression = store.writeMemory({ ...base, kind: 'impression', title: 'P7', content: 'Teases me about long messages', scope: 'person:7', sources: [eventRef(other.id)] }, false);
@@ -46,20 +49,21 @@ test('development needs a scope for its kind, one impression per person, and sup
   } finally { store.close(); }
 });
 
-test('development is bounded per scope for the digital life but not for operator corrections, and retired entries leave use', () => {
+test('development is bounded per kind and scope for the digital life but not for operator corrections, and retired entries leave use', () => {
   const store = new Store(':memory:'); store.bindAccount(900);
   try {
     const source = say(store, 7, '+1');
     const write = (content: string, supersedes?: string) => store.writeMemory({ kind: 'practice', title: 'Chains', content, importance: 5, scope: 'group:100', sources: [source.id], supersedes }, false, limits);
     const first = write('x'.repeat(40));
-    assert.throws(() => write('y'.repeat(30)), /would reach 70 characters, above its limit of 60.*retire_memory/);
+    const habit = store.writeMemory({ kind: 'habit', title: 'Join chains', content: 'h'.repeat(50), importance: 5, scope: 'group:100', sources: [source.id] }, false, limits);
+    assert.throws(() => write('y'.repeat(30)), /practices in group:100 would reach 70 characters, above the limit of 60.*retire_memory/);
     const merged = write('z'.repeat(55), first.id);
-    assert.equal(store.development(['group:100']).length, 1);
+    assert.equal(store.development(['group:100']).length, 2);
     const corrected = handleControl(store, { args: ['memory', 'correct', merged.id, 'w'.repeat(80)] }) as { id: string; scope: string };
     assert.equal(corrected.scope, 'group:100');
     assert.throws(() => store.retireMemory(say(store, 7, 'x').id), /Only a current habit/);
     store.retireMemory(corrected.id);
-    assert.deepEqual(store.development(['group:100']), []);
+    assert.deepEqual(store.development(['group:100']).map(memory => memory.id), [habit.id]);
     assert.equal(store.memory(corrected.id)?.active, false);
     assert.ok(store.logs().some(log => log.kind === 'memory_retired'));
   } finally { store.close(); }
@@ -164,6 +168,29 @@ test('development reaches each thought by scope and people present, and chat rec
   } finally { f.store.close(); }
 });
 
+test('a review sees the development of the chats it lists and of the people who spoke there', async () => {
+  const f = fixture();
+  try {
+    f.store.bindAccount(900);
+    const source = say(f.store, 7, 'source', { groupId: 200 });
+    say(f.store, 8, 'hi', { groupId: undefined });
+    f.store.acknowledge(f.store.claim(20)!.batchId);
+    const write = (kind: 'practice' | 'impression', scope: string, content: string) => f.store.writeMemory({ kind, title: content, content, importance: 5, scope, sources: [source.id] }, false);
+    const rule = write('practice', 'group:200', 'No stickers in this group');
+    const speaker = write('impression', 'person:7', 'Likes teasing');
+    const friend = write('impression', 'person:8', 'Chats privately');
+    write('impression', 'person:9', 'Did not speak');
+    f.store.receive({ key: 'review', kind: 'memory_maintenance', at: Date.now(), text: 'Review', payload: { backlog: f.store.reviewBacklog(900) } });
+    f.faux.setResponses([context => {
+      const snapshot = updates(context.messages as Message[]).at(-1);
+      assert.deepEqual(snapshot.practices.map((item: { id: string }) => item.id), [rule.id]);
+      assert.deepEqual(snapshot.impressions.map((item: { id: string }) => item.id), [speaker.id, friend.id]);
+      return answer('Reviewed');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+  } finally { f.store.close(); }
+});
+
 test('review waits for a quiet moment and lists the chats it has not read', async () => {
   const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   try {
@@ -178,7 +205,7 @@ test('review waits for a quiet moment and lists the chats it has not read', asyn
     assert.equal(f.store.pending(), 0);
     f.cfg.compaction.idleAfterMs = 0;
     f.faux.setResponses([context => {
-      assert.match(JSON.stringify(context.messages.at(-1)), /memory_maintenance.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record/);
+      assert.match(JSON.stringify(context.messages.at(-1)), /memory_maintenance.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record.*person=900/);
       return answer('Reviewed');
     }]);
     await runtime.tick(); await runtime.idle();

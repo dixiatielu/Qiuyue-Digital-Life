@@ -12,7 +12,8 @@ const parse = <T>(value: unknown): T => JSON.parse(String(value)) as T;
 const id = (prefix: string) => `${prefix}:${randomUUID()}`;
 export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
 const claimable = "status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life')";
-const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+|person:\d+)$/, practice: /^(global|group:\d+)$/, impression: /^person:\d+$/ };
+/** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
+const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+)$/, practice: /^(global|group:\d+)$/, impression: /^person:\d+$/ };
 /** A conversation is group:<id> or private:<qq>; its record is what happened there. */
 export function conversationOf(value: string): { type: 'group' | 'private'; id: number } {
   const match = /^(group|private):(\d+)$/.exec(value);
@@ -234,10 +235,10 @@ export class Store {
     if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
     if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
     const sources = [...new Set(input.sources.map(source => this.resolve(source)))];
-    const scope = isDevelopment(input.kind) ? input.scope : undefined;
+    const scope = isDevelopment(input.kind) ? input.scope ?? (input.kind === 'impression' ? undefined : 'global') : undefined;
     let subjects = input.subjects ?? [];
     if (isDevelopment(input.kind)) {
-      if (!scope || !developmentScopes[input.kind].test(scope)) throw new Error('A habit scope is global, group:<id>, or person:<qq>; a practice scope is global or group:<id>; an impression scope is person:<qq>.');
+      if (!scope || !developmentScopes[input.kind].test(scope)) throw new Error('A habit or practice scope is global (the default) or group:<id> for what belongs to that group alone; an impression scope is person:<qq>.');
       if (input.kind === 'impression') {
         const existing = this.db.prepare("SELECT id FROM memories WHERE active=1 AND kind='impression' AND scope=? AND id IS NOT ?").get(scope, input.supersedes ?? null);
         if (existing) throw new Error(`An impression of this person already exists (${existing.id}); revise it with supersedes.`);
@@ -247,8 +248,9 @@ export class Store {
       if (input.kind !== 'practice' && sources.every(source => this.ownMessage(source))) throw new Error('A habit or impression cannot rest only on your own messages; cite how others acted or responded.');
       if (limits) {
         const cap = scope.startsWith('person:') ? limits.personChars : limits.scopeChars;
-        const used = Number(this.db.prepare('SELECT coalesce(sum(length(content)),0) AS n FROM memories WHERE active=1 AND scope=? AND id IS NOT ?').get(scope, input.supersedes ?? null)!.n);
-        if (used + input.content.length > cap) throw new Error(`Development in ${scope} would reach ${used + input.content.length} characters, above its limit of ${cap}; merge entries with supersedes or retire some with retire_memory first.`);
+        // Habits and practices are bounded apart, so what it observes cannot crowd out what it keeps.
+        const used = Number(this.db.prepare('SELECT coalesce(sum(length(content)),0) AS n FROM memories WHERE active=1 AND scope=? AND kind=? AND id IS NOT ?').get(scope, input.kind, input.supersedes ?? null)!.n);
+        if (used + input.content.length > cap) throw new Error(`Your ${input.kind}s in ${scope} would reach ${used + input.content.length} characters, above the limit of ${cap}; merge entries with supersedes or retire some with retire_memory first.`);
       }
     }
     if (!sources.length && input.kind !== 'fiction') throw new Error('A memory must reference IDs of actual experiences or existing memories.');
@@ -397,6 +399,17 @@ export class Store {
       SELECT c.conversation, count(*) AS messages, min(c.at) AS since FROM (SELECT CASE WHEN group_id IS NOT NULL THEN 'group:'||group_id ELSE 'private:'||actor_id END AS conversation, at FROM events WHERE kind='message' AND actor_id IS NOT NULL AND actor_id!=?) c
       LEFT JOIN marks m USING(conversation) WHERE c.at>=max(coalesce(m.at,0),?) GROUP BY c.conversation ORDER BY messages DESC`).all(selfId, now - 86_400_000)
       .map(row => ({ conversation: String(row.conversation), messages: Number(row.messages), since: Number(row.since) }));
+  }
+  /** People with an impression who spoke in these conversations since the given times, latest first. */
+  impressionsIn(chats: { conversation: string; since: number }[], selfId: number, limit: number): number[] {
+    const last = new Map<number, number>();
+    for (const chat of chats) {
+      const filter = this.recordFilter(chat.conversation);
+      for (const row of this.db.prepare(`SELECT actor_id, max(at) AS at FROM events WHERE ${filter.events} AND kind='message' AND at>=? AND actor_id!=? AND EXISTS (SELECT 1 FROM memories WHERE active=1 AND kind='impression' AND scope='person:'||events.actor_id) GROUP BY actor_id`).all(filter.target, chat.since, selfId)) {
+        last.set(Number(row.actor_id), Math.max(last.get(Number(row.actor_id)) ?? 0, Number(row.at)));
+      }
+    }
+    return [...last].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([person]) => person);
   }
   private recordFilter(conversation: string) {
     const { type, id: target } = conversationOf(conversation);
