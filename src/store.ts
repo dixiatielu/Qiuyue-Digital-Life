@@ -15,6 +15,8 @@ export const digest = (value: unknown): string => createHash('sha256').update(js
 const claimable = "status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life')";
 /** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
 const recallable = `active=1 AND kind NOT IN (${developmentKinds.map(kind => `'${kind}'`).join(',')})`;
+/** Events the program writes about its own scheduling and bookkeeping; they record nothing anyone else did. */
+const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap']);
 /** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
 const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+)$/, practice: /^(global|group:\d+)$/, impression: /^person:\d+$/ };
 /** A conversation is group:<id> or private:<qq>; its record is what happened there. */
@@ -254,7 +256,7 @@ export class Store {
         subjects = [...new Set([...subjects, scope.slice('person:'.length)])];
       }
       // Self-description drawn only from its own output would feed back into every later thought.
-      if (input.kind !== 'practice' && sources.every(source => this.ownMessage(source))) throw new Error('A habit or impression cannot rest only on your own messages; cite how others acted or responded.');
+      if (input.kind !== 'practice' && !this.restsOnOthers(sources)) throw new Error('A habit or impression cannot rest only on your own messages, notes, or judgments; cite how others acted or responded.');
       if (limits) {
         const cap = scope.startsWith('person:') ? limits.personChars : limits.scopeChars;
         // Habits and practices are bounded apart, so what it observes cannot crowd out what it keeps.
@@ -300,6 +302,11 @@ export class Store {
     const event = this.event(source); if (!event) return false;
     const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
     return event.kind.startsWith('snowluma:send_') || (event.kind === 'message' && self !== undefined && event.actorId === parse<number>(self.value));
+  }
+  /** Whether the sources, or the memories they cite in turn, reach something it did not produce itself (ADR-0012): recalling its own judgment is not new evidence. */
+  private restsOnOthers(sources: string[]): boolean {
+    const reached = this.db.prepare('WITH RECURSIVE reach(id) AS (SELECT value FROM json_each(?) UNION SELECT source_id FROM sources JOIN reach ON owner_id=reach.id) SELECT id FROM reach').all(json(sources)).map(row => String(row.id));
+    return reached.some(source => { const event = this.event(source); return event !== undefined && !programEvents.has(event.kind) && !this.ownMessage(source); });
   }
   /** Development that applies in any of the given scopes, oldest first. */
   development(scopes: string[]): Memory[] {
