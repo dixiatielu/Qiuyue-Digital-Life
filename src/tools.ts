@@ -12,6 +12,7 @@ import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLu
 import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
 import { faceCaption, FaceCatalog } from './faces.js';
+import type { SemanticRecall } from './recall.js';
 
 /** reviewing: a memory_maintenance event is part of this thought. */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean }
@@ -71,7 +72,7 @@ function jpegImages(value: unknown): unknown {
 }
 export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog }
 
-export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, qzonePost?: QzonePost): ToolSet {
+export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, qzonePost?: QzonePost, recall?: SemanticRecall): ToolSet {
   const web = new WebReader(config.web);
   const qzone = new QzoneShare(social, config.snowluma.selfId, qzonePost);
   const faces = new FaceCatalog(store, social);
@@ -142,8 +143,9 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       const text = JSON.stringify(event); const offset = args.offset ?? 0;
       return { id: event.id, text: text.slice(offset, offset + 8000), nextOffset: offset + 8000 < text.length ? offset + 8000 : null };
     }),
-    tool('recall', 'Search for long-term understandings, important experiences, or personal notes; historical versions are available.', Type.Object({ query: Type.String({ maxLength: 500 }), subjects: Type.Optional(Type.Array(Type.String())), historical: Type.Optional(Type.Boolean()) }), args => {
-      const memories = store.search(args.query, config.memory.recallLimit, args.subjects ?? [], [], args.historical ?? false);
+    tool('recall', `Search for long-term understandings, important experiences, or personal notes${recall ? ', by meaning and by exact words such as names or QQ numbers' : ''}; historical versions are available.`, Type.Object({ query: Type.String({ maxLength: 500 }), subjects: Type.Optional(Type.Array(Type.String())), historical: Type.Optional(Type.Boolean()) }), async (args, signal) => {
+      const memories = recall ? await recall.search(args.query, config.memory.recallLimit, args.subjects ?? [], args.historical ?? false, signal) : store.search(args.query, config.memory.recallLimit, args.subjects ?? [], [], args.historical ?? false);
+      ensureCurrent(store, context(), signal);
       for (const memory of memories) context().sources.add(memory.id);
       return memories;
     }),

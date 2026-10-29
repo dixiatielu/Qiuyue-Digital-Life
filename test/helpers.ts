@@ -5,6 +5,7 @@ import { createTools } from '../src/tools.js';
 import { createModels, fauxProvider } from '@earendil-works/pi-ai';
 import type { SocialAdapter } from '../src/snowluma.js';
 import type { QzonePost } from '../src/qzone.js';
+import type { SemanticRecall } from '../src/recall.js';
 
 export function config() {
   const value = loadConfig(new URL('../config.example.json', import.meta.url).pathname);
@@ -20,7 +21,7 @@ export function deferred<T = void>() {
   const promise = new Promise<T>(done => { resolve = done; });
   return { promise, resolve };
 }
-export function fixture(social?: SocialAdapter, existingStore?: Store, qzonePost?: QzonePost) {
+export function fixture(social?: SocialAdapter, existingStore?: Store, qzonePost?: QzonePost, recall?: SemanticRecall) {
   const cfg = config(); const store = existingStore ?? new Store(':memory:');
   const sent: { kind: string; args: Record<string, unknown> }[] = [];
   const adapter = social ?? { execute: async (kind: string, args: Record<string, unknown>) => { sent.push({ kind, args }); return kind === 'get_msg' ? { group_id: 100, message_type: 'group', message_id: -42 } : { message_id: -42 }; } };
@@ -28,8 +29,8 @@ export function fixture(social?: SocialAdapter, existingStore?: Store, qzonePost
   let brain: PiBrain;
   let tools: ReturnType<typeof createTools>;
   const restart = () => {
-    tools = createTools(cfg, store, adapter, () => brain.thought, qzonePost);
-    brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) });
+    tools = createTools(cfg, store, adapter, () => brain.thought, qzonePost, recall);
+    brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) }, undefined, recall);
     return brain;
   };
   restart();

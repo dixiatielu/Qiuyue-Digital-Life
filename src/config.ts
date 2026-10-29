@@ -15,6 +15,8 @@ export interface Config {
   memory: { retentionDays: number; recallLimit: number; recentEvents: number; reflectionEveryEvents: number };
   development: { scopeChars: number; personChars: number; people: number; recordLines: number };
   web: { enabled: boolean; searchUrl: string; searchKeyEnv: string; timeoutMs: number; maxBytes: number };
+  /** Recall by meaning, through an OpenAI-compatible /embeddings endpoint. Both thresholds depend on the model: threshold for what messages call to mind, searchThreshold for the few words of a deliberate search, which score lower. */
+  embedding: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; threshold: number; searchThreshold: number; limit: number; timeoutMs: number; selfNames: string[] };
 }
 
 export function loadConfig(path: string): Config {
@@ -34,11 +36,12 @@ export function loadConfig(path: string): Config {
     memory: { retentionDays: 90, recallLimit: 8, recentEvents: 30, reflectionEveryEvents: 100, ...raw.memory },
     development: { scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
     web: { enabled: true, searchUrl: 'https://api.deepseek.com/v1/tools/search', searchKeyEnv: 'DEEPSEEK_API_KEY', timeoutMs: 15_000, maxBytes: 2_000_000, ...raw.web },
+    embedding: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, timeoutMs: 15_000, selfNames: [], ...raw.embedding },
   };
   if (!config.persona.trim()) throw new Error('The persona content in personaFile must not be empty.');
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
   validateModelConfig(config.model);
-  for (const name of [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
+  for (const name of [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
   if (!Number.isSafeInteger(config.snowluma.selfId) || config.snowluma.selfId <= 0) throw new Error('snowluma.selfId must be an actual QQ account ID.');
   if (!Array.isArray(config.snowluma.groups) || config.snowluma.groups.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('snowluma.groups must be an array of group IDs for history recovery; it may be empty.');
   const url = new URL(config.snowluma.url);
@@ -57,7 +60,18 @@ export function loadConfig(path: string): Config {
   if (!Number.isSafeInteger(config.compaction.retries) || config.compaction.retries < 0 || config.compaction.retries > 3) throw new Error('compaction.retries must be between 0 and 3.');
   if (typeof config.compaction.idleRatio !== 'number' || !(config.compaction.idleRatio > 0 && config.compaction.idleRatio <= 1)) throw new Error('compaction.idleRatio must be greater than 0 and at most 1.');
   if (config.compaction.summaryMaxTokens > config.limits.outputReserveTokens) throw new Error('summaryMaxTokens cannot exceed outputReserveTokens.');
-  for (const value of [config.life.enabled, config.life.allowFiction, config.web.enabled]) if (typeof value !== 'boolean') throw new Error('Switches must be boolean values.');
+  for (const value of [config.life.enabled, config.life.allowFiction, config.web.enabled, config.embedding.enabled]) if (typeof value !== 'boolean') throw new Error('Switches must be boolean values.');
+  const embedding = config.embedding;
+  if (embedding.enabled) {
+    let url: URL | undefined;
+    try { url = new URL(embedding.baseUrl); } catch { /* reported below */ }
+    if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('embedding.baseUrl must be an HTTP/HTTPS URL without credentials, query parameters, or a fragment, such as https://api.openai.com/v1.');
+    if (typeof embedding.model !== 'string' || !embedding.model.trim()) throw new Error('embedding.model must not be empty.');
+  }
+  for (const key of ['threshold', 'searchThreshold'] as const) if (typeof embedding[key] !== 'number' || !(embedding[key] > 0 && embedding[key] < 1)) throw new Error(`embedding.${key} must be between 0 and 1; calibrate it for the embedding model.`);
+  if (!Number.isSafeInteger(embedding.limit) || embedding.limit <= 0 || embedding.limit > 20) throw new Error('embedding.limit must be an integer from 1 to 20.');
+  if (!Number.isSafeInteger(embedding.timeoutMs) || embedding.timeoutMs <= 0) throw new Error('embedding.timeoutMs must be a positive integer.');
+  if (!Array.isArray(embedding.selfNames) || embedding.selfNames.some(name => typeof name !== 'string' || !name.trim())) throw new Error('embedding.selfNames must be an array of the names people call the digital life.');
   const permissions = config.snowluma.tools;
   if ((permissions.allow !== '*' && !Array.isArray(permissions.allow)) || !Array.isArray(permissions.deny)) throw new Error('snowluma.tools.allow must be "*" or an array of interface names; deny must be an array of interface names.');
   for (const name of [...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny]) {

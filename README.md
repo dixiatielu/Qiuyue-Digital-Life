@@ -37,6 +37,7 @@ npm run dev -- models openai
 Replace `openai` with your provider when listing its models. Then edit:
 
 - **`config.json`:** Set the SnowLuma address, `snowluma.selfId` to the logged-in QQ account, and `model.provider` and `model.id` to an image-capable model. Change `personaFile` to `persona.md`. Set `snowluma.groups` to the groups whose history should be checked after connection or recovery; it can be empty and does not restrict live events.
+- **`embedding` in `config.json` (optional):** To let the digital life recall memories by what people are talking about, set `enabled` to `true` and point `baseUrl` and `model` at an OpenAI-compatible embeddings endpoint. Both thresholds depend on the model: `threshold` (what messages call to mind) and `searchThreshold` (the few words of a deliberate `recall`, which score lower) were calibrated at `0.65` and `0.55` for `qwen3-vl-embedding`, and other models need their own values. List in `selfNames` the names people call the digital life, so a message is not matched to every memory that mentions it. Without embedding, thoughts recall nothing on their own, and `recall` searches by exact words only.
 - **`persona.md`:** Describe the digital life's identity and personality.
 - **`.env`:** Set `MODEL_API_KEY` and, if required by SnowLuma, `SNOWLUMA_TOKEN`. Set `DEEPSEEK_API_KEY` if you want web search. Set `QIUYUE_UI_LANGUAGE=zh` for Chinese; use the same language for the daemon and viewers, and restart the daemon after changing it.
 
