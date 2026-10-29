@@ -6,7 +6,7 @@ import type { Monitor } from './monitor.js';
 import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
 import { developmentKinds, errorText } from './domain.js';
 import { Store, conversationOf, digest } from './store.js';
-import { publicFetch } from './web.js';
+import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
@@ -314,8 +314,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       const url = segment.data?.url;
       if (typeof url !== 'string') { content.push({ type: 'text', text: `Image ${index} in event ${event.id} has no readable URL; the original event is retained.` }); continue; }
       try {
-        const image = await publicFetch(url, { timeoutMs: 10_000, maxBytes: 5_000_000, signal: this.controller.signal });
-        if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(image.type)) throw new Error('Unsupported image type');
+        const image = await fetchImage(url, this.controller.signal);
         // The label outlives the image, which is folded when the thought ends.
         content.push({ type: 'text', text: `The following is image ${index} from event ${event.id}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
       } catch { content.push({ type: 'text', text: `Image ${index} in event ${event.id} could not be read` }); }

@@ -150,6 +150,27 @@ test('native sends preserve rich messages, optional fields, private targets and 
   } finally { f.store.close(); }
 });
 
+test('Qzone images are sent as JPEG, and the action records the URL actually sent', async () => {
+  const f = fixture();
+  const avif = 'https://m.qpic.cn/psc?/V52K/bqQf!/b&ek=1&pt=0&bo=QAZV!&t=8&tl=17&vuin=900#sce=5-1-1&rf=v1';
+  const jpeg = 'https://m.qpic.cn/psc?/V52K/bqQf!/b&ek=1&pt=0&bo=QAZV!&tl=17&vuin=900#sce=5-1-1&rf=v1';
+  const node = (file: string) => [{ type: 'node', data: { content: [{ type: 'image', data: { url: file } }, { type: 'text', data: { text: 't=5' } }] } }];
+  try {
+    event(f.store);
+    f.faux.setResponses([
+      answer(call('send_private_msg', { user_id: 7, message: [{ type: 'image', data: { file: avif } }] })),
+      answer(call('send_private_forward_msg', { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') })),
+      answer(call('send_group_msg', { group_id: 100, message: [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }] })),
+      answer('Done'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.deepEqual(f.sent[0]!.args.message, [{ type: 'image', data: { file: jpeg } }]);
+    assert.deepEqual(f.sent[1]!.args.messages, node('https://a1.qpic.cn/psc?/x!/c'));
+    assert.deepEqual(f.sent[2]!.args.message, [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }]);
+    assert.deepEqual(f.store.actions().find(action => action.kind === 'send_private_msg')!.args, { user_id: 7, message: [{ type: 'image', data: { file: jpeg } }] });
+  } finally { f.store.close(); }
+});
+
 test('permissions use exact action names, hide denied tools and block detail queries or direct invocation', async () => {
   const f = fixture();
   f.brain.thought.lifeOnly = false;

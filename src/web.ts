@@ -56,6 +56,24 @@ export async function publicFetch(input: string, options: { maxBytes: number; ti
   return { ...result, url: url.href };
 }
 
+/** Qzone's CDN (*.qpic.cn) picks the format from t=: 8 gives AVIF and 5 WebP, which QQ rejects on upload. Without it the same image comes as JPEG. */
+export function preferJpeg(url: string): string {
+  let host: string;
+  try { host = new URL(url).hostname; } catch { return url; }
+  if (!/(^|\.)qpic\.cn$/.test(host)) return url;
+  // Edit the query as text: these URLs carry a bare path-like key that URLSearchParams would re-encode.
+  const [base = '', ...fragment] = url.split('#');
+  const query = base.indexOf('?');
+  if (query < 0) return url;
+  const params = base.slice(query + 1).split('&').filter(param => !/^t=/.test(param));
+  return [base.slice(0, query + 1) + params.join('&'), ...fragment].join('#');
+}
+export async function fetchImage(url: string, signal?: AbortSignal) {
+  const image = await publicFetch(preferJpeg(url), { timeoutMs: 10_000, maxBytes: 5_000_000, signal });
+  if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(image.type)) throw new Error('Unsupported image format.');
+  return image;
+}
+
 export class WebReader {
   constructor(private config: Config['web']) {}
   async read(url: string, signal?: AbortSignal) {
