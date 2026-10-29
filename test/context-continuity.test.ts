@@ -15,8 +15,9 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   // small and test the complete catalog separately at the actual request seam.
   f.cfg.snowluma.tools = { allow: ['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'get_group_member_info'], deny: [] };
   f.restart();
-  // Leaves the same headroom after the fixed instructions and tools grew by about 730 tokens with development (ADR-0012).
-  f.cfg.limits.contextTokens = 12800;
+  // Leaves the same headroom after the fixed instructions and tools grew by about 730 tokens with development (ADR-0012)
+  // and 60 more when view_event_image learned to read URLs in tool results.
+  f.cfg.limits.contextTokens = 12900;
   f.cfg.limits.outputReserveTokens = 4096;
   f.cfg.compaction.keepRecentTokens = 1500;
   f.cfg.compaction.summaryMaxTokens = 512;

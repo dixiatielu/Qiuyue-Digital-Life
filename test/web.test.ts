@@ -4,8 +4,59 @@ import http from 'node:http';
 import dns from 'node:dns/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { once } from 'node:events';
-import { WebReader } from '../src/web.js';
-import { config } from './helpers.js';
+import { preferJpeg, WebReader } from '../src/web.js';
+import { config, fixture } from './helpers.js';
+
+test('Qzone image URLs drop the format selector and keep everything else as written', () => {
+  const url = 'https://m.qpic.cn/psc?/V52K9UhD/bqQf*G5m!/b&ek=1&kp=1&pt=0&bo=QAZVCEAGVQgBACc!&t=8&tl=17&vuin=3629717836#sce=5-1-1&rf=v1_ht5';
+  assert.equal(preferJpeg(url), 'https://m.qpic.cn/psc?/V52K9UhD/bqQf*G5m!/b&ek=1&kp=1&pt=0&bo=QAZVCEAGVQgBACc!&tl=17&vuin=3629717836#sce=5-1-1&rf=v1_ht5');
+  assert.equal(preferJpeg('https://a1.qpic.cn/psc?/V13p!/c&t=5'), 'https://a1.qpic.cn/psc?/V13p!/c');
+  assert.equal(preferJpeg('https://a1.qpic.cn/psc?/V13p!/c&ek=1&tl=1'), 'https://a1.qpic.cn/psc?/V13p!/c&ek=1&tl=1');
+  for (const unchanged of ['https://example.com/a.png?t=8', 'https://notqpic.cn/a?t=8', 'https://qpic.cn.example.com/a?t=8', 'base64://aGVsbG8=', 'file:///tmp/a.png', 'not a url'])
+    assert.equal(preferJpeg(unchanged), unchanged);
+});
+
+test('view_event_image reads an image URL found in a tool result, asking Qzone for JPEG', async t => {
+  const requests: string[] = [];
+  const server = http.createServer((request, response) => {
+    requests.push(request.url!);
+    const avif = /[?&]t=8/.test(request.url!);
+    response.writeHead(200, { 'Content-Type': avif ? 'image/avif' : 'image/jpeg' }); response.end(avif ? 'avif' : 'jpeg');
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  const originalRequest = http.request;
+  t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
+  t.mock.method(http, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => originalRequest(url, {
+    ...options, autoSelectFamily: false, lookup: (_hostname, _options, done) => done(null, '127.0.0.1', 4),
+  }, callback));
+  syncBuiltinESMExports();
+  const f = fixture();
+  f.brain.thought.lifeOnly = false;
+  const image = `http://m.qpic.cn:${address.port}/psc?/V52K!/b&ek=1&t=8&tl=17#sce=5-1-1`;
+  const page = `http://m.qpic.cn:${address.port}/psc?/V13p!/c&ek=1&tl=1`;
+  const feeds = f.store.receive({ key: 'tool:feeds', kind: 'snowluma:get_qzone_public_feeds', at: Date.now(), text: '{}', payload: { result: { feeds: [{ cell_media: { media_items: [{ image: { default_url: { url: image } } }] }, html: `<img src="${page.replaceAll('&', '&amp;')}">` }] } } }, true)!;
+  const view = f.tools.current().find(tool => tool.name === 'view_event_image')!;
+  try {
+    const seen = await view.execute('view', { id: feeds.id, url: image });
+    assert.deepEqual(seen.content[1], { type: 'image', data: Buffer.from('jpeg').toString('base64'), mimeType: 'image/jpeg' });
+    assert.equal(requests[0], '/psc?/V52K!/b&ek=1&tl=17');
+    assert.match((seen.content[0] as { text: string }).text, new RegExp(`Image ${image.replace(/[?.*+()|[\]\\^$]/g, '\\$&')} from event ${feeds.id}`));
+    assert.ok(f.brain.thought.sources.has(feeds.id));
+    // An image inside HTML is found whether its &amp; is written decoded or not.
+    for (const url of [page, page.replaceAll('&', '&amp;')]) assert.equal((await view.execute('view', { id: feeds.id, url })).content[1]?.type, 'image');
+    const count = requests.length;
+    await assert.rejects(view.execute('view', { id: feeds.id, url: `http://m.qpic.cn:${address.port}/psc?/V52K!/b` }), /does not appear in the event/);
+    await assert.rejects(view.execute('view', { id: feeds.id, url: image, index: 0 }), /exactly one of index or url/);
+    await assert.rejects(view.execute('view', { id: feeds.id }), /exactly one of index or url/);
+    await assert.rejects(view.execute('view', { id: feeds.id, index: 0 }), /does not exist or has no readable URL/);
+    assert.equal(requests.length, count);
+  } finally {
+    f.store.close();
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
 
 // Keep the real HTTP transport while mapping a public test hostname to a local fixture.
 test('DeepSeek search sends authenticated JSON and handles results and failures', async t => {
