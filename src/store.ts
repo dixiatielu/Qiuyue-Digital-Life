@@ -442,6 +442,14 @@ export class Store {
     const row = this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND json_extract(payload,'$.message_id')=? LIMIT 1`).get(filter.target, messageId);
     return row ? this.eventRow(row) : undefined;
   }
+  /** QQ system face names by ID, as last read from SnowLuma; empty until then. */
+  faceNames(): Record<string, string> { const row = this.db.prepare("SELECT value FROM settings WHERE key='faceNames'").get(); return row ? parse(row.value) : {}; }
+  setFaceNames(names: Record<string, string>) { this.setSetting('faceNames', names); }
+  /** The description last given to a saved sticker. */
+  stickerNote(emojiId: string): string | undefined {
+    const row = this.db.prepare("SELECT json_extract(args,'$.desc') AS note FROM actions WHERE kind='modify_custom_face' AND status='success' AND json_extract(args,'$.emoji_id')=? ORDER BY created_at DESC LIMIT 1").get(emojiId);
+    return row?.note ? String(row.note) : undefined;
+  }
   sentMessage(messageId: number): boolean { return !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND json_extract(result,'$.message_id')=? LIMIT 1").get(messageId); }
   /** The latest group card or nickname someone used, and a group's latest name. */
   latestSender(userId: number): { card?: string; nickname?: string } | undefined {

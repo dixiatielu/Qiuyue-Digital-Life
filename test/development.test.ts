@@ -102,6 +102,31 @@ test('the chat record shows everyone in order, folds echoes and reactions into t
   } finally { store.close(); }
 });
 
+test('the chat record names faces and reactions, shows what its own stickers are, and quotes what a separate reaction was on', async () => {
+  const sticker = 'sticker:1';
+  const f = fixture({ execute: async (kind: string) => kind === 'fetch_sys_faces' ? { packs: [{ pack_name: 'Default', emojis: [{ q_sid: '212', q_des: '/托腮' }, { q_sid: '277', q_des: '/汪汪' }, { q_sid: '🙂', q_des: '/smile' }] }] } : { message_id: -9 } });
+  f.brain.thought.lifeOnly = false;
+  try {
+    f.store.bindAccount(900);
+    const t = Date.now() - 60_000;
+    say(f.store, 7, 'earlier joke here', { messageId: 30, name: '寒火', at: t - 3_600_000 });
+    say(f.store, 8, 'look', { messageId: 31, name: '地铁', at: t, segments: [{ type: 'text', data: { text: 'look' } }, { type: 'face', data: { id: '277' } }] });
+    notice(f.store, 'notice:group_msg_emoji_like:add', 7, { operator_id: 7, message_id: 31, likes: [{ emoji_id: '212', count: 1 }, { emoji_id: '128077', count: 1 }] }, t + 1000);
+    const note = sent(f.store, 'modify_custom_face', { emoji_id: sticker, desc: 'A cat jumping for joy, for happy moments' });
+    const face = sent(f.store, 'send_custom_face', { group_id: 100, emoji_id: sticker }, -6);
+    const reaction = sent(f.store, 'set_group_reaction', { group_id: 100, message_id: 30, code: '212' });
+    for (const [action, at] of [[note, t + 1500], [face, t + 2000], [reaction, t + 3000]] as const) f.store.db.prepare('UPDATE actions SET created_at=? WHERE id=?').run(at, action.id);
+    const read = (args: Record<string, unknown>) => f.tools.current().find(tool => tool.name === 'read_chat_record')!.execute('read', args as never).then(result => (result.content[0] as { text: string }).text);
+    const text = await read({ conversation: 'group:100', from: new Date(t).toISOString() });
+    assert.match(text, /地铁: look\[face 277 汪汪\]\n  ↳ 寒火 reacted \[emoji 212 托腮\]\[emoji 128077 👍\]/);
+    assert.match(text, /me: \[saved sticker: A cat jumping for joy, for happy moments\]/);
+    assert.match(text, /me reacted \[emoji 212 托腮\] to #\w{8} \(寒火: earlier joke here\)/);
+    assert.deepEqual(f.store.faceNames(), { 212: '托腮', 277: '汪汪' });
+    // Only one's own lines, as a review reads them.
+    assert.match(await read({ conversation: 'group:100', person: 900 }), /me: \[saved sticker: A cat.*\n.*me reacted \[emoji 212 托腮\] to #\w{8} \(寒火: earlier joke here\)/);
+  } finally { f.store.close(); }
+});
+
 test('reading on from the review point moves it forward, while lookups and jumps ahead do not', async () => {
   const f = fixture();
   try {

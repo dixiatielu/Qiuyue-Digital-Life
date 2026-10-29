@@ -5,7 +5,7 @@ import { Store } from './store.js';
 import type { SocialAdapter } from './snowluma.js';
 import { definitelyFailed } from './snowluma.js';
 import { errorText } from './domain.js';
-import { publicFetch, WebReader } from './web.js';
+import { fetchImage, preferJpeg, WebReader } from './web.js';
 import { SnowLumaApiError } from '@snowluma/sdk';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLumaActionDefinition } from './snowluma-catalog.js';
 import { actionSummary } from './runtime-context.js';
@@ -49,10 +49,41 @@ const toolSearchConcepts = ['私聊', '群成员', '群', '好友', '消息', '�
 function normalizeToolSearch(value: string): string {
   return toolSearchAliases.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value.toLowerCase());
 }
+/** Every http(s) URL in an event's strings, with HTML's &amp; decoded, so an image named in a tool result can be viewed by its exact URL. */
+function urlsIn(value: unknown, found = new Set<string>()): Set<string> {
+  if (typeof value === 'string') for (const match of value.replaceAll('&amp;', '&').matchAll(/https?:\/\/[\w\-.~:/?#@!$&()*+,;=%]+/g)) found.add(match[0]);
+  else if (value && typeof value === 'object') for (const item of Object.values(value)) urlsIn(item, found);
+  return found;
+}
+/** SnowLuma uploads an image segment's bytes as they come, and QQ rejects AVIF (highway error 921), so ask Qzone's CDN for JPEG. */
+function jpegImages(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(jpegImages);
+  if (!value || typeof value !== 'object') return value;
+  const segment = value as { type?: unknown; data?: Record<string, unknown> };
+  if (segment.type === 'image' && segment.data && typeof segment.data === 'object') {
+    const data = { ...segment.data };
+    for (const key of ['file', 'url']) if (typeof data[key] === 'string') data[key] = preferJpeg(data[key]);
+    return { ...segment, data };
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jpegImages(item)]));
+}
 export interface ToolSet { current(): AgentTool[] }
 
 export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext): ToolSet {
   const web = new WebReader(config.web);
+  // Reactions in a chat record read better by name. The catalog is read from SnowLuma once and kept; a failed read is retried later.
+  let facesTried = 0;
+  async function faceNames(signal?: AbortSignal): Promise<Record<string, string>> {
+    const known = store.faceNames();
+    if (Object.keys(known).length || Date.now() - facesTried < 600_000) return known;
+    facesTried = Date.now();
+    try {
+      const catalog = await social.execute('fetch_sys_faces', {}, signal) as { packs?: { emojis?: { q_sid?: unknown; q_des?: unknown }[] }[] } | null;
+      const names = Object.fromEntries((catalog?.packs ?? []).flatMap(pack => pack.emojis ?? []).filter(face => /^\d+$/.test(String(face.q_sid)) && face.q_des).map(face => [String(face.q_sid), String(face.q_des).replace(/^\//, '')]));
+      if (Object.keys(names).length) store.setFaceNames(names);
+      return names;
+    } catch { return known; }
+  }
   function tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<unknown> | unknown): AgentTool {
     return { name, label: name, description, parameters, executionMode: 'sequential', replay: 'never', execute: async (_callId, args, signal) => {
       ensureCurrent(store, context(), signal);
@@ -68,19 +99,26 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
   }
   const result: AgentTool[] = [
     {
-      name: 'view_event_image', label: 'view_event_image', description: 'View the image at index (starting at 0) in the original event. Only read an image URL actually present in that event.',
-      parameters: Type.Object({ id: string('Event ID', 100), index: Type.Integer({ minimum: 0 }) }), replay: 'never', executionMode: 'sequential',
+      name: 'view_event_image', label: 'view_event_image', description: 'View an image in an original event. Use index (starting at 0) for an image in a message; use url for an image URL in any other event, such as a Qzone post in a tool result. Specify exactly one. Only read an image URL actually present in that event.',
+      parameters: Type.Object({ id: string('Event ID', 100), index: Type.Optional(Type.Integer({ minimum: 0 })), url: Type.Optional(string('Image URL as it appears in the event', 2000)) }), replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
+        if ((args.index === undefined) === (args.url === undefined)) throw new Error('Specify exactly one of index or url.');
         const event = store.event(store.resolve(args.id));
-        const segments = event?.payload.message;
-        const image = Array.isArray(segments) ? segments.filter(segment => segment.type === 'image')[args.index] : undefined;
-        if (typeof image?.data?.url !== 'string') throw new Error('The image does not exist or has no readable URL.');
-        const result = await publicFetch(image.data.url, { timeoutMs: 10000, maxBytes: 5_000_000, signal });
+        if (!event) throw new Error('The experience does not exist or has been deleted.');
+        let url: unknown;
+        if (args.url !== undefined) {
+          url = String(args.url).replaceAll('&amp;', '&');
+          if (!urlsIn(event.payload).has(url as string)) throw new Error('That URL does not appear in the event.');
+        } else {
+          const segments = event.payload.message;
+          url = (Array.isArray(segments) ? segments.filter(segment => segment.type === 'image')[args.index] : undefined)?.data?.url;
+          if (typeof url !== 'string') throw new Error('The image does not exist or has no readable URL.');
+        }
+        const result = await fetchImage(url as string, signal);
         ensureCurrent(store, context(), signal);
-        if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(result.type)) throw new Error('Unsupported image format.');
-        context().sources.add(event!.id);
-        return { content: [{ type: 'text', text: `Image ${args.index} from event ${event!.id}` }, { type: 'image', data: result.data.toString('base64'), mimeType: result.type }], details: {} };
+        context().sources.add(event.id);
+        return { content: [{ type: 'text', text: `Image ${args.url !== undefined ? url : args.index} from event ${event.id}` }, { type: 'image', data: result.data.toString('base64'), mimeType: result.type }], details: {} };
       },
     },
     tool('inspect_actions', 'View recent action outcomes; specify an id to read the full record in chunks.', Type.Object({ id: Type.Optional(string('Action ID', 100)), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), args => {
@@ -117,7 +155,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
-        const record = new ChatRecord(store, config.snowluma.selfId, args.conversation);
+        const record = new ChatRecord(store, config.snowluma.selfId, args.conversation, await faceNames(signal));
         const limit = args.limit ?? config.development.recordLines;
         if (args.query || args.person) return { content: [{ type: 'text', text: record.matches(limit, { query: args.query, person: args.person }) }], details: {} };
         if (args.from && (!/(Z|[+-]\d{2}:\d{2})$/.test(args.from) || !Number.isFinite(Date.parse(args.from)))) throw new Error('from must be an ISO time with a timezone.');
@@ -173,7 +211,8 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         : action.summary ?? action.name,
       parameters: action.inputSchema, replay: 'never', executionMode: 'sequential',
       execute: async (_callId, parameters, signal) => {
-        const args = parameters as Record<string, unknown>;
+        // Normalized before the action is recorded, so its record shows what was sent.
+        const args = jpegImages(parameters) as Record<string, unknown>;
         ensureCurrent(store, context(), signal);
         if (!allowed(action)) throw new Error('The operator has not enabled this SnowLuma interface.');
         let actionId: string | undefined; let reused = false; let value: unknown;
