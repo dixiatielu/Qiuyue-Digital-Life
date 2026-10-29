@@ -14,6 +14,13 @@ export function textTokens(text: string): number {
   return Math.ceil(tokens);
 }
 export function estimateTokens(value: unknown): number { return textTokens(JSON.stringify(value) ?? '') + 8; }
+/** Keep whole lines from the start while they fit; an unfinished final line is dropped first. */
+export function fitLines(text: string, limit: number, complete = true): string {
+  const lines = text.trim().split('\n');
+  if (!complete) lines.pop();
+  while (lines.length && textTokens(lines.join('\n')) > limit) lines.pop();
+  return lines.join('\n').trim();
+}
 export function toModelMessages(messages: AgentMessage[]): Message[] {
   return messages.map(message => message.role === 'observation' ? { role: 'user', content: message.content, timestamp: message.timestamp } : message) as Message[];
 }
