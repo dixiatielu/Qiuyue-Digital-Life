@@ -171,6 +171,47 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
   } finally { f.store.close(); }
 });
 
+test('a received image already saved as a sticker is seen as one, and saving it again says so', async () => {
+  const md5 = 'FB1708EDC2A2803B6CA831085EBEAC29'; const market = 'ff862d42053a56c468834db523978ecb';
+  const saved = `900_0_0_0_${md5}_0_0`; const marketSaved = '900_0_0_0_A02AC0D33A8A95F1C6E9D322F5EC0F6F_0_0';
+  const f = fixture({ execute: async (kind: string, args: Record<string, unknown>) => kind === 'add_custom_face' ? { emoji_id: String(args.file).includes(market) ? marketSaved : saved } : null });
+  f.brain.thought.lifeOnly = false;
+  try {
+    assert.equal(f.store.savedSticker({ file: `${md5}.jpg` }), undefined);
+    let adds: unknown[] = [];
+    event(f.store);
+    f.faux.setResponses([
+      answer(call('add_custom_face', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=a&rkey=1' })),
+      answer(call('modify_custom_face', { emoji_id: saved, desc: 'Two dolls bopping, for silly joy' })),
+      // The same image under another URL, as QQ signs each delivery anew.
+      answer(call('add_custom_face', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=b&rkey=2' })),
+      answer(call('add_custom_face', { file: `https://gxh.vip.qq.com/club/item/parcel/item/ff/${market}/raw300.gif` })),
+      context => { adds = context.messages.filter(message => message.role === 'toolResult' && message.toolName === 'add_custom_face'); return answer('Done'); },
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(adds.length, 3);
+    assert.doesNotMatch(JSON.stringify(adds[0]), /alreadySaved/);
+    assert.match(JSON.stringify(adds[1]), /\\"alreadySaved\\":true,\\"desc\\":\\"Two dolls bopping, for silly joy\\"/);
+    assert.doesNotMatch(JSON.stringify(adds[2]), /alreadySaved/);
+    // A received image is matched by the MD5 it is named by, a market face by its emoji_id.
+    const prompts: string[] = [];
+    const image = f.store.receive({ key: 'image', kind: 'message', at: Date.now(), text: '[image]', groupId: 100, actorId: 7, payload: { message: [
+      { type: 'image', data: { file: `${md5.toLowerCase()}.jpg`, summary: '[动画表情]' } },
+      { type: 'image', data: { file: `ff-${market}.gif`, emoji_id: market, summary: '[嘿嘿]' } },
+      { type: 'image', data: { file: 'CA3BD9F231FC29304CE90BB45EB88482.jpg' } },
+    ] } })!;
+    f.faux.setResponses([context => { prompts.push(JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')))); return answer('Nice'); }]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.ok(prompts[0]!.includes(`Image 0 in event ${image.id} (already your saved sticker ${saved}: Two dolls bopping, for silly joy) has no readable URL`));
+    assert.ok(prompts[0]!.includes(`Image 1 in event ${image.id} (already your saved sticker ${marketSaved}) has no readable URL`));
+    assert.ok(prompts[0]!.includes(`Image 2 in event ${image.id} has no readable URL`));
+    const deleted = f.store.beginAction(crypto.randomUUID(), 'delete_custom_face', { emoji_id: saved }, []).action;
+    f.store.finishAction(deleted.id, 'success', null);
+    assert.equal(f.store.savedSticker({ file: `${md5}.jpg` }), undefined);
+    assert.equal(f.store.savedSticker({ emoji_id: market })?.emojiId, marketSaved);
+  } finally { f.store.close(); }
+});
+
 test('permissions use exact action names, hide denied tools and block detail queries or direct invocation', async () => {
   const f = fixture();
   f.brain.thought.lifeOnly = false;

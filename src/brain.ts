@@ -309,16 +309,18 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     if (online) content.push({ type: 'text', text: online });
     let count = 0;
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
+      const sticker = this.store.savedSticker(segment.data ?? {});
+      const saved = sticker ? ` (already your saved sticker ${sticker.emojiId}${sticker.desc ? `: ${sticker.desc}` : ''})` : '';
       if (count++ >= this.config.limits.maxImages || estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS > this.config.limits.contextTokens * 0.4) {
-        content.push({ type: 'text', text: `Image ${index} from event ${event.id} was not loaded due to the context limit; use view_event_image to view it.` }); continue;
+        content.push({ type: 'text', text: `Image ${index} from event ${event.id}${saved} was not loaded due to the context limit; use view_event_image to view it.` }); continue;
       }
       const url = segment.data?.url;
-      if (typeof url !== 'string') { content.push({ type: 'text', text: `Image ${index} in event ${event.id} has no readable URL; the original event is retained.` }); continue; }
+      if (typeof url !== 'string') { content.push({ type: 'text', text: `Image ${index} in event ${event.id}${saved} has no readable URL; the original event is retained.` }); continue; }
       try {
         const image = await fetchImage(url, this.controller.signal);
         // The label outlives the image, which is folded when the thought ends.
-        content.push({ type: 'text', text: `The following is image ${index} from event ${event.id}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
-      } catch { content.push({ type: 'text', text: `Image ${index} in event ${event.id} could not be read` }); }
+        content.push({ type: 'text', text: `The following is image ${index} from event ${event.id}${saved}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
+      } catch { content.push({ type: 'text', text: `Image ${index} in event ${event.id}${saved} could not be read` }); }
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
   }
