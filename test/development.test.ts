@@ -35,6 +35,11 @@ test('development holds everywhere unless it belongs to one group, with one impr
     assert.throws(() => store.writeMemory({ ...base, kind: 'practice', scope: 'person:7', sources: [other.id] }, false), /habit or practice scope is global/);
     assert.throws(() => store.writeMemory({ ...base, kind: 'impression', sources: [other.id] }, false), /impression scope is person/);
     assert.throws(() => store.writeMemory({ ...base, kind: 'habit', sources: [mine.id, echo.id] }, false), /cannot rest only on your own messages/);
+    // Its own notes and the program's bookkeeping are no more evidence than its messages; a memory carries the evidence it cites.
+    const wake = store.receive({ key: 'wake:1', kind: 'wake', at: Date.now(), text: 'Plan the day', payload: {} })!;
+    const ownNote = store.writeMemory({ ...base, kind: 'note', sources: [mine.id] }, false);
+    assert.throws(() => store.writeMemory({ ...base, kind: 'habit', sources: [ownNote.id, wake.id] }, false), /cannot rest only on your own messages/);
+    assert.ok(store.writeMemory({ ...base, kind: 'habit', sources: [store.writeMemory({ ...base, kind: 'note', sources: [other.id] }, false).id] }, false));
     const habit = store.writeMemory({ ...base, kind: 'habit', sources: [mine.id, other.id] }, false);
     assert.equal(habit.scope, 'global');
     assert.equal(store.writeMemory({ ...base, kind: 'practice', sources: [other.id] }, false).scope, 'global');
@@ -173,6 +178,7 @@ test('development reaches each thought by scope and people present, and chat rec
       context => {
         const snapshot = updates(context.messages as Message[]).at(-1);
         assert.deepEqual(snapshot.myHabits.map((item: { id: string }) => item.id), [habit.id]);
+        assert.equal(snapshot.myHabits[0].createdAt, new Date(habit.createdAt).toISOString());
         assert.deepEqual(snapshot.practices.map((item: { id: string }) => item.id), [practice.id]);
         assert.deepEqual(snapshot.impressions.map((item: { id: string }) => item.id), [impression.id]);
         assert.deepEqual(snapshot.recalled, []);
@@ -230,7 +236,10 @@ test('review waits for a quiet moment and lists the chats it has not read', asyn
     assert.equal(f.store.pending(), 0);
     f.cfg.compaction.idleAfterMs = 0;
     f.faux.setResponses([context => {
-      assert.match(JSON.stringify(context.messages.at(-1)), /memory_maintenance.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record.*person=900/);
+      const review = JSON.stringify(context.messages.at(-1));
+      assert.match(review, /memory_maintenance.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record.*person=900/);
+      // What happened comes before form: corrections, unknown outcomes, and one person's ways kept in their impression.
+      assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*say it is unknown.*into your impression of them/);
       return answer('Reviewed');
     }]);
     await runtime.tick(); await runtime.idle();

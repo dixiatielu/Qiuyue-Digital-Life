@@ -19,7 +19,8 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   // and 60 more when view_event_image learned to read URLs in tool results, and 430 more with pursuits: 620 more window, since idle compaction starts at 0.7 of the budget.
   // view_face and the note on reaction codes added 130 more: 190 more window. Ending a thought after social actions added 60 more: 90 more window.
   // The note on what recalled holds added 73 more: 110 more window.
-  f.cfg.limits.contextTokens = 13910;
+  // Keeping corrections and unknown outcomes, and one person's ways in their impression, added 155 more: 230 more window.
+  f.cfg.limits.contextTokens = 14140;
   f.cfg.limits.outputReserveTokens = 4096;
   f.cfg.compaction.keepRecentTokens = 1500;
   f.cfg.compaction.summaryMaxTokens = 512;
