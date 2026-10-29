@@ -450,6 +450,20 @@ export class Store {
     const row = this.db.prepare("SELECT json_extract(args,'$.desc') AS note FROM actions WHERE kind='modify_custom_face' AND status='success' AND json_extract(args,'$.emoji_id')=? ORDER BY created_at DESC LIMIT 1").get(emojiId);
     return row?.note ? String(row.note) : undefined;
   }
+  /** Whether a sticker was saved, apart from one save of it, and not deleted since. */
+  stickerSaved(emojiId: string, except?: string): boolean {
+    const added = this.db.prepare("SELECT max(created_at) AS at FROM actions WHERE kind='add_custom_face' AND status='success' AND json_extract(result,'$.emoji_id')=? AND id IS NOT ?").get(emojiId, except ?? null)?.at;
+    return added != null && !this.db.prepare("SELECT 1 FROM actions WHERE kind='delete_custom_face' AND status='success' AND json_extract(args,'$.emoji_id')=? AND created_at>=?").get(emojiId, added);
+  }
+  /** The saved sticker a received image already is. QQ names a saved image by its MD5, which a received image carries as its file name; a market face is known by the emoji_id in the URL it was saved from. */
+  savedSticker(image: Record<string, unknown>): { emojiId: string; desc?: string } | undefined {
+    const md5 = /^([0-9a-f]{32})\.\w+$/i.exec(String(image.file ?? ''))?.[1];
+    const market = /^[0-9a-f]{32}$/i.test(String(image.emoji_id ?? '')) ? String(image.emoji_id) : undefined;
+    if (!md5 && !market) return;
+    const row = this.db.prepare(`SELECT json_extract(result,'$.emoji_id') AS id FROM actions WHERE kind='add_custom_face' AND status='success' AND ${md5 ? "instr(upper(json_extract(result,'$.emoji_id')), ?)" : "instr(json_extract(args,'$.file'), ?)"} ORDER BY created_at DESC LIMIT 1`).get(md5 ? `_${md5.toUpperCase()}_` : market!);
+    const emojiId = row?.id == null ? undefined : String(row.id);
+    return emojiId && this.stickerSaved(emojiId) ? { emojiId, desc: this.stickerNote(emojiId) } : undefined;
+  }
   sentMessage(messageId: number): boolean { return !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND json_extract(result,'$.message_id')=? LIMIT 1").get(messageId); }
   /** The latest group card or nickname someone used, and a group's latest name. */
   latestSender(userId: number): { card?: string; nickname?: string } | undefined {

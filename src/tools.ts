@@ -232,7 +232,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     send_private_msg: quote,
     fetch_custom_face_detail: 'Returns saved emoji_id values, image URLs, and possibly empty descriptions. Choose based on actual content; do not guess image meanings.',
     send_custom_face: 'Use an emoji_id from an actual fetch_custom_face_detail result. For a group pass group_id=<actual group ID> and emoji_id=<saved ID>; for a private chat use user_id instead. Specify only one target.',
-    add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success; after a successful save, use its returned emoji_id with modify_custom_face to add a description based on the image actually seen. If the outcome is unknown, verify it before taking further action.',
+    add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success; after a successful save, use its returned emoji_id with modify_custom_face to add a description based on the image actually seen. QQ keeps one copy of an image, so alreadySaved in the local execution information means it was saved before and this only moved it to the front; keep its description unless it is wrong. If the outcome is unknown, verify it before taking further action.',
     modify_custom_face: 'Set desc to a concise description of the actual image and its suitable emotional or conversational use. Use the emoji_id returned by a successful add_custom_face or an actual fetch_custom_face_detail result; do not guess image content.',
     delete_msg: 'The message_id must come from an actual message event or send receipt; negative values may also be valid.',
     get_qzone_feeds: 'A post tid may be null. For pagination use next_cursor unchanged; do not invent a missing tid or content.',
@@ -273,7 +273,9 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         const experience = recordToolExperience(`snowluma:${action.name}`, value);
         const serialized = JSON.stringify(value) ?? 'null';
         const truncated = serialized.length > 12000;
-        const metadata = { sourceId: experience.sourceId, ...(actionId ? { actionId, outcome: 'success', reused } : {}), truncated };
+        const saved = action.name === 'add_custom_face' ? String((value as { emoji_id?: unknown } | null)?.emoji_id ?? '') : '';
+        const alreadySaved = saved && store.stickerSaved(saved, actionId) ? { alreadySaved: true, desc: store.stickerNote(saved) ?? '' } : {};
+        const metadata = { sourceId: experience.sourceId, ...(actionId ? { actionId, outcome: 'success', reused } : {}), ...alreadySaved, truncated };
         return {
           content: [{ type: 'text', text: truncated ? serialized.slice(0, 12000) + '\n[Result truncated; the full result is stored in the source event payload.result and can be read in chunks using read_event]' : serialized }, { type: 'text', text: `Local execution information: ${JSON.stringify(metadata)}` }],
           details: metadata,
