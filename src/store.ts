@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Action, DevelopmentKind, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Pursuit, Wake } from './domain.js';
 import { isAmbient, isDevelopment, isHeartbeat } from './domain.js';
 import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
+import type { Face } from './faces.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -477,8 +478,8 @@ export class Store {
     return row ? this.eventRow(row) : undefined;
   }
   /** QQ system face names by ID, as last read from SnowLuma; empty until then. */
-  faceNames(): Record<string, string> { const row = this.db.prepare("SELECT value FROM settings WHERE key='faceNames'").get(); return row ? parse(row.value) : {}; }
-  setFaceNames(names: Record<string, string>) { this.setSetting('faceNames', names); }
+  faces(): Record<string, Face> { const row = this.db.prepare("SELECT value FROM settings WHERE key='faces'").get(); return row ? parse(row.value) : {}; }
+  setFaces(faces: Record<string, Face>) { this.setSetting('faces', faces); }
   /** The description last given to a saved sticker. */
   stickerNote(emojiId: string): string | undefined {
     const row = this.db.prepare("SELECT json_extract(args,'$.desc') AS note FROM actions WHERE kind='modify_custom_face' AND status='success' AND json_extract(args,'$.emoji_id')=? ORDER BY created_at DESC LIMIT 1").get(emojiId);

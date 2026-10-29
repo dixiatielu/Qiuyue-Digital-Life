@@ -121,7 +121,7 @@ test('the chat record names faces and reactions, shows what its own stickers are
     assert.match(text, /地铁: look\[face 277 汪汪\]\n  ↳ 寒火 reacted \[emoji 212 托腮\]\[emoji 128077 👍\]/);
     assert.match(text, /me: \[saved sticker: A cat jumping for joy, for happy moments\]/);
     assert.match(text, /me reacted \[emoji 212 托腮\] to #\w{8} \(寒火: earlier joke here\)/);
-    assert.deepEqual(f.store.faceNames(), { 212: '托腮', 277: '汪汪' });
+    assert.deepEqual(f.store.faces(), { 212: { name: '托腮' }, 277: { name: '汪汪' } });
     // Only one's own lines, as a review reads them.
     assert.match(await read({ conversation: 'group:100', person: 900 }), /me: \[saved sticker: A cat.*\n.*me reacted \[emoji 212 托腮\] to #\w{8} \(寒火: earlier joke here\)/);
   } finally { f.store.close(); }

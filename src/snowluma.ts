@@ -21,6 +21,7 @@ export function normalizeEvent(raw: Record<string, any>, config: Config['snowlum
     if (segment.type === 'text') return String(segment.data?.text ?? '');
     if (segment.type === 'at') return `[@${segment.data?.qq}]`;
     if (segment.type === 'reply') return `[Quoted message ${segment.data?.id}]`;
+    if (segment.type === 'face') return `[face ${segment.data?.id}]`;
     return `[${segment.type}]`;
   }).join('') || String(raw.raw_message ?? raw.notice_type ?? raw.request_type ?? raw.meta_event_type ?? raw.post_type);
   const eventType = raw.notice_type ?? raw.request_type ?? raw.meta_event_type;

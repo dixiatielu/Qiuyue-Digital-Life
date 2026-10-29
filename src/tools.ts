@@ -11,6 +11,7 @@ import { SnowLumaApiError } from '@snowluma/sdk';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLumaActionDefinition } from './snowluma-catalog.js';
 import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
+import { faceCaption, FaceCatalog } from './faces.js';
 
 /** reviewing: a memory_maintenance event is part of this thought. */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean }
@@ -68,24 +69,12 @@ function jpegImages(value: unknown): unknown {
   }
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jpegImages(item)]));
 }
-export interface ToolSet { current(): AgentTool[] }
+export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog }
 
 export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, qzonePost?: QzonePost): ToolSet {
   const web = new WebReader(config.web);
   const qzone = new QzoneShare(social, config.snowluma.selfId, qzonePost);
-  // Reactions in a chat record read better by name. The catalog is read from SnowLuma once and kept; a failed read is retried later.
-  let facesTried = 0;
-  async function faceNames(signal?: AbortSignal): Promise<Record<string, string>> {
-    const known = store.faceNames();
-    if (Object.keys(known).length || Date.now() - facesTried < 600_000) return known;
-    facesTried = Date.now();
-    try {
-      const catalog = await social.execute('fetch_sys_faces', {}, signal) as { packs?: { emojis?: { q_sid?: unknown; q_des?: unknown }[] }[] } | null;
-      const names = Object.fromEntries((catalog?.packs ?? []).flatMap(pack => pack.emojis ?? []).filter(face => /^\d+$/.test(String(face.q_sid)) && face.q_des).map(face => [String(face.q_sid), String(face.q_des).replace(/^\//, '')]));
-      if (Object.keys(names).length) store.setFaceNames(names);
-      return names;
-    } catch { return known; }
-  }
+  const faces = new FaceCatalog(store, social);
   function tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<unknown> | unknown): AgentTool {
     return { name, label: name, description, parameters, executionMode: 'sequential', replay: 'never', execute: async (_callId, args, signal) => {
       ensureCurrent(store, context(), signal);
@@ -123,6 +112,16 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         return { content: [{ type: 'text', text: `Image ${args.url !== undefined ? url : args.index} from event ${event.id}` }, { type: 'image', data: result.data.toString('base64'), mimeType: result.type }], details: {} };
       },
     },
+    {
+      name: 'view_face', label: 'view_face', description: "See what a QQ system face looks like, by the ID in a face segment, a reaction's emoji_id, or set_group_reaction's code. A face's name often says little about what it shows or how people use it.",
+      parameters: Type.Object({ id: Type.String({ description: 'Face ID', pattern: '^\\d{1,6}$' }) }), replay: 'never', executionMode: 'sequential',
+      execute: async (_callId, args: any, signal) => {
+        ensureCurrent(store, context(), signal);
+        const picture = await faces.image(args.id, signal);
+        ensureCurrent(store, context(), signal);
+        return { content: [{ type: 'text', text: faceCaption(args.id, await faces.names(signal)) }, { type: 'image', data: picture.toString('base64'), mimeType: 'image/png' }], details: {} };
+      },
+    },
     tool('inspect_actions', 'View recent action outcomes; specify an id to read the full record in chunks.', Type.Object({ id: Type.Optional(string('Action ID', 100)), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), args => {
       if (args.id) {
         const action = store.actionById(args.id); if (!action) throw new Error('Action does not exist.');
@@ -157,7 +156,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
-        const record = new ChatRecord(store, config.snowluma.selfId, args.conversation, await faceNames(signal));
+        const record = new ChatRecord(store, config.snowluma.selfId, args.conversation, await faces.names(signal));
         const limit = args.limit ?? config.development.recordLines;
         if (args.query || args.person) return { content: [{ type: 'text', text: record.matches(limit, { query: args.query, person: args.person }) }], details: {} };
         if (args.from && (!/(Z|[+-]\d{2}:\d{2})$/.test(args.from) || !Number.isFinite(Date.parse(args.from)))) throw new Error('from must be an ISO time with a timezone.');
@@ -235,6 +234,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
   const usage: Record<string, string> = {
     send_group_msg: quote,
     send_private_msg: quote,
+    set_group_reaction: 'code is a QQ system face ID, or the code point of a Unicode emoji. Use view_face to see what a system face looks like before choosing one you do not know.',
     fetch_custom_face_detail: 'Returns saved emoji_id values, image URLs, and possibly empty descriptions. Choose based on actual content; do not guess image meanings.',
     send_custom_face: 'Use an emoji_id from an actual fetch_custom_face_detail result. For a group pass group_id=<actual group ID> and emoji_id=<saved ID>; for a private chat use user_id instead. Specify only one target.',
     add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success; after a successful save, use its returned emoji_id with modify_custom_face to add a description based on the image actually seen. QQ keeps one copy of an image, so alreadySaved in the local execution information means it was saved before and this only moved it to the front; keep its description unless it is wrong. If the outcome is unknown, verify it before taking further action.',
@@ -311,5 +311,5 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
   const base = result.filter(tool => config.web.enabled || !['read_webpage', 'search_web'].includes(tool.name));
   // Sharing reads the account's Qzone cookies and sends a message, so it follows the permissions of those interfaces.
   const shareable = () => allowed(findSnowLumaAction('get_cookies')) && ['send_private_msg', 'send_group_msg'].some(name => allowed(findSnowLumaAction(name)));
-  return { current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(action => native.get(action.name)!)] };
+  return { faces, current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(action => native.get(action.name)!)] };
 }
