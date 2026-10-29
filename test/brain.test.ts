@@ -228,7 +228,74 @@ test('life wakes show when available online activities were last done, other obs
     assert.ok(prompts[1]!.includes('2026-10-27T12:00:00.000Z'));
     assert.ok(prompts[1]!.includes('Practicing a new song') && prompts[1]!.includes('Humming along'));
     assert.ok(prompts[1]!.includes(new Date(diary.createdAt).toISOString()));
-    assert.ok(prompts[1]!.includes('Post to your Qzone') && !prompts[1]!.includes('Search or read something online'));
+    assert.ok(prompts[1]!.includes('Post to your Qzone') && !prompts[1]!.includes('Look things up or read online'));
+  } finally { f.store.close(); }
+});
+
+test('a life wake sees the local weekday, how recent plans went, and something that comes to mind', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-29T13:30:00Z') }); // Thursday 21:30 in Asia/Shanghai
+  const f = fixture();
+  try {
+    f.cfg.life.allowFiction = true; f.restart();
+    f.store.setSetting('lifeEnabled', true);
+    const source = event(f.store, 'Morning');
+    const past = f.store.schedule('Practiced scales on the balcony', 'life', Date.parse('2026-10-29T04:00:00Z')); f.store.finishWake(past.id, 'done');
+    const note = f.store.writeMemory({ kind: 'note', title: 'The day the steamer shop closed', content: 'Walked past and it was shut', importance: 4, sources: [source.id] }, false);
+    f.store.db.prepare('UPDATE memories SET created_at=? WHERE id=?').run(Date.now() - 2 * 86_400_000, note.id);
+    f.store.writeMemory({ kind: 'impression', title: 'Teases me about buns', content: 'Friendly, jokes a lot', importance: 5, sources: [source.id], scope: 'person:7' }, false);
+    f.store.acknowledge(f.store.claim(10)!.batchId);
+    let prompt = ''; let request = '';
+    f.faux.setResponses([context => { request = JSON.stringify(context); prompt = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations'))); return answer('Rest'); }]);
+    f.store.schedule('Free time', 'life', Date.now()); f.store.enqueueDue(); await f.brain.run(f.store.claim(10)!);
+    assert.ok(prompt.includes('2026-10-29 Thursday 21:30'));
+    assert.ok(prompt.includes('Practiced scales on the balcony') && !prompt.includes('first life wake today'));
+    assert.ok(prompt.includes('The day the steamer shop closed') && prompt.includes('Teases me about buns'));
+    assert.ok(prompt.includes('fictional daily life brings what you did not plan') && prompt.includes("today's diary"));
+    assert.ok(request.includes('Save fictional daily life with remember as fiction'));
+  } finally { f.store.close(); }
+});
+
+test('the first life wake of a day sketches the day, which starts at 05:00 rather than midnight', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-29T01:00:00Z') }); // 09:00 in Asia/Shanghai
+  const f = fixture();
+  try {
+    f.store.setSetting('lifeEnabled', true);
+    // Drawing until 02:00 still belongs to the day before.
+    const late = f.store.schedule('Stayed up drawing', 'life', Date.parse('2026-10-28T18:00:00Z')); f.store.finishWake(late.id, 'done');
+    let prompt = ''; let request = '';
+    f.faux.setResponses([context => { request = JSON.stringify(context); prompt = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations'))); return answer('Rest'); }]);
+    f.store.schedule('Free time', 'life', Date.now()); f.store.enqueueDue(); await f.brain.run(f.store.claim(10)!);
+    assert.ok(prompt.includes('first life wake today') && prompt.includes('Stayed up drawing'));
+    // Fictional daily life is off in this configuration, and it is morning.
+    assert.ok(!prompt.includes('did not plan') && !prompt.includes("today's diary"));
+    assert.ok(!request.includes('Save fictional daily life'));
+  } finally { f.store.close(); }
+});
+
+test('pursuits carry across days and fresh contexts, stay fictional once fictional, and need life mode to advance', async () => {
+  const f = fixture();
+  try {
+    f.cfg.life.allowFiction = true;
+    event(f.store, 'Hello');
+    f.faux.setResponses([answer(call('update_pursuit', { title: 'Learning a hard song', progress: 'Just started', fictional: true })), answer('Rest')]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.store.pursuits().length, 0);
+    f.store.setSetting('lifeEnabled', true);
+    event(f.store, 'Hello again');
+    f.faux.setResponses([answer(call('update_pursuit', { title: 'Learning a hard song', progress: 'The chorus high note still cracks', fictional: true })), answer('Rest')]);
+    await f.brain.run(f.store.claim(10)!);
+    const [pursuit] = f.store.pursuits();
+    assert.equal(pursuit?.fictional, true);
+    f.store.bumpGeneration(); // A fresh working context must still be given the pursuit.
+    event(f.store, 'How is the song going', 200);
+    f.faux.setResponses([
+      context => { assert.ok(JSON.stringify(context).includes('The chorus high note still cracks')); return answer(call('update_pursuit', { id: pursuit!.id, title: 'Learning a hard song', progress: 'Finally hit the high note', fictional: false })); },
+      answer(call('finish_pursuit', { id: pursuit!.id, status: 'done' })), answer('Done'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.store.pursuits().length, 0);
+    const row = f.store.db.prepare('SELECT * FROM pursuits WHERE id=?').get(pursuit!.id)!;
+    assert.equal(row.status, 'done'); assert.equal(row.progress, 'Finally hit the high note'); assert.equal(row.fictional, 1);
   } finally { f.store.close(); }
 });
 

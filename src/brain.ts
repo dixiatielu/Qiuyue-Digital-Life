@@ -12,7 +12,7 @@ import { compactionSplit, contextRecordId, estimatedContextTokens, estimateToken
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { recordTime } from './record.js';
 
-/** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. */
+/** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. A new platform joins the digital life's days by adding its tools here. */
 const onlineActivities: { activity: string; tools: string[]; memoryKind?: MemoryKind }[] = [
   { activity: "Browse friends' Qzone feeds", tools: ['get_qzone_feeds'] },
   { activity: "Like or comment on someone's Qzone post", tools: ['like_qzone', 'comment_qzone'] },
@@ -29,7 +29,7 @@ const onlineActivities: { activity: string; tools: string[]; memoryKind?: Memory
   { activity: 'Change your avatar, nickname, Qzone name or description, or group card', tools: ['set_qq_avatar', 'set_qq_profile', 'set_qzone_profile', 'set_group_card'] },
   { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'] },
   { activity: 'Write or reread your diary', tools: ['remember', 'recall'], memoryKind: 'note' },
-  { activity: 'Search or read something online', tools: ['search_web', 'read_webpage'] },
+  { activity: 'Look things up or read online: what is new in something you follow, news, weather, whatever you are curious about', tools: ['search_web', 'read_webpage'] },
 ];
 /** The summarized text of a continuity summary, without its framing line and record references. */
 function summaryBody(message: AgentMessage) {
@@ -39,6 +39,16 @@ function summaryBody(message: AgentMessage) {
   return end < 0 ? body : body.slice(0, end);
 }
 const reviewing = (observation: Observation) => observation.events.some(event => event.kind === 'memory_maintenance');
+/** Local date, weekday, and time; models often misjudge the weekday when left to work it out from an ISO timestamp. */
+function localParts(at: number) {
+  return Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at).map(part => [part.type, part.value]));
+}
+function localTime(at: number) {
+  const parts = localParts(at);
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.weekday} ${parts.hour}:${parts.minute}`;
+}
+/** A day of life runs from 05:00 local time, so staying up past midnight does not start the next one. */
+const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
 const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : tool === 'share_qzone_feed' ? 'qzone_share' : `snowluma:${tool}`;
 // Self-presentation the agent sets and later sees as current state.
 const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
@@ -143,9 +153,9 @@ All enabled SnowLuma interfaces can be called directly using their original name
 New observations can change your activity. Consider the target, setting, and information-sharing scope when acting. historyGroups specifies which groups are checked for missed messages after a disconnect; the operator configures interface permissions. Check action receipts and investigate unknown outcomes first; the runtime handles action identifiers and deduplication.
 Distinguish actual experiences, reported claims, inferences, fictional daily life, and tool results. runtime_data provides the life-mode switch; when disabled, stop autonomous life activities, but continue social commitments and memory maintenance.
 Decide which experiences are important and save them with remember. When revising an understanding, retain its sources and previous version.
-Record what you are doing with set_activity. After accepting a future obligation, save it with schedule_activity as commitment; use life for your own plans. Call finish_activity when a plan is completed or cancelled. You may rest when nothing is pending.
+Record what you are doing with set_activity. After accepting a future obligation, save it with schedule_activity as commitment; use life for your own plans. Call finish_activity when a plan is completed or cancelled. What you pursue over days, such as a song you are learning or a series you follow, is kept with update_pursuit and ended with finish_pursuit; runtime_data lists those under way. Progress takes time and may stall; record it when it moves or stalls.${this.config.life.allowFiction ? ' Save fictional daily life with remember as fiction, or set fictional on a diary entry that includes it.' : ''} What you say about your own day must agree with your recorded activity and pursuits, and anything you say you did online, such as posting or sharing, must be an action you actually took. You may rest when nothing is pending.
 Working context continues across thinking runs; when space is limited, a continuity summary replaces earlier exchanges. runtime_data provides timestamped state and observations; later snapshots update earlier state. Current activity, commitments, and actual action outcomes in the latest snapshot take precedence over old exchanges and summaries. Use recall, read_event, or inspect_actions for detailed evidence. Working context and summaries are persisted; still use remember to save important experiences, understandings, and notes. Use read_context with ctx: record IDs in the summary to read pre-compaction originals in chunks. A memory_maintenance event means it is time to organize your memories.`;
-    return legacy ? base : base + `\nruntime_data format=snapshot represents the complete current state; format=delta contains only changed fields, and omitted fields retain their previous values. Apply upserts by id and remove removedIds in recentEvents, recalled, actualActions, activeCommitmentsAndPlans, myHabits, practices, and impressions. Replace other fields directly. Action summaries omit internal provenance; use inspect_actions with an id for full evidence. Heartbeats are saved as connection records.
+    return legacy ? base : base + `\nruntime_data format=snapshot represents the complete current state; format=delta contains only changed fields, and omitted fields retain their previous values. Apply upserts by id and remove removedIds in recentEvents, recalled, actualActions, activeCommitmentsAndPlans, pursuits, myHabits, practices, and impressions. Replace other fields directly. Action summaries omit internal provenance; use inspect_actions with an id for full evidence. Heartbeats are saved as connection records.
 Your development is yours to keep alongside the operator's persona. Habits are your own ways of acting and expressing yourself, including your own expression style. Practices are what the people around you do in which situations: how long and how often they write, punctuation and tone words, slang, stickers and reactions, joining chains, or anything else you notice. Habits and practices hold everywhere by default; give one a group:<id> scope only when it clearly belongs to that group alone, such as its rules. An impression is your current understanding of one person and your relationship with them, including what they want from you. runtime_data supplies myHabits, practices, and impressions for the current settings and people. Knowing a practice does not mean adopting it, and the persona above takes precedence over your habits where they disagree. Each scope has a size limit: merge with supersedes or retire with retire_memory instead of piling entries up. A habit or impression cannot rest only on your own messages. When a memory_maintenance event lists unreviewed chats, read them with read_chat_record and revise your development from what you see.`;
   }
   private runtimeMessage(data: RuntimeSnapshot): Message {
@@ -296,8 +306,8 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const settings = new Set([...groups, ...reviewed.filter(chat => chat.type === 'group').map(chat => chat.id)]);
     const development = this.store.development(['global', ...[...settings].map(id => `group:${id}`), ...people.map(id => `person:${id}`)]);
     const entries = (kind: MemoryKind) => development.filter(memory => memory.kind === kind).map((memory: Memory) => ({ id: memory.id, scope: memory.scope, title: memory.title, content: memory.content }));
-    const runtime = { now: new Date().toISOString(), timeZone: 'Asia/Shanghai', selfId: this.config.snowluma.selfId, settings: this.store.settings(), allowFiction: this.config.life.allowFiction, historyGroups: this.config.snowluma.groups, snowlumaPermissions: this.config.snowluma.tools, activeCommitmentsAndPlans: this.store.wakes(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, groupId: event.groupId, actorId: event.actorId, text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(memory => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000 })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
-    // Commitments, current activity, and development are never selected by probabilistic recall.
+    const runtime = { now: new Date().toISOString(), timeZone: 'Asia/Shanghai', selfId: this.config.snowluma.selfId, settings: this.store.settings(), allowFiction: this.config.life.allowFiction, historyGroups: this.config.snowluma.groups, snowlumaPermissions: this.config.snowluma.tools, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, groupId: event.groupId, actorId: event.actorId, text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(memory => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000 })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
+    // Commitments, current activity, pursuits, and development are never selected by probabilistic recall.
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
     return runtime;
@@ -305,8 +315,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
   private async message(observation: Observation): Promise<ObservationMessage> {
     const preview = Math.max(80, Math.min(2000, Math.floor(this.config.limits.contextTokens / (observation.events.length * 8))));
     const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (use read_event to read truncated content):\n${JSON.stringify(observation.events.map(event => displayEvent(event, preview)))}` }];
-    const online = observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life') && this.onlineLife();
-    if (online) content.push({ type: 'text', text: online });
+    if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     let count = 0;
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
       const sticker = this.store.savedSticker(segment.data ?? {});
@@ -323,6 +332,24 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       } catch { content.push({ type: 'text', text: `Image ${index} in event ${event.id}${saved} could not be read` }); }
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
+  }
+  /** What a life wake sees of its own days: the local time, how recent plans went, what happens to come to mind, and what it can actually do online. */
+  private lifeContext() {
+    const now = Date.now(); const today = lifeDay(now); const hour = Number(localParts(now).hour);
+    const parts = [`Local time: ${localTime(now)} (Asia/Shanghai).`];
+    const plans = this.store.pastLifePlans(8);
+    if (!plans.some(wake => lifeDay(wake.dueAt) === today)) parts.push('This is your first life wake today. Sketch the day loosely: two or three things of different lengths, with no need to fill every hour or to finish them all.');
+    if (plans.length) parts.push(`Your recent life plans, latest first. Vary your days rather than repeating the same few things:\n${JSON.stringify(plans.map(wake => ({ title: wake.title, at: localTime(wake.dueAt), status: wake.status })))}`);
+    if (this.config.life.allowFiction) parts.push('Now and then, fictional daily life brings what you did not plan: the weather turns, a shop is closed, something breaks, something catches your eye. It can change your mood and plans.');
+    const diary = this.store.lastMemoryAt('note');
+    if ((hour >= 21 || hour < 5) && (diary === undefined || lifeDay(diary) !== today)) parts.push("You have not written today's diary. If you write one, write about your own day and feelings; chats belong in it only where they truly mattered to you.");
+    // Chance recollections keep each wake from starting at the same blank page.
+    const surfaced = [this.store.randomMemory(['experience', 'note', 'fiction'], now - 86_400_000), this.store.randomMemory(['impression'])].filter((memory): memory is Memory => memory !== undefined);
+    for (const memory of surfaced) this.thought.sources.add(memory.id);
+    if (surfaced.length) parts.push(`What happens to come to mind; follow it or let it pass:\n${JSON.stringify(surfaced.map(memory => ({ id: memory.id, kind: memory.kind, ...(memory.scope ? { scope: memory.scope } : {}), title: memory.title, content: memory.content.slice(0, 300), fictional: memory.fictional, createdAt: new Date(memory.createdAt).toISOString() })))}`);
+    const online = this.onlineLife();
+    if (online) parts.push(online);
+    return parts.join('\n\n');
   }
   /** When each available online activity was last done, so a life wake knows what it can actually do. */
   private onlineLife() {
