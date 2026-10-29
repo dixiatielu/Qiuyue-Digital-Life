@@ -87,6 +87,33 @@ test('retention preserves pending events and required evidence; processed waterm
   } finally { store.close(); }
 });
 
+test('pursuits are bounded, keep fiction behind its switch, and leave with forgotten sources', () => {
+  const store = new Store(':memory:');
+  try {
+    const source = event(store, 'Let us both learn this song');
+    assert.throws(() => store.updatePursuit({ title: 'Drawing clouds', progress: 'Sketched one', fictional: true }, [], false), /Fictional daily life is disabled/);
+    const pursuit = store.updatePursuit({ title: 'Learning the song with a friend', progress: 'First verse', fictional: false }, [source.id], false);
+    for (let n = 1; n < 8; n++) store.updatePursuit({ title: `Pursuit ${n}`, progress: 'Started', fictional: false }, [], false);
+    assert.throws(() => store.updatePursuit({ title: 'One too many', progress: 'Started', fictional: false }, [], false), /Eight pursuits/);
+    store.finishPursuit(store.pursuits()[0]!.id, 'dropped');
+    assert.equal(store.pursuits().length, 7);
+    assert.throws(() => store.finishPursuit('p:missing', 'done'), /No active pursuit/);
+    assert.ok(store.status().pursuits.some(item => item.id === pursuit.id));
+    store.forget(source.id);
+    assert.ok(!store.pursuits().some(item => item.id === pursuit.id));
+  } finally { store.close(); }
+});
+
+test('a diary entry about a fictional day is kept as fiction and needs no actual source', () => {
+  const store = new Store(':memory:');
+  try {
+    const input = { kind: 'note' as const, title: 'Rainy day', content: 'Stayed in and drew clouds', importance: 3, sources: [], fictional: true };
+    assert.throws(() => store.writeMemory(input, false), /Fictional daily life is disabled/);
+    assert.equal(store.writeMemory(input, true).fictional, true);
+    assert.throws(() => store.writeMemory({ ...input, fictional: false }, true), /must reference IDs/);
+  } finally { store.close(); }
+});
+
 test('fiction retains provenance and cannot become real evidence', () => {
   const store = new Store(':memory:');
   try {

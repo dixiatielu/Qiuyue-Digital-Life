@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Action, DevelopmentKind, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Wake } from './domain.js';
+import type { Action, DevelopmentKind, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Pursuit, Wake } from './domain.js';
 import { isAmbient, isDevelopment, isHeartbeat } from './domain.js';
 import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -52,6 +52,7 @@ export class Store {
       CREATE TRIGGER IF NOT EXISTS memory_delete AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE id=old.id; END;
       CREATE TABLE IF NOT EXISTS tombstones(source_key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
+      CREATE TABLE IF NOT EXISTS pursuits(id TEXT PRIMARY KEY, title TEXT NOT NULL, progress TEXT NOT NULL, fictional INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, action_key TEXT UNIQUE NOT NULL, fingerprint TEXT NOT NULL, kind TEXT NOT NULL, args TEXT NOT NULL, source_ids TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS action_fingerprint ON actions(fingerprint,status);
       CREATE TABLE IF NOT EXISTS action_triggers(action_id TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY(action_id,event_id));
@@ -230,7 +231,7 @@ export class Store {
   }
   memory(memoryId: string): Memory | undefined { const row = this.db.prepare('SELECT * FROM memories WHERE id=?').get(memoryId); return row ? this.memoryRow(row) : undefined; }
   /** Limits bound the digital life's own development writes; operator corrections pass none. */
-  writeMemory(input: { kind: MemoryKind; title: string; content: string; importance: number; subjects?: string[]; sources: string[]; supersedes?: string; scope?: string }, allowFiction: boolean, limits?: { scopeChars: number; personChars: number }): Memory {
+  writeMemory(input: { kind: MemoryKind; title: string; content: string; importance: number; subjects?: string[]; sources: string[]; supersedes?: string; scope?: string; fictional?: boolean }, allowFiction: boolean, limits?: { scopeChars: number; personChars: number }): Memory {
     if (!input.content.trim() || input.content.length > 12_000 || input.title.length > 200) throw new Error('Memory content is empty or too long.');
     if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
     if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
@@ -253,8 +254,9 @@ export class Store {
         if (used + input.content.length > cap) throw new Error(`Your ${input.kind}s in ${scope} would reach ${used + input.content.length} characters, above the limit of ${cap}; merge entries with supersedes or retire some with retire_memory first.`);
       }
     }
-    if (!sources.length && input.kind !== 'fiction') throw new Error('A memory must reference IDs of actual experiences or existing memories.');
-    let fictional = input.kind === 'fiction';
+    // A diary entry about a fictional day is fiction too, whatever its kind.
+    let fictional = input.kind === 'fiction' || input.fictional === true;
+    if (!sources.length && !fictional) throw new Error('A memory must reference IDs of actual experiences or existing memories.');
     const groups = new Set<number>();
     for (const source of sources) {
       const event = this.event(source); const memory = this.memory(source);
@@ -351,6 +353,7 @@ export class Store {
         this.db.prepare('DELETE FROM memories WHERE id=?').run(selectedId);
         this.db.prepare('DELETE FROM events WHERE id=?').run(selectedId);
         this.db.prepare('DELETE FROM wakes WHERE id=?').run(selectedId);
+        this.db.prepare('DELETE FROM pursuits WHERE id=?').run(selectedId);
         if (selectedId === 'state:activity') this.setSetting('activity', '');
       }
       // Action results can contain the original message text; retain only outcome metadata.
@@ -377,6 +380,37 @@ export class Store {
   }
   wakes(): Wake[] { return this.db.prepare("SELECT * FROM wakes WHERE status IN ('pending','queued') ORDER BY due_at").all().map(row => ({ id: String(row.id), title: String(row.title), kind: row.kind as Wake['kind'], dueAt: Number(row.due_at), status: row.status as Wake['status'] })); }
   finishWake(wakeId: string, status: 'done' | 'cancelled') { if (!this.db.prepare('UPDATE wakes SET status=? WHERE id=?').run(status, wakeId).changes) throw new Error('Activity does not exist.'); }
+  /** Life plans that have come and gone, latest first, so a life wake sees how its days have actually gone. */
+  pastLifePlans(limit: number): Wake[] { return this.db.prepare("SELECT * FROM wakes WHERE kind='life' AND status IN ('done','cancelled') ORDER BY due_at DESC LIMIT ?").all(limit).map(row => ({ id: String(row.id), title: String(row.title), kind: 'life', dueAt: Number(row.due_at), status: row.status as Wake['status'] })); }
+  private pursuitRow(row: Record<string, any>): Pursuit { return { id: row.id, title: row.title, progress: row.progress, fictional: Boolean(row.fictional), status: row.status, startedAt: row.started_at, updatedAt: row.updated_at }; }
+  /** Pursuits still under way, most recently advanced first. */
+  pursuits(): Pursuit[] { return this.db.prepare("SELECT * FROM pursuits WHERE status='active' ORDER BY updated_at DESC,rowid DESC").all().map(row => this.pursuitRow(row)); }
+  /** Start a pursuit, or record where an active one stands now. */
+  updatePursuit(input: { id?: string; title: string; progress: string; fictional: boolean }, sources: string[], allowFiction: boolean): Pursuit {
+    if (!input.title.trim() || input.title.length > 200 || !input.progress.trim() || input.progress.length > 1000) throw new Error('A pursuit needs a title of at most 200 characters and progress of at most 1000.');
+    return this.transaction(() => {
+      const previous = input.id ? this.db.prepare("SELECT * FROM pursuits WHERE id=? AND status='active'").get(input.id) : undefined;
+      if (input.id && !previous) throw new Error('No active pursuit has this ID.');
+      // As with memories, what began as fiction stays fiction.
+      const fictional = input.fictional || Boolean(previous?.fictional);
+      if (fictional && !allowFiction) throw new Error('Fictional daily life is disabled; fictional pursuits cannot be kept.');
+      const now = Date.now();
+      let pursuitId = input.id;
+      if (pursuitId) this.db.prepare('UPDATE pursuits SET title=?,progress=?,fictional=?,updated_at=? WHERE id=?').run(input.title, input.progress, fictional ? 1 : 0, now, pursuitId);
+      else {
+        if (this.pursuits().length >= 8) throw new Error('Eight pursuits are already under way; finish or drop one first.');
+        pursuitId = id('p');
+        this.db.prepare('INSERT INTO pursuits VALUES (?,?,?,?,?,?,?)').run(pursuitId, input.title, input.progress, fictional ? 1 : 0, 'active', now, now);
+      }
+      for (const source of sources) this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(pursuitId, source);
+      this.notify({ kind: 'state' });
+      return this.pursuitRow(this.db.prepare('SELECT * FROM pursuits WHERE id=?').get(pursuitId)!);
+    });
+  }
+  finishPursuit(pursuitId: string, status: 'done' | 'dropped') {
+    if (!this.db.prepare("UPDATE pursuits SET status=?,updated_at=? WHERE id=? AND status='active'").run(status, Date.now(), pursuitId).changes) throw new Error('No active pursuit has this ID.');
+    this.notify({ kind: 'state' });
+  }
   enqueueDue(now = Date.now()) {
     const settings = this.settings(); if (settings.paused) return;
     this.transaction(() => {
@@ -477,6 +511,11 @@ export class Store {
   action(row: Record<string, any>): Action { return { id: row.id, key: row.action_key, fingerprint: row.fingerprint, kind: row.kind, args: parse(row.args), sources: parse(row.source_ids), status: row.status, result: row.result ? parse(row.result) : null, createdAt: row.created_at }; }
   actions(limit = 20): Action[] { return this.db.prepare('SELECT * FROM actions ORDER BY created_at DESC LIMIT ?').all(limit).map(row => this.action(row)); }
   actionById(actionId: string): Action | undefined { const row = this.db.prepare('SELECT * FROM actions WHERE id=?').get(actionId); return row ? this.action(row) : undefined; }
+  /** One memory in everyday use, from before a time if given, chosen at random. */
+  randomMemory(kinds: MemoryKind[], before = Number.MAX_SAFE_INTEGER): Memory | undefined {
+    const row = this.db.prepare(`SELECT * FROM memories WHERE active=1 AND kind IN (${kinds.map(() => '?').join(',')}) AND created_at<? ORDER BY random() LIMIT 1`).get(...kinds, before);
+    return row ? this.memoryRow(row) : undefined;
+  }
   lastMemoryAt(kind: MemoryKind): number | undefined { const row = this.db.prepare('SELECT max(created_at) AS at FROM memories WHERE kind=?').get(kind); return row?.at == null ? undefined : Number(row.at); }
   lastSuccessfulAction(kind: string): Action | undefined { const row = this.db.prepare("SELECT * FROM actions WHERE kind=? AND status='success' ORDER BY created_at DESC LIMIT 1").get(kind); return row ? this.action(row) : undefined; }
   /** Latest time each experience kind was recorded; read-only tool calls leave an experience but no action. */
@@ -519,5 +558,5 @@ export class Store {
   hourlyActions(now = Date.now()) { return Number(this.db.prepare('SELECT count(*) AS n FROM actions WHERE created_at>?').get(now - 3_600_000)!.n); }
   dailyCalls(now = Date.now()) { return Number(this.db.prepare("SELECT count(*) AS n FROM calls WHERE at>=?").get(Math.floor((now + 8 * 3_600_000) / 86_400_000) * 86_400_000 - 8 * 3_600_000)!.n); }
   chargeCall(runId: string, limit: number | null) { this.transaction(() => { if (limit !== null && this.dailyCalls() >= limit) throw new Error('The daily model call budget has been exhausted.'); this.db.prepare('INSERT INTO calls VALUES (?,?,?)').run(id('call'), Date.now(), runId); }); }
-  status() { return { ...this.settings(), pendingEvents: this.pending(), modelCallsToday: this.dailyCalls(), actionsThisHour: this.hourlyActions(), memories: this.db.prepare('SELECT count(*) AS n FROM memories').get()!.n, wakes: this.wakes(), actions: this.actions() }; }
+  status() { return { ...this.settings(), pendingEvents: this.pending(), modelCallsToday: this.dailyCalls(), actionsThisHour: this.hourlyActions(), memories: this.db.prepare('SELECT count(*) AS n FROM memories').get()!.n, wakes: this.wakes(), pursuits: this.pursuits(), actions: this.actions() }; }
 }

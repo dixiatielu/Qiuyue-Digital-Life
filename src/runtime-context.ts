@@ -12,7 +12,7 @@ export function actionSummary(action: Action, previewLength = 2000) {
 export type RuntimeSnapshot = Record<string, unknown>;
 type Entry = { id: string };
 type ArrayUpdate = { upsert: Entry[]; removedIds: string[] };
-const collections = new Set(['recentEvents', 'recalled', 'actualActions', 'activeCommitmentsAndPlans', 'myHabits', 'practices', 'impressions']);
+const collections = new Set(['recentEvents', 'recalled', 'actualActions', 'activeCommitmentsAndPlans', 'pursuits', 'myHabits', 'practices', 'impressions']);
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /** Keep the warm message prefix intact; only changed fields and records are appended. */

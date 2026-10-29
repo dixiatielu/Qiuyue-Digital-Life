@@ -76,6 +76,10 @@ _Avoid_: group session state
 Something the digital life is pursuing or has not yet finished, as part of its continuing state.
 _Avoid_: the current message awaiting a reply
 
+**Pursuit**:
+A current activity that continues across days, such as learning a song, following a series, or a hobby project, kept with where it stands now. It may advance, stall, finish, or be dropped, and it is actual or fictional daily life.
+_Avoid_: a to-do list, a one-off life plan, an unfinished commitment
+
 **Commitment**:
 A future obligation the digital life has explicitly agreed to undertake in a social interaction; it belongs to continuing state while unfinished.
 _Avoid_: a task automatically accepted when a group member proposes it

@@ -39,6 +39,16 @@ export interface Wake {
   dueAt: number;
   status: 'pending' | 'queued' | 'done' | 'cancelled';
 }
+/** Something pursued over days, such as a song being learned or a series being followed, with where it stands now. */
+export interface Pursuit {
+  id: string;
+  title: string;
+  progress: string;
+  fictional: boolean;
+  status: 'active' | 'done' | 'dropped';
+  startedAt: number;
+  updatedAt: number;
+}
 export interface Action {
   id: string;
   key: string;
