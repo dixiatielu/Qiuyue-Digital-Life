@@ -79,7 +79,7 @@ test('custom gateway handles real Pi tool cycles and preserves the remote model 
       assert.equal(request.body.max_tokens, 8192);
       assert.ok(request.body.tools.some((tool: any) => tool.function.name === 'set_activity'));
       assert.ok(request.body.tools.some((tool: any) => tool.function.name === 'send_custom_face'));
-      assert.equal(request.body.tools.length, 225);
+      assert.equal(request.body.tools.length, 226);
       assert.deepEqual(request.body.tools, requests[0]!.body.tools);
     }
     assert.ok(requests[1]!.body.messages.some((message: any) => message.role === 'tool' && message.tool_call_id === 'call-1'));

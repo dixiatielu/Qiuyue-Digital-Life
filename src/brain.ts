@@ -11,6 +11,7 @@ import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { recordTime } from './record.js';
+import { faceCaption, faceIds, nameFaces } from './faces.js';
 
 /** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. A new platform joins the digital life's days by adding its tools here. */
 const onlineActivities: { activity: string; tools: string[]; memoryKind?: MemoryKind }[] = [
@@ -64,9 +65,11 @@ export interface Brain {
   abort(): void;
 }
 
-export function displayEvent(event: EnvironmentEvent, preview = 2000) {
+/** faces names system faces by ID, so faces and reactions read as what they are. */
+export function displayEvent(event: EnvironmentEvent, preview = 2000, faces: Record<string, string> = {}) {
   const compact = (value: unknown) => { const text = JSON.stringify(value); return text && text.length > preview ? { preview: text.slice(0, preview), truncated: true } : value; };
-  return { id: event.id, kind: event.kind, at: new Date(event.at).toISOString(), groupId: event.groupId, actorId: event.actorId, postType: event.payload.post_type, messageType: event.payload.message_type, subType: event.payload.sub_type, targetId: event.payload.target_id, sender: compact(event.payload.sender), text: event.text.slice(0, preview), truncated: event.text.length > preview, messageId: event.payload.message_id, segments: event.kind === 'message' ? compact(event.payload.message) : undefined, notice: event.kind.startsWith('notice:') ? compact(event.payload) : undefined, details: event.payload.post_type && event.kind !== 'message' && !event.kind.startsWith('notice:') ? compact(event.payload) : undefined, wake: event.kind === 'wake' ? event.payload : undefined };
+  const payload = nameFaces(event.payload, faces);
+  return { id: event.id, kind: event.kind, at: new Date(event.at).toISOString(), groupId: event.groupId, actorId: event.actorId, postType: event.payload.post_type, messageType: event.payload.message_type, subType: event.payload.sub_type, targetId: event.payload.target_id, sender: compact(event.payload.sender), text: event.text.slice(0, preview), truncated: event.text.length > preview, messageId: event.payload.message_id, segments: event.kind === 'message' ? compact(payload.message) : undefined, notice: event.kind.startsWith('notice:') ? compact(payload) : undefined, details: event.payload.post_type && event.kind !== 'message' && !event.kind.startsWith('notice:') ? compact(event.payload) : undefined, wake: event.kind === 'wake' ? event.payload : undefined };
 }
 
 export class PiBrain implements Brain {
@@ -74,6 +77,8 @@ export class PiBrain implements Brain {
   thought: ThoughtContext = { generation: 0, sources: new Set(), triggers: new Set(), lifeOnly: true };
   private controller = new AbortController();
   private seen = new Set<string>();
+  /** System faces whose picture this thought has seen. */
+  private facesSeen = new Set<string>();
   private turns = 0;
   private runId = '';
   private observations: EnvironmentEvent[] = [];
@@ -314,7 +319,9 @@ Your development is yours to keep alongside the operator's persona. Habits are y
   }
   private async message(observation: Observation): Promise<ObservationMessage> {
     const preview = Math.max(80, Math.min(2000, Math.floor(this.config.limits.contextTokens / (observation.events.length * 8))));
-    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (use read_event to read truncated content):\n${JSON.stringify(observation.events.map(event => displayEvent(event, preview)))}` }];
+    const ids = [...new Set(observation.events.flatMap(faceIds))];
+    const faces = ids.length ? await this.tools.faces.names(this.controller.signal) : {};
+    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (use read_event to read truncated content):\n${JSON.stringify(observation.events.map(event => displayEvent(event, preview, faces)))}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     let count = 0;
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
@@ -330,6 +337,15 @@ Your development is yours to keep alongside the operator's persona. Habits are y
         // The label outlives the image, which is folded when the thought ends.
         content.push({ type: 'text', text: `The following is image ${index} from event ${event.id}${saved}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
       } catch { content.push({ type: 'text', text: `Image ${index} in event ${event.id}${saved} could not be read` }); }
+    }
+    // A face's name rarely says what it shows, so each face is seen once a thought, after the images people sent.
+    const unseen = ids.filter(id => faces[id] && !this.facesSeen.has(id)).slice(0, Math.max(0, this.config.limits.maxImages - count));
+    const pictures = await Promise.all(unseen.map(id => this.tools.faces.image(id, this.controller.signal).catch(() => undefined)));
+    for (const [index, id] of unseen.entries()) {
+      const picture = pictures[index];
+      if (!picture || estimateTokens(content.filter(item => item.type !== 'image')) + ++count * IMAGE_TOKENS > this.config.limits.contextTokens * 0.4) continue;
+      this.facesSeen.add(id);
+      content.push({ type: 'text', text: faceCaption(id, faces) }, { type: 'image', data: picture.toString('base64'), mimeType: 'image/png' });
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
   }
@@ -384,7 +400,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = [];
-    this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.facesSeen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true, reviewing: reviewing(observation) };
     this.display(monitor => monitor.startRun(this.runId, observation));

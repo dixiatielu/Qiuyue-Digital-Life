@@ -1,5 +1,6 @@
 import type { Action, EnvironmentEvent } from './domain.js';
 import { conversationOf, eventRef, type Store } from './store.js';
+import { faceLabel } from './faces.js';
 
 const ZONE_OFFSET = 8 * 3_600_000;
 const LINE_LIMIT = 300;
@@ -97,16 +98,9 @@ export class ChatRecord {
     if (event?.kind.startsWith('notice:group_msg_emoji_like:')) {
       const likes = Array.isArray(event.payload.likes) ? event.payload.likes as { emoji_id?: unknown; count?: unknown }[] : [];
       const who = this.name(Number(event.payload.operator_id ?? event.actorId));
-      return { messageId: Number(event.payload.message_id), text: `${who} ${event.kind.endsWith(':remove') ? 'removed reaction' : 'reacted'} ${likes.map(like => `[emoji ${this.face(like.emoji_id)}]`).join('') || '[emoji]'}` };
+      return { messageId: Number(event.payload.message_id), text: `${who} ${event.kind.endsWith(':remove') ? 'removed reaction' : 'reacted'} ${likes.map(like => `[emoji ${faceLabel(like.emoji_id, this.faces)}]`).join('') || '[emoji]'}` };
     }
-    if (action?.kind === 'set_group_reaction') return { messageId: Number(action.args.message_id), text: `me ${action.args.is_set === false ? 'removed reaction' : 'reacted'} [emoji ${this.face(action.args.code)}]` };
-  }
-  /** Larger codes are Unicode emoji. */
-  private face(id: unknown): string {
-    const code = String(id);
-    let name = this.faces[code];
-    if (!name && Number(code) >= 1000) { try { name = String.fromCodePoint(Number(code)); } catch { /* not a code point */ } }
-    return name ? `${code} ${name}` : code;
+    if (action?.kind === 'set_group_reaction') return { messageId: Number(action.args.message_id), text: `me ${action.args.is_set === false ? 'removed reaction' : 'reacted'} [emoji ${faceLabel(action.args.code, this.faces)}]` };
   }
   /** quote adds the start of the message, for a reaction shown apart from it. */
   private target(messageId: number, quote = false): string {
@@ -152,7 +146,7 @@ export class ChatRecord {
         case 'at': return data.qq === 'all' ? '@all ' : `@${this.name(Number(data.qq))} `;
         case 'reply': return `[reply to ${this.target(Number(data.id))}] `;
         case 'image': return data.summary && data.summary !== '[图片]' ? `[image ${data.summary}]` : '[image]';
-        case 'face': return `[face ${this.face(data.id)}]`;
+        case 'face': return `[face ${faceLabel(data.id, this.faces)}]`;
         case 'mface': return `[sticker ${data.summary ?? ''}]`;
         case 'record': return '[voice]';
         case 'video': return '[video]';

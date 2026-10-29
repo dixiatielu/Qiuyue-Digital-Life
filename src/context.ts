@@ -81,6 +81,8 @@ export function persistableMessage(message: AgentMessage): AgentMessage {
 }
 export function contextRecordId(message: AgentMessage): string { return `ctx:${hash(persistableMessage(message))}`; }
 const FOLDED = '[Folded when the thought ended;';
+/** Starts the label before a system face's picture. */
+export const FACE_CAPTION = 'QQ system face';
 /** Replace every result of one tool with a pointer to its archived original, keeping the first line as a label. */
 export function foldToolResults(messages: AgentMessage[], toolName: string): { messages: AgentMessage[]; changed: number } {
   let changed = 0;
@@ -93,12 +95,16 @@ export function foldToolResults(messages: AgentMessage[], toolName: string): { m
   });
   return { messages: folded, changed };
 }
-/** Replace every image in observations and tool results with a note; the label before each names its event and index. */
+/** Replace every image in observations and tool results with a note; the label before each names its event and index, or the face it shows. */
 export function foldImages(messages: AgentMessage[]): { messages: AgentMessage[]; changed: number } {
   let changed = 0;
   const folded = messages.map(message => {
     if ((message.role !== 'observation' && message.role !== 'toolResult') || !message.content.some(block => block.type === 'image')) return message;
-    return { ...message, content: message.content.map(block => block.type !== 'image' ? block : (changed++, { type: 'text' as const, text: `${FOLDED} view it again with view_event_image]` })) };
+    return { ...message, content: message.content.map((block, index, blocks) => {
+      if (block.type !== 'image') return block;
+      changed++; const label = blocks[index - 1];
+      return { type: 'text' as const, text: `${FOLDED} view it again with ${label?.type === 'text' && label.text.startsWith(FACE_CAPTION) ? 'view_face' : 'view_event_image'}]` };
+    }) };
   });
   return { messages: folded as AgentMessage[], changed };
 }
