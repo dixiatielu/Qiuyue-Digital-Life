@@ -23,7 +23,14 @@
   "life": {
     "enabled": false,
     "allowFiction": false,
-    "minWakeMs": 60000
+    "minWakeMs": 60000,
+    "freeTime": {
+      "enabled": true,
+      "quietMinMs": 600000,
+      "quietMaxMs": 1200000,
+      "gapMs": 3600000,
+      "perDay": 8
+    }
   },
   "limits": {
     "batchSize": 20,

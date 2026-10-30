@@ -38,6 +38,8 @@ export interface Wake {
   kind: 'life' | 'commitment';
   dueAt: number;
   status: 'pending' | 'queued' | 'done' | 'cancelled';
+  /** The digital life rests until this wake: no free-time wake comes before it (ADR-0015). */
+  rest?: boolean;
 }
 /** Something pursued over days, such as a song being learned or a series being followed, with where it stands now. */
 export interface Pursuit {

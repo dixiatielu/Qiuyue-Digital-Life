@@ -282,6 +282,24 @@ test('the first life wake of a day sketches the day, which starts at 05:00 rathe
   } finally { f.store.close(); }
 });
 
+test('a free-time wake opens like any life wake, says when no pursuits are under way, and rest can be marked on the wake to get up for', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
+  try {
+    f.store.setSetting('lifeEnabled', true);
+    f.store.schedule('Practice the chorus', 'life', Date.now() + 86_400_000);
+    let prompt = ''; let request = '';
+    const getUp = new Date(Date.now() + 8 * 3_600_000).toISOString();
+    f.faux.setResponses([
+      context => { request = JSON.stringify(context); prompt = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations'))); return answer(call('schedule_activity', { title: 'Get up', kind: 'life', at: getUp, rest: true })); },
+      answer('Sleep'),
+    ]);
+    runtime.start(); await runtime.idle();
+    assert.ok(prompt.includes('Free time: your chats have been quiet') && prompt.includes('Online activities') && prompt.includes('You have no pursuits under way'));
+    assert.ok(request.includes('set rest on the activity you will wake for') && request.includes('comes back to mind later only if you save it with remember'));
+    assert.deepEqual(f.store.wakes().map(wake => [wake.title, wake.rest]), [['Get up', true], ['Practice the chorus', undefined]]);
+  } finally { await runtime.stop(); f.store.close(); }
+});
+
 test('pursuits carry across days and fresh contexts, stay fictional once fictional, and need life mode to advance', async () => {
   const f = fixture();
   try {

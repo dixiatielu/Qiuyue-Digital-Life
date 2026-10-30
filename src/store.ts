@@ -74,6 +74,7 @@ export class Store {
     // Source timestamps have second precision and remote clocks; scheduling needs the local receive time.
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='received_at'").get()) this.db.exec('ALTER TABLE events ADD COLUMN received_at INTEGER');
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name='scope'").get()) this.db.exec('ALTER TABLE memories ADD COLUMN scope TEXT');
+    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('wakes') WHERE name='rest'").get()) this.db.exec('ALTER TABLE wakes ADD COLUMN rest INTEGER NOT NULL DEFAULT 0');
     for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {} })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
     const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
     if (self) this.selfId = parse<number>(self.value);
@@ -194,8 +195,12 @@ export class Store {
   recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
   claim(limit: number, allowLife = true): { batchId: string; events: EnvironmentEvent[] } | undefined {
     return this.transaction(() => {
-      const rows = this.db.prepare(`SELECT * FROM events WHERE ${claimable} ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, limit);
-      if (!rows.length) return;
+      const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, limit);
+      if (!claimed.length) return;
+      // A life wake starts a thought of its own instead of riding along with chat (ADR-0015).
+      const life = (row: Record<string, any>) => row.kind === 'wake' && parse<Record<string, unknown>>(row.payload).wakeKind === 'life';
+      const cut = claimed.findIndex(row => life(row) !== life(claimed[0]!));
+      const rows = cut < 0 ? claimed : claimed.slice(0, cut);
       const batchId = id('b');
       for (const row of rows) this.db.prepare("UPDATE events SET status='processing',batch_id=? WHERE id=?").run(batchId, String(row.id));
       this.notifyEvents(rows.map(row => String(row.id)));
@@ -407,17 +412,17 @@ export class Store {
     this.db.prepare("DELETE FROM context_records WHERE at<? AND id NOT IN (SELECT j.value FROM working_context,json_each(json_extract(data,'$.messageIds')) j)").run(now - days * 86_400_000);
     return Number(this.db.prepare(`DELETE FROM events WHERE status='processed' AND at<? AND NOT EXISTS (SELECT 1 FROM sources WHERE source_id=events.id) AND NOT EXISTS (SELECT 1 FROM actions,json_each(actions.source_ids) j WHERE j.value=events.id AND actions.status IN ('pending','unknown'))`).run(now - days * 86_400_000).changes);
   }
-  schedule(title: string, kind: Wake['kind'], dueAt: number, sources: string[] = []): Wake {
+  schedule(title: string, kind: Wake['kind'], dueAt: number, sources: string[] = [], rest = false): Wake {
     if (!Number.isFinite(dueAt)) throw new Error('Invalid wake time.');
     if (this.wakes().length >= 100) throw new Error('The 100 unfinished activity limit has been reached; organize existing commitments and plans first.');
     const wakeId = id('w');
     this.transaction(() => {
-      this.db.prepare('INSERT INTO wakes(id,title,kind,due_at) VALUES (?,?,?,?)').run(wakeId, title, kind, dueAt);
+      this.db.prepare('INSERT INTO wakes(id,title,kind,due_at,rest) VALUES (?,?,?,?,?)').run(wakeId, title, kind, dueAt, rest ? 1 : 0);
       for (const source of sources) this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(wakeId, source);
     });
-    return { id: wakeId, title, kind, dueAt, status: 'pending' };
+    return { id: wakeId, title, kind, dueAt, status: 'pending', ...(rest ? { rest } : {}) };
   }
-  wakes(): Wake[] { return this.db.prepare("SELECT * FROM wakes WHERE status IN ('pending','queued') ORDER BY due_at").all().map(row => ({ id: String(row.id), title: String(row.title), kind: row.kind as Wake['kind'], dueAt: Number(row.due_at), status: row.status as Wake['status'] })); }
+  wakes(): Wake[] { return this.db.prepare("SELECT * FROM wakes WHERE status IN ('pending','queued') ORDER BY due_at").all().map(row => ({ id: String(row.id), title: String(row.title), kind: row.kind as Wake['kind'], dueAt: Number(row.due_at), status: row.status as Wake['status'], ...(row.rest ? { rest: true } : {}) })); }
   finishWake(wakeId: string, status: 'done' | 'cancelled') { if (!this.db.prepare('UPDATE wakes SET status=? WHERE id=?').run(status, wakeId).changes) throw new Error('Activity does not exist.'); }
   /** Life plans that have come and gone, latest first, so a life wake sees how its days have actually gone. */
   pastLifePlans(limit: number): Wake[] { return this.db.prepare("SELECT * FROM wakes WHERE kind='life' AND status IN ('done','cancelled') ORDER BY due_at DESC LIMIT ?").all(limit).map(row => ({ id: String(row.id), title: String(row.title), kind: 'life', dueAt: Number(row.due_at), status: row.status as Wake['status'] })); }
@@ -459,6 +464,15 @@ export class Store {
         this.db.prepare("UPDATE wakes SET status='queued' WHERE id=?").run(wake.id);
       }
     });
+  }
+  /** When someone other than the digital life last did something that can start a thought. */
+  lastHeard(selfId: number): number | undefined {
+    const row = this.db.prepare("SELECT max(coalesce(received_at,at)) AS at FROM events WHERE (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND coalesce(actor_id,0)!=? AND NOT ambient(kind,actor_id)").get(selfId)!;
+    return row.at == null ? undefined : Number(row.at);
+  }
+  /** Life wakes since the given time, scheduled or offered as free time. */
+  lifeWakesSince(since: number): { at: number; freeTime: boolean }[] {
+    return this.db.prepare("SELECT at, json_extract(payload,'$.freeTime') AS free FROM events WHERE kind='wake' AND json_extract(payload,'$.wakeKind')='life' AND at>=? ORDER BY at").all(since).map(row => ({ at: Number(row.at), freeTime: Boolean(row.free) }));
   }
   /** Where review stopped reading a conversation: the time of its first unread item. Review looks back at most a day. */
   reviewMark(conversation: string, now = Date.now()): number { return Math.max(this.setting<Record<string, number>>('reviewMarks')[conversation] ?? 0, now - 86_400_000); }

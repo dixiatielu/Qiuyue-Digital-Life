@@ -9,7 +9,8 @@ export interface Config {
   persona: string;
   model: ModelConfig;
   snowluma: { url: string; tokenEnv: string; selfId: number; groups: number[]; tools: SnowLumaPermissions; maxStreamBytes: number };
-  life: { enabled: boolean; allowFiction: boolean; minWakeMs: number };
+  /** freeTime: a quiet stretch, drawn between quietMinMs and quietMaxMs each time, offers a life wake at least gapMs from any other, at most perDay a day (ADR-0015). */
+  life: { enabled: boolean; allowFiction: boolean; minWakeMs: number; freeTime: { enabled: boolean; quietMinMs: number; quietMaxMs: number; gapMs: number; perDay: number } };
   limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; maxPreemptions: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
   compaction: { keepRecentTokens: number; summaryMaxTokens: number; retries: number; idleRatio: number; idleAfterMs: number };
   memory: { retentionDays: number; recallLimit: number; recentEvents: number; reflectionEveryEvents: number };
@@ -30,7 +31,7 @@ export function loadConfig(path: string): Config {
     persona,
     model: { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...raw.model },
     snowluma: { url: 'ws://127.0.0.1:3001', tokenEnv: 'SNOWLUMA_TOKEN', selfId: 0, groups: [], maxStreamBytes: 32_000_000, ...raw.snowluma, tools: { allow: '*', deny: [], ...raw.snowluma?.tools } },
-    life: { enabled: false, allowFiction: false, minWakeMs: 60_000, ...raw.life },
+    life: { enabled: false, allowFiction: false, minWakeMs: 60_000, ...raw.life, freeTime: { enabled: true, quietMinMs: 600_000, quietMaxMs: 1_200_000, gapMs: 3_600_000, perDay: 8, ...raw.life?.freeTime } },
     limits: { batchSize: 20, debounceMs: 1200, maxDelayMs: 4000, ambientDelayMs: 120_000, maxPreemptions: 2, tickMs: 500, modelCallsPerDay: null, actionsPerHour: null, runTimeoutMs: null, maxTurnsPerRun: null, maxImages: 4, contextTokens: 262144, outputReserveTokens: 32768, contextSafetyTokens: 2048, ...raw.limits },
     compaction: { keepRecentTokens: 12000, summaryMaxTokens: 2048, retries: 1, idleRatio: 0.85, idleAfterMs: 30_000, ...raw.compaction },
     memory: { retentionDays: 90, recallLimit: 8, recentEvents: 30, reflectionEveryEvents: 100, ...raw.memory },
@@ -52,7 +53,8 @@ export function loadConfig(path: string): Config {
   }
   if (!Number.isSafeInteger(debounceMs) || debounceMs < 0) throw new Error('debounceMs must be a non-negative integer; 0 starts thinking without waiting for quiet.');
   if (!Number.isSafeInteger(maxPreemptions) || maxPreemptions < 0) throw new Error('maxPreemptions must be a non-negative integer; 0 turns preemption off.');
-  for (const values of [runLimits, config.memory, config.development, { minWakeMs: config.life.minWakeMs }, { timeoutMs: config.web.timeoutMs, maxBytes: config.web.maxBytes, maxStreamBytes: config.snowluma.maxStreamBytes }]) {
+  const { enabled: _freeTime, ...freeTime } = config.life.freeTime;
+  for (const values of [runLimits, config.memory, config.development, { minWakeMs: config.life.minWakeMs }, freeTime, { timeoutMs: config.web.timeoutMs, maxBytes: config.web.maxBytes, maxStreamBytes: config.snowluma.maxStreamBytes }]) {
     for (const [key, value] of Object.entries(values)) if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${key} must be a positive integer.`);
   }
   if (config.limits.outputReserveTokens + config.limits.contextSafetyTokens >= config.limits.contextTokens) throw new Error('The output reserve and safety margin must sum to less than contextTokens.');
@@ -60,7 +62,8 @@ export function loadConfig(path: string): Config {
   if (!Number.isSafeInteger(config.compaction.retries) || config.compaction.retries < 0 || config.compaction.retries > 3) throw new Error('compaction.retries must be between 0 and 3.');
   if (typeof config.compaction.idleRatio !== 'number' || !(config.compaction.idleRatio > 0 && config.compaction.idleRatio <= 1)) throw new Error('compaction.idleRatio must be greater than 0 and at most 1.');
   if (config.compaction.summaryMaxTokens > config.limits.outputReserveTokens) throw new Error('summaryMaxTokens cannot exceed outputReserveTokens.');
-  for (const value of [config.life.enabled, config.life.allowFiction, config.web.enabled, config.embedding.enabled]) if (typeof value !== 'boolean') throw new Error('Switches must be boolean values.');
+  for (const value of [config.life.enabled, config.life.allowFiction, config.life.freeTime.enabled, config.web.enabled, config.embedding.enabled]) if (typeof value !== 'boolean') throw new Error('Switches must be boolean values.');
+  if (freeTime.quietMinMs > freeTime.quietMaxMs) throw new Error('life.freeTime.quietMinMs cannot exceed quietMaxMs.');
   const embedding = config.embedding;
   if (embedding.enabled) {
     let url: URL | undefined;
