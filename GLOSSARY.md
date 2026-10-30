@@ -136,6 +136,14 @@ _Avoid_: completed real action
 A later time chosen by the digital life to reconsider or continue an activity.
 _Avoid_: mechanical replies at a fixed frequency
 
+**Free-time Wake**:
+A life wake the program offers when the digital life's chats have been quiet for a while and it is not resting. It says only that the time is free; the digital life may use it or rest.
+_Avoid_: a fixed-frequency timer, a reminder to do a particular activity
+
+**Rest**:
+A period the digital life marks for itself, until an activity it has scheduled, during which no free-time wake comes.
+_Avoid_: quiet hours fixed by the operator, Agent pause
+
 **Action**:
 An external behavior autonomously selected by the digital life, including sending messages, reacting with emoji, and poking someone.
 _Avoid_: a mandatory reply

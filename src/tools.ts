@@ -171,12 +171,12 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       },
     },
     tool('set_activity', 'Record or clear the current activity.', Type.Object({ activity: Type.String({ maxLength: 2000 }) }), args => { store.setActivity(args.activity, [...context().sources]); return store.settings(); }),
-    tool('schedule_activity', 'Schedule a life activity or an accepted social commitment.', Type.Object({ title: string('Activity and associated people or groups', 1000), kind: Type.Union([Type.Literal('life'), Type.Literal('commitment')]), at: string('ISO time with timezone, for example 2026-10-28T09:00:00+08:00', 100) }), args => {
+    tool('schedule_activity', 'Schedule a life activity or an accepted social commitment.', Type.Object({ title: string('Activity and associated people or groups', 1000), kind: Type.Union([Type.Literal('life'), Type.Literal('commitment')]), at: string('ISO time with timezone, for example 2026-10-28T09:00:00+08:00', 100), rest: Type.Optional(Type.Boolean({ description: 'You rest until this activity, as when going to sleep or taking a nap: no free-time wake comes before it' })) }), args => {
       const dueAt = Date.parse(args.at);
       if (!/(Z|[+-]\d{2}:\d{2})$/.test(args.at)) throw new Error('The time must include a timezone.');
       if (args.kind === 'life' && !store.settings().lifeEnabled) throw new Error('Life mode is disabled; life activities cannot be started.');
       if (dueAt < Date.now() + config.life.minWakeMs) throw new Error('The wake interval is too short; adjust the plan.');
-      return store.schedule(args.title, args.kind, dueAt, [...context().sources]);
+      return store.schedule(args.title, args.kind, dueAt, [...context().sources], args.rest);
     }),
     tool('finish_activity', 'Mark a commitment or life plan as completed or cancelled.', Type.Object({ id: string('Activity ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('cancelled')]) }), args => { store.finishWake(args.id, args.status); return store.wakes(); }),
     tool('update_pursuit', "Start something you pursue over days, such as a song you are learning, a series you follow, or a hobby project, or record where one stands now. Without id it starts a pursuit; with id it replaces that pursuit's progress. Setbacks and stalls are progress too.", Type.Object({ id: Type.Optional(string('ID of the pursuit to update', 100)), title: string('What you are pursuing', 200), progress: string('Where it stands now', 1000), fictional: Type.Boolean({ description: 'It belongs to fictional daily life' }) }), args => {

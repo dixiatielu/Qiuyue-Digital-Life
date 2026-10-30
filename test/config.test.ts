@@ -115,3 +115,19 @@ test('embedding is off by default and, when on, needs an endpoint, a model, and 
     assert.throws(() => load({ ...on, enabled: 'yes' }), /boolean/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('free time defaults on within life, merges partial settings, and rejects a quiet range that runs backwards', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-free-time-config-'));
+  try {
+    const base = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
+    writeFileSync(join(dir, base.personaFile), 'Qiuyue');
+    const path = join(dir, 'config.json');
+    const load = (raw: typeof base) => { writeFileSync(path, JSON.stringify(raw)); return loadConfig(path); };
+    const { freeTime: _example, ...life } = base.life;
+    assert.deepEqual(load({ ...base, life }).life.freeTime, { enabled: true, quietMinMs: 600_000, quietMaxMs: 1_200_000, gapMs: 3_600_000, perDay: 8 });
+    assert.equal(load({ ...base, life: { ...life, freeTime: { perDay: 3 } } }).life.freeTime.gapMs, 3_600_000);
+    assert.throws(() => load({ ...base, life: { ...life, freeTime: { quietMinMs: 1_300_000 } } }), /quietMinMs cannot exceed quietMaxMs/);
+    assert.throws(() => load({ ...base, life: { ...life, freeTime: { gapMs: 0 } } }), /gapMs must be a positive integer/);
+    assert.throws(() => load({ ...base, life: { ...life, freeTime: { enabled: 'yes' } } }), /Switches must be boolean/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

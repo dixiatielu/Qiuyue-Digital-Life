@@ -1,8 +1,16 @@
 import type { Config } from './config.js';
 import type { Brain } from './brain.js';
 import { Store, type PendingTiming } from './store.js';
-import { errorText } from './domain.js';
+import { errorText, type Wake } from './domain.js';
 import { recordTime } from './record.js';
+
+export interface FreeTimeView { now: number; heardAt: number; quietMs: number; lifeWakes: { at: number; freeTime: boolean }[]; plans: Wake[] }
+/** A quiet stretch offers free time unless the digital life rests, another life wake is near, or the day's free time is spent (ADR-0015). */
+export function freeTimeDue({ now, heardAt, quietMs, lifeWakes, plans }: FreeTimeView, { gapMs, perDay }: Config['life']['freeTime']): boolean {
+  if (now - heardAt < quietMs || plans.some(wake => wake.rest && wake.status === 'pending')) return false;
+  if (lifeWakes.some(wake => now - wake.at < gapMs) || plans.some(wake => wake.kind === 'life' && wake.dueAt - now < gapMs)) return false;
+  return lifeWakes.filter(wake => wake.freeTime && now - wake.at < 86_400_000).length < perDay;
+}
 
 export class LifeRuntime {
   private timer?: ReturnType<typeof setInterval>;
@@ -16,7 +24,10 @@ export class LifeRuntime {
   private stopped = false;
   private started = false;
   private nextRetention = 0;
-  constructor(readonly config: Config, readonly store: Store, readonly brain: Brain) {}
+  private nextFreeTime = 0;
+  /** The quiet stretch being waited out: since when, and how long this one must last. */
+  private quiet = { heardAt: -1, needMs: 0 };
+  constructor(readonly config: Config, readonly store: Store, readonly brain: Brain, private random = Math.random) {}
   start() {
     if (this.started) throw new Error('The runtime has already started.');
     this.started = true;
@@ -43,12 +54,13 @@ export class LifeRuntime {
       if (this.consolidating) { if (pending.first !== undefined) this.brain.abort(); return; }
       if (this.work && !this.brain.streaming) return;
       const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
-      if (this.queueReview(idle, now)) { pending = this.store.pendingTiming(settings.lifeEnabled); checkedAt = Date.now(); }
+      if (this.queueReview(idle, now) || (idle && settings.lifeEnabled && this.offerFreeTime(now))) { pending = this.store.pendingTiming(settings.lifeEnabled); checkedAt = Date.now(); }
       if (!this.ready(pending, checkedAt)) {
         if (idle && !this.consolidated && pending.first === undefined) this.consolidate();
         return;
       }
-      const observation = this.store.claim(this.config.limits.batchSize, settings.lifeEnabled);
+      // A life wake waits for the thought under way to end rather than steering it.
+      const observation = this.store.claim(this.config.limits.batchSize, settings.lifeEnabled && !this.work);
       if (!observation) return;
       this.store.log('observation_dispatched', { batchId: observation.batchId, mode: this.work ? 'steer' : 'run', events: observation.events.length, waitedMs: checkedAt - Math.min(...observation.events.map(event => event.receivedAt ?? checkedAt)) });
       if (this.work) {
@@ -80,6 +92,19 @@ export class LifeRuntime {
     const text = `Time to consolidate memory; there is no need to speak in a group. ${chats ? `Unreviewed chat records: ${chats}. Read them with read_chat_record, which continues where your last review stopped; you decide how much to read. Start with what happened as the record shows it. Find what someone asked of you and whether you did it, where someone corrected, questioned, or contradicted you, or said again something you had not taken up, and check what you said you did or saw against your actions; keep those corrections in what you save. Your own feelings are yours to write, but how someone took your words is only what their replies show, and what they did after their last message, such as going to sleep or back to work, is unknown unless they said so. Where the record does not show whether something helped, say it is unknown rather than how you hoped it went. Then look at how as much as what. After reading a chat, read your own lines there alone with read_chat_record person=${this.config.snowluma.selfId}. Quote a few of yours beside a few of theirs from the same moments and say how they differ in form, not content: what most of their lines share that yours lack, and what yours share that theirs lack. Look at length, punctuation and tone words, messages that are only a sticker or image, several short messages in a row, joining in, and how they responded to you. Then do the same for reactions and stickers. Count your own reactions, stickers, and messages in your lines, and ask whether anyone else reacted or sent stickers that often over the same stretch. Look at which ones they use in which situations and on whose messages, and how they use them, such as alone, after a few words, or joining others' reactions. Open a few of their stickers with view_event_image to see what they are. Record what you see as practices, keep what suits you as habits, and revise impressions of people. A habit says when it applies and when it does not. Development holds everywhere unless it belongs to one group alone. Before you revise a habit or practice, see whose lines its examples come from: if they all come from one person, it is about that person even when it is worded for friends in general, so put what still holds into your impression of them and retire the habit or practice instead of revising it.` : 'Review recent experiences and revise practices, habits, and impressions of people.'} Save important experiences too, and retire entries that no longer hold.`;
     this.store.receive({ key: `maintenance:${watermark}:${count}`, kind: 'memory_maintenance', at: now, text, payload: { backlog } });
     this.store.setSetting('reflectionWatermark', count);
+    return true;
+  }
+  /** Once a minute while idle, see whether the quiet stretch, its length drawn afresh each time one begins, offers a free-time life wake (ADR-0015). */
+  private offerFreeTime(now: number) {
+    const free = this.config.life.freeTime;
+    if (!free.enabled || now < this.nextFreeTime) return false;
+    this.nextFreeTime = now + 60_000;
+    const heardAt = this.store.lastHeard(this.config.snowluma.selfId) ?? 0;
+    if (heardAt !== this.quiet.heardAt) this.quiet = { heardAt, needMs: free.quietMinMs + Math.floor(this.random() * (free.quietMaxMs - free.quietMinMs + 1)) };
+    const view = { now, heardAt, quietMs: this.quiet.needMs, lifeWakes: this.store.lifeWakesSince(now - Math.max(free.gapMs, 86_400_000)), plans: this.store.wakes() };
+    if (!freeTimeDue(view, free)) return false;
+    const minutes = Math.floor((now - heardAt) / 60_000);
+    this.store.receive({ key: `free-time:${now}`, kind: 'wake', at: now, text: `Free time: your chats have been quiet for ${heardAt ? `${minutes} minutes` : 'a while'}. Do something of your own or rest, as you like.`, payload: { wakeKind: 'life', freeTime: true } });
     return true;
   }
   /** A burst starts one thought once the environment goes quiet; ambient events never wake or steer on their own. */
