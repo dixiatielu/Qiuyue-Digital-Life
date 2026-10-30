@@ -1,4 +1,4 @@
-import { createModels, createProvider, envApiKeyAuth, type Api, type Model, type OpenAICompletionsCompat, type OpenAIResponsesCompat, type AnthropicMessagesCompat } from '@earendil-works/pi-ai';
+import { createModels, createProvider, envApiKeyAuth, type Api, type Model, type ModelThinkingLevel, type OpenAICompletionsCompat, type OpenAIResponsesCompat, type AnthropicMessagesCompat } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
@@ -12,6 +12,7 @@ const apis = {
   'anthropic-messages': { create: anthropicMessagesApi, compat: AnthropicMessagesCompatSchema },
 };
 type CustomApi = keyof typeof apis;
+const thinkingLevels: ModelThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 export interface ModelConfig {
   provider: string;
   id: string;
@@ -24,6 +25,8 @@ export interface ModelConfig {
   maxTokens?: number;
   reasoning?: boolean;
   compat?: OpenAICompletionsCompat | OpenAIResponsesCompat | AnthropicMessagesCompat;
+  /** How much the model thinks before each turn; off unless set, and only a reasoning model can think. */
+  thinkingLevel?: ModelThinkingLevel;
 }
 
 export function validateModelConfig(config: ModelConfig) {
@@ -33,6 +36,7 @@ export function validateModelConfig(config: ModelConfig) {
     try { url = new URL(config.baseUrl); } catch { throw new Error('model.baseUrl must be a valid HTTP/HTTPS URL.'); }
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('model.baseUrl must be an HTTP/HTTPS URL without credentials, query parameters, or a fragment.');
   }
+  if (config.thinkingLevel !== undefined && !thinkingLevels.includes(config.thinkingLevel)) throw new Error(`model.thinkingLevel must be one of ${thinkingLevels.join(', ')}.`);
   if (config.api === undefined) {
     if (['input', 'contextWindow', 'maxTokens', 'reasoning', 'compat'].some(key => config[key as keyof ModelConfig] !== undefined)) throw new Error('Custom model capabilities require model.api.');
     return;
@@ -64,6 +68,7 @@ export function resolveModel(config: ModelConfig): Model<Api> {
   }
   if (!model) throw new Error('The specified model is not in the Pi model catalog; use the models command to check, or configure model.api, baseUrl, input, contextWindow, and maxTokens for a custom model.');
   if (!model.input.includes('image')) throw new Error('Image understanding is required; select a model that supports image input.');
+  if ((config.thinkingLevel ?? 'off') !== 'off' && !model.reasoning) throw new Error('model.thinkingLevel requires a reasoning model; for a custom model, set model.reasoning to true.');
   return model;
 }
 

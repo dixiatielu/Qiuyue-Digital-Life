@@ -21,7 +21,8 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   // The note on what recalled holds added 73 more: 110 more window.
   // Keeping corrections and unknown outcomes, and one person's ways in their impression, added 155 more: 230 more window.
   // Free-time wakes, rest, and saving what was seen online added 127 more: 190 more window.
-  f.cfg.limits.contextTokens = 14330;
+  // How a thought ends, and that new messages come by themselves, added 98 more: 150 more window.
+  f.cfg.limits.contextTokens = 14480;
   f.cfg.limits.outputReserveTokens = 4096;
   f.cfg.compaction.keepRecentTokens = 1500;
   f.cfg.compaction.summaryMaxTokens = 512;
