@@ -37,6 +37,7 @@ npm run dev -- models openai
 查看其他服务商的模型时，将 `openai` 替换为对应的服务商名称。然后编辑：
 
 - **`config.json`：** 设置 SnowLuma 地址，将 `snowluma.selfId` 设为已登录的 QQ 账号，并将 `model.provider` 和 `model.id` 设为支持图片输入的模型。将 `personaFile` 改为 `persona.md`。`snowluma.groups` 指定连接或恢复时需要补查历史消息的群，可为空，不限制实时事件的接收范围。
+- **`config.json` 中的 `model.thinkingLevel`（可选）：** 推理模型每轮思考的强度：`off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`。自定义模型还需将 `model.reasoning` 设为 `true`。强度如何发送由 `model.compat.thinkingFormat` 决定，请使用接口接受的格式，网关可能拒绝其他格式。使用 OpenAI 格式时，`off` 不发送任何参数，模型按自身默认强度思考；想尽量少思考请用 `minimal`。
 - **`config.json` 中的 `embedding`（可选）：** 如需让数字生命按大家正在聊的内容想起记忆，将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 embeddings 接口。两个阈值都取决于模型：`threshold`（消息让它想起什么）和 `searchThreshold`（主动 `recall` 时的几个关键词，得分通常更低）分别按 `qwen3-vl-embedding` 校准为 `0.65` 和 `0.55`，其他模型需要自行校准。在 `selfNames` 中列出别人对数字生命的称呼，避免一条消息因为提到它就匹配上所有提到它的记忆。不启用时，思考不会自动想起记忆，主动调用 `recall` 只按原词检索。
 - **`config.json` 中的 `life`：** `enabled` 决定首次启动时是否开启自主生活，`allowFiction` 允许虚构日常。自主生活开启时，`freeTime` 会在聊天安静一段时间（每次在 `quietMinMs` 到 `quietMaxMs` 之间随机）后提供一次 life wake，与其他 life wake 至少相隔 `gapMs`，每天最多 `perDay` 次。数字生命在安排醒来要做的活动时标记 rest，就能让它在那之前不来。
 - **`persona.md`：** 描述数字生命的身份和人格。

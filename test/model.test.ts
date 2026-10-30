@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
+import { fauxAssistantMessage as answer } from '@earendil-works/pi-ai';
 import { createModelBackend, resolveModel, type ModelConfig } from '../src/model.js';
 import { PiBrain } from '../src/brain.js';
 import { Store } from '../src/store.js';
 import { createTools } from '../src/tools.js';
-import { config, event } from './helpers.js';
+import { config, event, fixture } from './helpers.js';
 
 const custom: ModelConfig = {
   provider: 'test-gateway', id: 'private-vision-model', apiKeyEnv: 'QIUYUE_TEST_MODEL_KEY',
@@ -34,6 +35,21 @@ test('custom model uses the declared capabilities without a catalog entry', () =
   assert.equal(model.contextWindow, 131072);
   assert.equal(model.maxTokens, 8192);
   assert.deepEqual(model.compat, custom.compat);
+});
+
+test('the configured thinking level reaches every model turn and needs a reasoning model', async () => {
+  assert.throws(() => resolveModel({ ...custom, thinkingLevel: 'deep' as never }), /model.thinkingLevel/);
+  assert.throws(() => resolveModel({ ...custom, thinkingLevel: 'medium' }), /reasoning model/);
+  assert.equal(resolveModel({ ...custom, reasoning: true, thinkingLevel: 'medium' }).reasoning, true);
+  for (const thinkingLevel of [undefined, 'off', 'medium'] as const) {
+    const f = fixture(); f.cfg.model.thinkingLevel = thinkingLevel;
+    const brain = f.restart(); let reasoning: unknown = 'unset';
+    try {
+      f.faux.setResponses([(_context, options) => { reasoning = options?.reasoning; return answer('Quiet'); }]);
+      event(f.store, 'Hello'); await brain.run(f.store.claim(10)!);
+      assert.equal(reasoning, thinkingLevel === 'medium' ? 'medium' : undefined);
+    } finally { f.store.close(); }
+  }
 });
 
 test('custom gateway handles real Pi tool cycles and preserves the remote model name and credentials', async () => {

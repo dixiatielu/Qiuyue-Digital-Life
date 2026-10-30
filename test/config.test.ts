@@ -89,6 +89,7 @@ test('custom model configuration requires explicit protocol, endpoint and capabi
     for (const field of ['contextWindow', 'maxTokens']) for (const value of [undefined, 0, -1, 1.5, '1000']) assert.throws(() => load({ [field]: value }), new RegExp(`model.${field}`));
     assert.throws(() => load({ maxTokens: 200000 }), /maxTokens.*contextWindow/);
     assert.throws(() => load({ reasoning: 'true' }), /reasoning/);
+    for (const thinkingLevel of ['deep', 'none', true]) assert.throws(() => load({ thinkingLevel }), /model.thinkingLevel/);
     for (const compat of [null, [], { maxTokensField: 'tokens' }, { supportsStore: 'false' }, { typo: true }]) assert.throws(() => load({ compat }), /compat/);
     assert.deepEqual(load({ compat: { maxTokensField: 'max_tokens' } }).model.compat, { maxTokensField: 'max_tokens' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
