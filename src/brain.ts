@@ -12,7 +12,6 @@ import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
-import { faceCaption, faceIds } from './faces.js';
 import type { SemanticRecall } from './recall.js';
 
 /** Built-in online activities; plugins contribute their own activities through the host. */
@@ -53,8 +52,6 @@ const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
 const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
 /** Messages, stickers, reactions, and pokes (ADR-0002): their success receipts need no call of their own, and a newer message in their chat makes an unsent one stale. */
 const socialActions = new Set(['send_private_msg', 'send_group_msg', 'send_msg', 'send_custom_face', 'send_group_ai_record', 'set_group_reaction', 'set_msg_emoji_like', 'send_poke', 'friend_poke', 'group_poke']);
-/** A sticker saved and described in one call needs no call of its own either; one saved without a description, or described before, still does. */
-const describedSticker = (tool: string, details: unknown) => tool === 'add_custom_face' && (details as { described?: { outcome?: unknown } } | undefined)?.described?.outcome === 'success';
 /** The chat an action is aimed at: group:<id> or private:<qq>. */
 function targetChat(args: unknown): string | undefined {
   const { group_id: group, user_id: user, message_type: type } = (args ?? {}) as Record<string, unknown>;
@@ -79,10 +76,6 @@ export class PiBrain implements Brain {
   thought: ThoughtContext = { generation: 0, sources: new Set(), triggers: new Set(), lifeOnly: true };
   private controller = new AbortController();
   private seen = new Set<string>();
-  /** System faces whose picture this thought has seen. */
-  private facesSeen = new Set<string>();
-  /** Saved stickers this thought has been shown as fitting what was said. */
-  private stickersShown = new Set<string>();
   private turns = 0;
   private runId = '';
   private observations: EnvironmentEvent[] = [];
@@ -119,7 +112,7 @@ export class PiBrain implements Brain {
       convertToLlm: toModelMessages,
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
       beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
-      afterToolCall: async ({ toolCall, isError, result }) => !isError && (socialActions.has(toolCall.name) || describedSticker(toolCall.name, result.details)) ? { terminate: true } : undefined,
+      afterToolCall: async ({ toolCall, isError, result }) => !isError && (socialActions.has(toolCall.name) || this.tools.plugins.endsThought(toolCall.name, result.details)) ? { terminate: true } : undefined,
       prepareRequest: async ({ context, model: currentModel }, signal) => {
         const first = this.turns === 0;
         // Observations steered in for stale chats have entered by now.
@@ -349,17 +342,13 @@ export class PiBrain implements Brain {
   }
   private async message(observation: Observation): Promise<ObservationMessage> {
     const preview = Math.max(80, Math.min(2000, Math.floor(this.config.limits.contextTokens / (observation.events.length * 8))));
-    const ids = [...new Set(observation.events.flatMap(faceIds))];
     const rests = observation.events.filter(event => event.kind === 'rest_backlog');
-    const faces = ids.length || rests.length ? await this.tools.faces.names(this.controller.signal) : {};
+    const faces = await this.tools.plugins.emojiNames(observation.events, this.controller.signal);
     // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
     const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, this.config.snowluma.selfId, observation.events, faces, preview)}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
-    // Saved stickers that fit what was said come with it, each once a thought, so sending one needs no call to look them up (ADR-0009). A review sends nothing.
-    const stickers = this.thought.reviewing ? [] : this.recall?.stickerSuggestions(observation.events, this.stickersShown) ?? [];
-    for (const sticker of stickers) this.stickersShown.add(sticker.emojiId);
-    if (stickers.length) content.push({ type: 'text', text: `Saved stickers of yours whose descriptions fit what was just said, in case you want to send one with send_custom_face; sending none is fine too:\n${JSON.stringify(stickers.map(({ emojiId, desc }) => ({ emoji_id: emojiId, desc })))}` });
+    for (const text of this.tools.plugins.observation(observation.events, this.thought)) content.push({ type: 'text', text });
     let count = 0;
     const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.config.limits.contextTokens * 0.4;
     // Plugin-produced pictures are seen before incoming chat images, within the same context budget.
@@ -369,11 +358,11 @@ export class PiBrain implements Brain {
       try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
       if (!picture) { count--; content.push({ type: 'text', text: image.unavailable }); continue; }
       content.push({ type: 'text', text: image.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
+      image.onShown?.();
     }
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
       const ref = eventRef(event.id);
-      const sticker = this.store.savedSticker(segment.data ?? {});
-      const saved = sticker ? ` (already your saved sticker ${sticker.emojiId}${sticker.desc ? `: ${sticker.desc}` : ''})` : '';
+      const saved = this.tools.plugins.imageCaption(segment.data ?? {});
       const url = segment.data?.url;
       // A line leaves the URL out, so saving the image as a sticker or sending it on takes it from its label.
       const from = typeof url === 'string' ? `; url: ${url}` : '';
@@ -387,14 +376,15 @@ export class PiBrain implements Brain {
         content.push({ type: 'text', text: `The following is image ${index} from ${ref}${saved}${from}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
       } catch { content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} could not be read${from}` }); }
     }
-    // A face's name rarely says what it shows, so each face is seen once a thought, after the images people sent.
-    const unseen = ids.filter(id => faces[id] && !this.facesSeen.has(id)).slice(0, Math.max(0, this.config.limits.maxImages - count));
-    const pictures = await Promise.all(unseen.map(id => this.tools.faces.image(id, this.controller.signal).catch(() => undefined)));
-    for (const [index, id] of unseen.entries()) {
-      const picture = pictures[index];
-      if (!picture || estimateTokens(content.filter(item => item.type !== 'image')) + ++count * IMAGE_TOKENS > this.config.limits.contextTokens * 0.4) continue;
-      this.facesSeen.add(id);
-      content.push({ type: 'text', text: faceCaption(id, faces) }, { type: 'image', data: picture.toString('base64'), mimeType: 'image/png' });
+    // Supplementary plugin pictures follow the images in the chat and use the same budget.
+    for (const image of this.tools.plugins.supplementalImages(observation.events, this.thought)) {
+      if (!image.autoView) continue;
+      if (!fits()) { if (image.deferred) content.push({ type: 'text', text: image.deferred }); continue; }
+      let picture;
+      try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
+      if (!picture) { count--; if (image.unavailable) content.push({ type: 'text', text: image.unavailable }); continue; }
+      content.push({ type: 'text', text: image.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
+      image.onShown?.();
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
   }
@@ -404,7 +394,7 @@ export class PiBrain implements Brain {
     const items = chats.reduce((sum, chat) => sum + chat.messages + chat.notices, 0) || 1;
     return chats.map(chat => {
       const share = Math.floor(this.config.limits.contextTokens / 4 * (chat.messages + chat.notices) / items);
-      const { text, omitted } = new ChatRecord(this.store, this.config.snowluma.selfId, chat.conversation, faces).span(chat.from, until, share);
+      const { text, omitted } = new ChatRecord(this.store, this.config.snowluma.selfId, chat.conversation, faces, undefined, action => this.tools.plugins.actionCaption(action)).span(chat.from, until, share);
       return omitted ? `${text}\n[The earliest ${omitted} lines did not fit; read them with read_chat_record from="${recordTime(chat.from)}".]` : text;
     }).join('\n\n');
   }
@@ -461,7 +451,7 @@ export class PiBrain implements Brain {
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = [];
-    this.seen.clear(); this.facesSeen.clear(); this.stickersShown.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     const self = this.config.snowluma.selfId;
     this.engaged = new Set(observation.events.filter(event => event.actorId !== self && !isAmbient(event.kind, event.actorId, self)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
@@ -490,7 +480,7 @@ export class PiBrain implements Brain {
   async review(observation: Observation) {
     const generation = this.store.settings().generation;
     this.resetContext(); this.compactions = [];
-    this.seen.clear(); this.facesSeen.clear(); this.stickersShown.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(); this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: false, reviewing: true };
@@ -537,7 +527,7 @@ export class PiBrain implements Brain {
   /** Chat records read and images seen in a thought leave working context when it ends. Both sit within this thought, so the cached prefix before it stays valid. */
   private fold() {
     const records = foldToolResults(this.agent.state.messages, 'read_chat_record');
-    const images = foldImages(records.messages);
+    const images = foldImages(records.messages, label => this.tools.plugins.imageViewer(label));
     if (!records.changed && !images.changed) return;
     this.store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
     this.agent.state.messages = images.messages;

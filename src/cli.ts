@@ -17,6 +17,7 @@ import { Monitor } from './monitor.js';
 import { followDisplay } from './display-client.js';
 import { EmbeddingClient, SemanticRecall } from './recall.js';
 import { createPlugins, pluginCredentials } from './plugins/index.js';
+import type { PluginHost } from './plugins.js';
 
 async function main() {
   process.umask(0o077);
@@ -74,8 +75,9 @@ async function main() {
   let brain: PiBrain;
   let reviewer: PiBrain;
   const social = new SnowLumaAdapter(config.snowluma, store, () => { void runtime?.tick(); });
-  const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding)) : undefined;
-  const plugins = createPlugins(config, store);
+  let plugins: PluginHost;
+  const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding), () => plugins.knownEmojiNames()) : undefined;
+  plugins = createPlugins(config, store, social, recall);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   const stopServices = async () => {
     const results = await Promise.allSettled([social.close(), runtime?.stop(), recall?.stop(), plugins.stop()]);

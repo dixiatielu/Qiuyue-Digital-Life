@@ -1,22 +1,20 @@
 import { inflateRawSync } from 'node:zlib';
-import type { EnvironmentEvent } from './domain.js';
-import type { SocialAdapter } from './snowluma.js';
-import type { Store } from './store.js';
-import { FACE_CAPTION } from './context.js';
-import { publicFetch } from './web.js';
+import { Type } from 'typebox';
+import type { EnvironmentEvent } from '../domain.js';
+import type { SocialAdapter } from '../snowluma.js';
+import type { Store } from '../store.js';
+import type { Config } from '../config.js';
+import type { LifePlugin } from '../plugins.js';
+import type { ThoughtContext } from '../tool-runtime.js';
+import { emojiLabel } from '../record.js';
+import { publicFetch } from '../web.js';
 
 /** A QQ system face as SnowLuma's catalog lists it; url is an archive holding its pictures. */
 export interface Face { name: string; url?: string }
 
-/** A face by ID and, when known, name. Larger codes are Unicode emoji. */
-export function faceLabel(id: unknown, names: Record<string, string>): string {
-  const code = String(id);
-  let name = names[code];
-  if (!name && Number(code) >= 1000) { try { name = String.fromCodePoint(Number(code)); } catch { /* not a code point */ } }
-  return name ? `${code} ${name}` : code;
-}
+const FACE_CAPTION = 'QQ system face';
 /** Labels a face's picture; folding recognizes it, so view_face is named for seeing it again. */
-export const faceCaption = (id: string, names: Record<string, string>) => `${FACE_CAPTION} ${faceLabel(id, names)}, as it looks:`;
+const faceCaption = (id: string, names: Record<string, string>) => `${FACE_CAPTION} ${emojiLabel(id, names)}, as it looks:`;
 
 /** System faces an event shows: face segments in a message and the emoji of a reaction. */
 export function faceIds(event: EnvironmentEvent): string[] {
@@ -47,21 +45,29 @@ export function unzip(archive: Buffer, name: string): Buffer | undefined {
 /** QQ system faces: names, so faces and reactions read as what they are, and pictures, since a name rarely says what a face shows. */
 export class FaceCatalog {
   private tried = 0;
+  private loading?: Promise<Record<string, Face>>;
   /** A picture once read, or when it last failed. */
   private pictures = new Map<string, Buffer | number>();
-  constructor(private store: Store, private social: SocialAdapter) {}
+  constructor(private store: Store, private social: SocialAdapter, private request = publicFetch) {}
+  known(): Record<string, Face> { return this.store.setting('faces', {}); }
+  knownNames(): Record<string, string> { return Object.fromEntries(Object.entries(this.known()).map(([id, face]) => [id, face.name])); }
   /** The catalog is read from SnowLuma once and kept; a failed read is retried later. */
   async load(signal?: AbortSignal): Promise<Record<string, Face>> {
-    const known = this.store.faces();
+    if (this.loading) return this.loading;
+    const known = this.known();
     if (Object.keys(known).length || Date.now() - this.tried < 600_000) return known;
     this.tried = Date.now();
+    this.loading = this.read(known, signal).finally(() => { this.loading = undefined; });
+    return this.loading;
+  }
+  private async read(known: Record<string, Face>, signal?: AbortSignal): Promise<Record<string, Face>> {
     try {
       const catalog = await this.social.execute('fetch_sys_faces', {}, signal) as { packs?: { emojis?: { q_sid?: unknown; q_des?: unknown; url?: unknown }[] }[] } | null;
       const faces: Record<string, Face> = Object.fromEntries((catalog?.packs ?? []).flatMap(pack => pack.emojis ?? []).filter(face => /^\d+$/.test(String(face.q_sid)) && face.q_des)
         .map(face => [String(face.q_sid), { name: String(face.q_des).replace(/^\//, ''), ...(typeof face.url === 'string' ? { url: face.url } : {}) }]));
-      if (Object.keys(faces).length) this.store.setFaces(faces);
+      if (Object.keys(faces).length) this.store.setSetting('faces', faces);
       return faces;
-    } catch { return known; }
+    } catch { if (signal?.aborted) this.tried = 0; return known; }
   }
   async names(signal?: AbortSignal): Promise<Record<string, string>> {
     return Object.fromEntries(Object.entries(await this.load(signal)).map(([id, face]) => [id, face.name]));
@@ -74,10 +80,39 @@ export class FaceCatalog {
     const url = (await this.load(signal))[id]?.url;
     if (!url) throw new Error('This face is not in the system face catalog, or it has no picture.');
     try {
-      const picture = unzip((await publicFetch(url, { timeoutMs: 5_000, maxBytes: 2_000_000, signal })).data, `${id}/png/${id}.png`);
+      const picture = unzip((await this.request(url, { timeoutMs: 5_000, maxBytes: 2_000_000, signal })).data, `${id}/png/${id}.png`);
       if (!picture?.subarray(0, 8).equals(PNG)) throw new Error('The face archive holds no readable picture.');
       this.pictures.set(id, picture);
       return picture;
     } catch (error) { if (!signal?.aborted) this.pictures.set(id, Date.now()); throw error; }
   }
+}
+
+export function qqFacesPlugin(config: Config, faces: FaceCatalog): LifePlugin {
+  const shown = new WeakMap<ThoughtContext, Set<string>>();
+  return {
+    id: 'qq-faces', enabled: () => config.plugins['qq-faces'] !== false,
+    tools: runtime => [{
+      ...runtime.tool('view_face', "See what a QQ system face looks like, by the ID in a face segment, a reaction's emoji_id, or set_group_reaction's code. A face's name often says little about what it shows or how people use it.", Type.Object({ id: Type.String({ description: 'Face ID', pattern: '^\\d{1,6}$' }) }), async (args, signal) => {
+        const picture = await faces.image(args.id, signal);
+        const names = await faces.names(signal);
+        runtime.check(signal);
+        return { content: [{ type: 'text', text: faceCaption(args.id, names) }, { type: 'image', data: picture.toString('base64'), mimeType: 'image/png' }], details: {} };
+      }),
+      insertBefore: 'inspect_actions',
+    }],
+    reviewTools: ['view_face'],
+    emojiNames: (events, signal) => events === undefined || events.some(event => faceIds(event).length || event.kind === 'rest_backlog') ? faces.names(signal) : {},
+    knownEmojiNames: () => faces.knownNames(),
+    supplementalImages: (events, thought) => {
+      const seen = shown.get(thought) ?? new Set<string>(); shown.set(thought, seen);
+      const names = faces.knownNames();
+      return [...new Set(events.flatMap(faceIds))].filter(id => names[id] && !seen.has(id)).map(id => ({
+        label: faceCaption(id, names), unavailable: '', deferred: '', autoView: true,
+        load: async signal => ({ data: await faces.image(id, signal), mimeType: 'image/png' }),
+        onShown: () => { seen.add(id); },
+      }));
+    },
+    imageViewer: label => label.startsWith(FACE_CAPTION) ? 'view_face' : undefined,
+  };
 }

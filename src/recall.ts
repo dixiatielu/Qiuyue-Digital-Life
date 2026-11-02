@@ -2,30 +2,11 @@ import type { Config } from './config.js';
 import type { EnvironmentEvent, Memory } from './domain.js';
 import { errorText } from './domain.js';
 import type { Store } from './store.js';
+import { closestLine, unit, type Embedder, type Line, type SemanticSource } from './embedding.js';
+export { EmbeddingClient, type Embedder } from './embedding.js';
 
-/** Turns texts into vectors, one per text and in order. */
-export interface Embedder { readonly model: string; embed(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> }
-
-/** An OpenAI-compatible embeddings endpoint, such as https://api.openai.com/v1 or a local server the operator runs. */
-export class EmbeddingClient implements Embedder {
-  constructor(private config: Config['embedding'], private request: typeof fetch = fetch) {}
-  get model() { return this.config.model; }
-  async embed(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
-    const key = process.env[this.config.apiKeyEnv];
-    const response = await this.request(`${this.config.baseUrl.replace(/\/+$/, '')}/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
-      body: JSON.stringify({ model: this.config.model, input: texts }),
-      signal: AbortSignal.any([AbortSignal.timeout(this.config.timeoutMs), ...(signal ? [signal] : [])]),
-    });
-    if (!response.ok) throw Object.assign(new Error(`The embedding request failed: HTTP ${response.status}.`), { status: response.status });
-    const body = await response.json() as { data?: { index?: unknown; embedding?: unknown }[] } | null;
-    const items = Array.isArray(body?.data) ? [...body.data].sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0)) : [];
-    const vectors = items.map(item => Array.isArray(item.embedding) && item.embedding.every(value => typeof value === 'number' && Number.isFinite(value)) ? Float32Array.from(item.embedding as number[]) : undefined);
-    if (vectors.length !== texts.length || vectors.some(vector => !vector?.length || vector.length !== vectors[0]!.length)) throw new Error('The embedding response has an invalid format.');
-    return vectors as Float32Array[];
-  }
-}
+const BATCH = 10;
+const KEPT_MESSAGES = 2000;
 
 /** A memory's lines: one diary entry often holds several unrelated things. Headers ending in a colon and very short lines say too little alone. Some entries were written with a literal \n for line breaks. */
 export function memoryLines(memory: Pick<Memory, 'content'>): string[] {
@@ -40,70 +21,35 @@ export function queryText(text: string, faces: Record<string, string>, selfNames
   return value.replace(/\s+/g, ' ').trim();
 }
 
-/**
- * What a sticker's description is matched by: the clause saying what it suits, from 适合, 表示, or 用于 on, which matches what people say
- * far better than how the sticker looks, and the whole description for one written otherwise.
- */
-export function stickerLines(desc: string): string[] {
-  const whole = desc.trim();
-  const index = Math.max(...['适合', '表示', '用于'].map(word => whole.lastIndexOf(word)));
-  const use = index > 0 ? whole.slice(index) : '';
-  return use ? [use, whole] : [whole];
-}
-
 /** A memory a thought calls to mind, with the line of it that matched. */
 export interface Recollection { memory: Memory; line: string; similarity: number }
-/** A saved sticker whose description fits what a thought's messages say. */
-export interface StickerSuggestion { emojiId: string; desc: string; similarity: number }
-type Line = { line: string; vector: Float32Array };
-
-const BATCH = 10;
-const KEPT_MESSAGES = 2000;
-const unit = (vector: Float32Array) => {
-  let norm = 0; for (const value of vector) norm += value * value;
-  if (!norm) throw new Error('The embedding model returned a zero vector.');
-  norm = Math.sqrt(norm); return vector.map(value => value / norm);
-};
-const dot = (a: Float32Array, b: Float32Array) => { let sum = 0; for (let i = 0; i < a.length; i++) sum += a[i]! * b[i]!; return sum; };
-/** The line most alike to any of the queries. */
-function closestLine(queries: Float32Array[], lines: Line[]) {
-  let best = { line: '', similarity: -1 };
-  for (const query of queries) for (const { line, vector } of lines) {
-    if (vector.length !== query.length) continue;
-    const similarity = dot(query, vector);
-    if (similarity > best.similarity) best = { line, similarity };
-  }
-  return best;
-}
-const stickerActions = new Set(['add_custom_face', 'modify_custom_face', 'delete_custom_face']);
-
 /**
- * Recall by meaning (ADR-0009). Memories are embedded line by line once written, saved stickers once described, and messages once they arrive,
+ * Recall by meaning (ADR-0009). Memories are embedded line by line once written, and messages once they arrive,
  * so spontaneous recall only compares vectors and never waits on the embedding model; a message not embedded in time is left out.
  * Only a deliberate search embeds its query when it is made.
  */
-export class SemanticRecall {
+export class SemanticRecall implements SemanticSource {
   private lines = new Map<string, Line[]>();
-  private stickers = new Map<string, { desc: string; lines: Line[] }>();
   private messages = new Map<string, Float32Array>();
   private waiting = new Map<string, string>();
   private embedding?: Promise<void>;
   private indexing?: Promise<void>;
   private reindex = false;
-  /** Memories, and sticker descriptions as id:desc, whose text the endpoint rejected; they wait for a restart rather than hold up the rest. */
+  /** Memories whose text the endpoint rejected wait for a restart rather than holding up the rest. */
   private rejected = new Set<string>();
   private pausedUntil = 0;
   private retry?: ReturnType<typeof setTimeout>;
   private unsubscribe?: () => void;
   private controller = new AbortController();
-  constructor(private config: Config, private store: Store, private embedder: Embedder) {}
+  constructor(private config: Config, private store: Store, private embedder: Embedder, private emojiNames: () => Record<string, string> = () => ({})) {}
+  get model() { return this.embedder.model; }
+  async embed(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> { return (await this.embedder.embed(texts, signal)).map(unit); }
+  queries(events: EnvironmentEvent[]): Float32Array[] { return events.map(event => this.messages.get(event.id)).filter((vector): vector is Float32Array => vector !== undefined); }
   start() {
     this.store.dropOtherVectors(this.embedder.model);
     for (const { memoryId, line, vector } of this.store.memoryVectors(this.embedder.model)) this.lines.set(memoryId, [...this.lines.get(memoryId) ?? [], { line, vector }]);
-    for (const { emojiId, desc, line, vector } of this.store.stickerVectors(this.embedder.model)) this.stickers.set(emojiId, { desc, lines: [...this.stickers.get(emojiId)?.lines ?? [], { line, vector }] });
     this.unsubscribe = this.store.subscribe(notice => {
       if (notice.kind === 'environment') this.observe(notice.event);
-      if (notice.kind === 'action' && notice.action.status === 'success' && stickerActions.has(notice.action.kind)) this.index();
       if (notice.kind === 'trace' && notice.name === 'memory_written') this.index();
       if (notice.kind === 'trace' && notice.name === 'memory_forgotten') for (const id of (notice.data as { ids?: string[] }).ids ?? []) this.lines.delete(id);
     });
@@ -114,7 +60,7 @@ export class SemanticRecall {
   async idle() { while (this.embedding || this.indexing) await Promise.allSettled([this.embedding, this.indexing]); }
   /** The memories the messages of a thought most call to mind: at most embedding.limit, each at least embedding.threshold alike. Revised versions and development never come up this way. */
   recall(events: EnvironmentEvent[]): Recollection[] {
-    const queries = events.map(event => this.messages.get(event.id)).filter((vector): vector is Float32Array => vector !== undefined);
+    const queries = this.queries(events);
     return queries.length ? this.closest(queries, this.store.recallableIds(), this.config.embedding.threshold, this.config.embedding.limit) : [];
   }
   /**
@@ -136,18 +82,6 @@ export class SemanticRecall {
     const found = new Map<string, Memory & { matchedLine?: string }>([...lexical.map(memory => [memory.id, memory] as const), ...semantic.map(({ memory, line }) => [memory.id, { ...memory, matchedLine: line }] as const)]);
     return [...scores].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([id]) => found.get(id)!);
   }
-  /** Saved stickers whose descriptions the messages of a thought most fit, apart from those already suggested: at most embedding.stickerLimit, each at least embedding.stickerThreshold alike. */
-  stickerSuggestions(events: EnvironmentEvent[], exclude: ReadonlySet<string> = new Set()): StickerSuggestion[] {
-    const queries = events.map(event => this.messages.get(event.id)).filter((vector): vector is Float32Array => vector !== undefined);
-    if (!queries.length) return [];
-    const found: StickerSuggestion[] = [];
-    for (const [emojiId, { desc, lines }] of this.stickers) {
-      if (exclude.has(emojiId)) continue;
-      const { similarity } = closestLine(queries, lines);
-      if (similarity >= this.config.embedding.stickerThreshold) found.push({ emojiId, desc, similarity });
-    }
-    return found.sort((a, b) => b.similarity - a.similarity).slice(0, this.config.embedding.stickerLimit);
-  }
   /** Memories among ids whose closest line is at least threshold alike to any query, most alike first. */
   private closest(queries: Float32Array[], ids: Set<string>, threshold: number, limit: number): Recollection[] {
     const found: { id: string; line: string; similarity: number }[] = [];
@@ -162,7 +96,7 @@ export class SemanticRecall {
   }
   private observe(event: EnvironmentEvent) {
     if (event.kind !== 'message' || event.actorId === undefined || event.actorId === this.config.snowluma.selfId || this.messages.has(event.id) || this.waiting.has(event.id) || Date.now() < this.pausedUntil) return;
-    const faces = event.text.includes('[face ') ? Object.fromEntries(Object.entries(this.store.faces()).map(([id, face]) => [id, face.name])) : {};
+    const faces = event.text.includes('[face ') ? this.emojiNames() : {};
     const text = queryText(event.text, faces, this.config.embedding.selfNames);
     if ([...text].length < 2) return;
     this.waiting.set(event.id, text);
@@ -184,46 +118,23 @@ export class SemanticRecall {
   }
   private index() {
     if (this.indexing) { this.reindex = true; return; }
-    this.indexing = this.indexMemories().then(done => { if (done) return this.indexStickers(); }).finally(() => { this.indexing = undefined; if (this.reindex) { this.reindex = false; this.index(); } });
+    this.indexing = this.indexMemories().finally(() => { this.indexing = undefined; if (this.reindex) { this.reindex = false; this.index(); } });
   }
-  /** Embeds memories not yet embedded; false when it stopped early, for an outage or a stop. */
-  private async indexMemories(): Promise<boolean> {
+  /** Embeds memories not yet embedded, until caught up, stopped, or awaiting an endpoint retry. */
+  private async indexMemories(): Promise<void> {
     while (!this.controller.signal.aborted) {
       const memory = this.store.unindexedMemories(this.embedder.model, this.rejected.size + 1).find(item => !this.rejected.has(item.id));
-      if (!memory) return true;
+      if (!memory) return;
       const lines = memoryLines(memory);
       try {
         const vectors: Float32Array[] = [];
         for (let start = 0; start < lines.length; start += BATCH) vectors.push(...await this.embedder.embed(lines.slice(start, start + BATCH).map(line => `${memory.title}：${line}`), this.controller.signal));
         const entries = lines.map((line, index) => ({ line, vector: unit(vectors[index]!) }));
-        if (this.controller.signal.aborted) return false;
+        if (this.controller.signal.aborted) return;
         if (this.store.saveMemoryVectors(memory.id, this.embedder.model, entries)) this.lines.set(memory.id, entries);
       } catch (error) {
         if (this.rejects(error)) { this.rejected.add(memory.id); this.store.log('recall_error', { stage: 'memory', memoryId: memory.id, message: errorText(error) }); continue; }
         this.fail(error, { stage: 'memory', memoryId: memory.id });
-        this.retryLater();
-        return false;
-      }
-    }
-    return false;
-  }
-  /** Embeds each saved sticker by its description, again when it is described anew; a deleted sticker's vectors go. */
-  private async indexStickers() {
-    const saved = new Map(this.store.savedStickers().filter(sticker => sticker.desc.trim()).map(sticker => [sticker.emojiId, sticker.desc]));
-    for (const [emojiId, { desc }] of this.stickers) if (saved.get(emojiId) !== desc) this.stickers.delete(emojiId);
-    this.store.keepStickerVectors(saved);
-    for (const [emojiId, desc] of saved) {
-      if (this.controller.signal.aborted) return;
-      if (this.stickers.has(emojiId) || this.rejected.has(`${emojiId}:${desc}`)) continue;
-      const lines = stickerLines(desc);
-      try {
-        const vectors = await this.embedder.embed(lines, this.controller.signal);
-        const entries = lines.map((line, index) => ({ line, vector: unit(vectors[index]!) }));
-        if (this.controller.signal.aborted) return;
-        if (this.store.saveStickerVectors(emojiId, this.embedder.model, desc, entries)) this.stickers.set(emojiId, { desc, lines: entries });
-      } catch (error) {
-        if (this.rejects(error)) { this.rejected.add(`${emojiId}:${desc}`); this.store.log('recall_error', { stage: 'sticker', emojiId, message: errorText(error) }); continue; }
-        this.fail(error, { stage: 'sticker', emojiId });
         this.retryLater();
         return;
       }

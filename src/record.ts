@@ -1,6 +1,5 @@
 import { eventChat, type Action, type EnvironmentEvent } from './domain.js';
 import { conversationOf, eventRef, type Store } from './store.js';
-import { faceLabel } from './faces.js';
 import { textTokens } from './context.js';
 
 const ZONE_OFFSET = 8 * 3_600_000;
@@ -12,6 +11,14 @@ export const recordTime = (at: number) => local(at).replace('Z', '+08:00');
 const clock = (at: number) => local(at).slice(11, 19);
 const day = (at: number) => local(at).slice(0, 10);
 
+/** An emoji's native ID and any supplied name; larger IDs can be Unicode code points. */
+export function emojiLabel(id: unknown, names: Record<string, string>): string {
+  const code = String(id);
+  let name = names[code];
+  if (!name && Number(code) >= 1000) { try { name = String.fromCodePoint(Number(code)); } catch { /* not a code point */ } }
+  return name ? `${code} ${name}` : code;
+}
+
 type Item = { at: number; event?: EnvironmentEvent; action?: Action };
 interface Page { lines: string[]; last?: number }
 /** How an observation shows a chat: a thought acts on what it sees, so each person comes with their QQ and each message with its message_id, and text runs up to limit characters. */
@@ -21,7 +28,7 @@ interface Observed { limit: number }
 export class ChatRecord {
   private names = new Map<number, string>();
   /** faces names QQ system faces by ID, so reactions read as what they show. */
-  constructor(private store: Store, private selfId: number, private conversation: string, private faces: Record<string, string> = {}, private observed?: Observed) { conversationOf(conversation); }
+  constructor(private store: Store, private selfId: number, private conversation: string, private faces: Record<string, string> = {}, private observed?: Observed, private actionCaption?: (action: Action) => string | undefined) { conversationOf(conversation); }
 
   /** Events an observation brings from this conversation, under a heading naming it; a date is given only when it is not today. */
   observe(events: EnvironmentEvent[]): string {
@@ -120,9 +127,9 @@ export class ChatRecord {
     if (event?.kind.startsWith('notice:group_msg_emoji_like:')) {
       const likes = Array.isArray(event.payload.likes) ? event.payload.likes as { emoji_id?: unknown; count?: unknown }[] : [];
       const who = this.name(Number(event.payload.operator_id ?? event.actorId));
-      return { messageId: Number(event.payload.message_id), text: `${who} ${event.kind.endsWith(':remove') ? 'removed reaction' : 'reacted'} ${likes.map(like => `[emoji ${faceLabel(like.emoji_id, this.faces)}]`).join('') || '[emoji]'}` };
+      return { messageId: Number(event.payload.message_id), text: `${who} ${event.kind.endsWith(':remove') ? 'removed reaction' : 'reacted'} ${likes.map(like => `[emoji ${emojiLabel(like.emoji_id, this.faces)}]`).join('') || '[emoji]'}` };
     }
-    if (action?.kind === 'set_group_reaction') return { messageId: Number(action.args.message_id), text: `me ${action.args.is_set === false ? 'removed reaction' : 'reacted'} [emoji ${faceLabel(action.args.code, this.faces)}]` };
+    if (action?.kind === 'set_group_reaction') return { messageId: Number(action.args.message_id), text: `me ${action.args.is_set === false ? 'removed reaction' : 'reacted'} [emoji ${emojiLabel(action.args.code, this.faces)}]` };
   }
   /** quote adds the start of the message, for a reaction shown apart from it. */
   private target(messageId: number, quote = false): string {
@@ -153,9 +160,11 @@ export class ChatRecord {
   /** The message_id an observation gives with a message, for replying to it, reacting to it, or recalling it. */
   private messageId(messageId: number) { return this.observed && Number.isFinite(messageId) ? ` [message_id ${messageId}]` : ''; }
   private actionLine(action: Action): string {
+    const caption = this.actionCaption?.(action);
+    if (caption !== undefined) return caption;
     const args = action.args;
     if (action.kind === 'send_group_msg' || action.kind === 'send_private_msg') return `me: ${clip(this.segments(args.message))}`;
-    if (action.kind === 'send_custom_face') { const note = this.store.stickerNote(String(args.emoji_id ?? '')); return `me: [saved sticker${note ? `: ${clip(note)}` : ''}]`; }
+    if (action.kind === 'send_custom_face') return 'me: [saved sticker]';
     if (action.kind === 'send_group_ai_record') return `me: [AI voice] ${clip(String(args.text ?? ''))}`;
     if (['group_poke', 'friend_poke', 'send_poke'].includes(action.kind)) return `me poked ${this.name(Number(args.user_id ?? args.target_id))}`;
     if (action.kind === 'delete_msg') return `me recalled ${this.target(Number(args.message_id))}`;
@@ -173,7 +182,7 @@ export class ChatRecord {
         case 'at': return data.qq === 'all' ? '@all ' : `@${this.name(Number(data.qq))} `;
         case 'reply': return `[reply to ${this.target(Number(data.id))}] `;
         case 'image': { const image = this.observed ? `image ${images++}` : 'image'; return data.summary && data.summary !== '[图片]' ? `[${image} ${data.summary}]` : `[${image}]`; }
-        case 'face': return `[face ${faceLabel(data.id, this.faces)}]`;
+        case 'face': return `[face ${emojiLabel(data.id, this.faces)}]`;
         case 'mface': return `[sticker ${data.summary ?? ''}]`;
         case 'record': return '[voice]';
         case 'video': return '[video]';
@@ -191,6 +200,7 @@ function clip(text: string, ref?: string, limit = LINE_LIMIT) {
   const flat = text.replace(/\s*\n\s*/g, ' ⏎ ');
   return flat.length > limit ? `${flat.slice(0, limit)}… [+${flat.length - limit} chars${ref ? `; read_event ${ref}` : ''}]` : flat;
 }
+export { clip as clipRecordText };
 /** Fields a line already says, by its kind, time, conversation, people, or message. */
 const pushKeys = new Set(['time', 'self_id', 'post_type', 'notice_type', 'request_type', 'meta_event_type', 'sub_type']);
 const chatKeys = new Set([...pushKeys, 'group_id', 'user_id', 'operator_id', 'target_id', 'sender_id', 'duration']);

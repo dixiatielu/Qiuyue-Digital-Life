@@ -31,7 +31,7 @@ export function fixture(social?: SocialAdapter, existingStore?: Store, recall?: 
   const reviewFaux = fauxProvider(); const reviewModels = createModels(); reviewModels.setProvider(reviewFaux.provider);
   let brain: PiBrain; let reviewer: PiBrain;
   let tools: ReturnType<typeof createTools>; let reviewTools: ReturnType<typeof createTools>;
-  const plugins = extensions ? new PluginHost(extensions(store, cfg)) : createPlugins(cfg, store);
+  const plugins = extensions ? new PluginHost(extensions(store, cfg)) : createPlugins(cfg, store, adapter, recall);
   const restart = () => {
     tools = createTools(cfg, store, adapter, () => brain.thought, recall, plugins);
     brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) }, undefined, recall);

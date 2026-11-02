@@ -1,20 +1,33 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
-import type { EnvironmentEvent, MemoryKind } from './domain.js';
-import type { ToolRuntime } from './tool-runtime.js';
+import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
+import type { ThoughtContext, ToolRuntime } from './tool-runtime.js';
 
 export interface OnlineActivity { activity: string; tools: string[]; memoryKind?: MemoryKind }
+export interface PluginTool extends AgentTool { insertBefore?: string }
 export interface PluginImage {
   label: string;
   unavailable: string;
   deferred: string;
   autoView: boolean;
   load(signal?: AbortSignal): { data: Buffer; mimeType: string } | undefined | Promise<{ data: Buffer; mimeType: string } | undefined>;
+  onShown?(): void;
 }
 /** One complete capability: tools and the hooks required to take part in the digital life's experiences. */
 export interface LifePlugin {
   id: string;
   enabled?(): boolean;
-  tools(runtime: ToolRuntime): AgentTool[];
+  tools(runtime: ToolRuntime): PluginTool[];
+  reviewTools?: string[];
+  emojiNames?(events?: EnvironmentEvent[], signal?: AbortSignal): Record<string, string> | Promise<Record<string, string>>;
+  knownEmojiNames?(): Record<string, string>;
+  supplementalImages?(events: EnvironmentEvent[], thought: ThoughtContext): PluginImage[];
+  imageViewer?(label: string): string | undefined;
+  /** Enhance a registered tool in place; its name and the original execution rules remain intact. */
+  decorateTool?(tool: AgentTool, runtime: ToolRuntime): AgentTool;
+  observation?(events: EnvironmentEvent[], thought: ThoughtContext): string[];
+  imageCaption?(image: Record<string, unknown>): string | undefined;
+  actionCaption?(action: Action): string | undefined;
+  endsThought?(tool: string, details: unknown): boolean;
   activities?: OnlineActivity[];
   experienceKinds?: Record<string, string>;
   chatActions?: string[];
@@ -50,9 +63,44 @@ export class PluginHost {
         if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
         names.add(tool.name);
       }
-      return [...builtins, ...registered.filter(item => this.enabled(item.plugin)).flatMap(item => item.tools), ...following];
+      const additions = registered.filter(item => this.enabled(item.plugin)).flatMap(item => item.tools);
+      const ordered: AgentTool[] = [...builtins, ...additions, ...following];
+      for (const tool of additions) if (tool.insertBefore && tool.insertBefore !== tool.name && ordered.some(item => item.name === tool.insertBefore)) {
+        ordered.splice(ordered.findIndex(item => item === tool), 1);
+        ordered.splice(ordered.findIndex(item => item.name === tool.insertBefore), 0, tool);
+      }
+      return ordered.map(tool => this.decorate(tool, runtime));
     };
   }
+  decorate(original: AgentTool, runtime: ToolRuntime): AgentTool {
+    let result = original;
+    for (const plugin of this.plugins) if (this.enabled(plugin) && plugin.decorateTool) {
+      const decorated = plugin.decorateTool(result, runtime);
+      if (decorated.name !== result.name) throw new Error(`Plugin ${plugin.id} cannot rename tool ${result.name}.`);
+      if (decorated === result) continue;
+      result = { ...decorated, execute: async (...args: Parameters<AgentTool['execute']>) => {
+        runtime.check(args[2]);
+        if (this.stopping || !this.enabled(plugin)) throw new Error(`Plugin ${plugin.id} is disabled or stopping.`);
+        return decorated.execute(...args);
+      } };
+    }
+    return result;
+  }
+  observation(events: EnvironmentEvent[], thought: ThoughtContext): string[] { return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.observation?.(events, thought) ?? []); }
+  reviewAllowed(tool: string): boolean { return this.plugins.some(plugin => this.enabled(plugin) && plugin.reviewTools?.includes(tool)); }
+  async emojiNames(events?: EnvironmentEvent[], signal?: AbortSignal): Promise<Record<string, string>> {
+    return Object.assign({}, ...await Promise.all(this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.emojiNames?.(events, signal) ?? {})));
+  }
+  knownEmojiNames(): Record<string, string> { return Object.assign({}, ...this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.knownEmojiNames?.() ?? {})); }
+  supplementalImages(events: EnvironmentEvent[], thought: ThoughtContext): PluginImage[] { return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.supplementalImages?.(events, thought) ?? []); }
+  imageViewer(label: string): string | undefined {
+    for (const plugin of this.plugins) if (this.enabled(plugin)) { const tool = plugin.imageViewer?.(label); if (tool) return tool; }
+  }
+  imageCaption(image: Record<string, unknown>): string { return this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.imageCaption?.(image) ?? '').join(''); }
+  actionCaption(action: Action): string | undefined {
+    for (const plugin of this.plugins) if (this.enabled(plugin)) { const caption = plugin.actionCaption?.(action); if (caption !== undefined) return caption; }
+  }
+  endsThought(tool: string, details: unknown): boolean { return this.plugins.some(plugin => this.enabled(plugin) && plugin.endsThought?.(tool, details)); }
   activities(): OnlineActivity[] { return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.activities ?? []); }
   experienceKind(tool: string): string { return this.plugins.find(plugin => plugin.experienceKinds?.[tool])?.experienceKinds?.[tool] ?? `snowluma:${tool}`; }
   engagesChat(tool: string): boolean { return this.plugins.some(plugin => this.enabled(plugin) && plugin.chatActions?.includes(tool)); }

@@ -9,7 +9,6 @@ import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemP
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog } from '../src/snowluma-catalog.js';
 import { loadConfig } from '../src/config.js';
 import { event, fixture } from './helpers.js';
-import { eventRef } from '../src/store.js';
 
 test('generated native tools expose canonical SDK names and schemas directly', async () => {
   const f = fixture();
@@ -177,103 +176,6 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
     assert.deepEqual(f.sent[1]!.args.messages, node('https://a1.qpic.cn/psc?/x!/c'));
     assert.deepEqual(f.sent[2]!.args.message, [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }]);
     assert.deepEqual(f.store.actions().find(action => action.kind === 'send_private_msg')!.args, { user_id: 7, message: [{ type: 'image', data: { file: jpeg } }] });
-  } finally { f.store.close(); }
-});
-
-test('a received image already saved as a sticker is seen as one, and saving it again says so', async () => {
-  const md5 = 'FB1708EDC2A2803B6CA831085EBEAC29'; const market = 'ff862d42053a56c468834db523978ecb';
-  const saved = `900_0_0_0_${md5}_0_0`; const marketSaved = '900_0_0_0_A02AC0D33A8A95F1C6E9D322F5EC0F6F_0_0';
-  const f = fixture({ execute: async (kind: string, args: Record<string, unknown>) => kind === 'add_custom_face' ? { emoji_id: String(args.file).includes(market) ? marketSaved : saved } : null });
-  f.brain.thought.lifeOnly = false;
-  try {
-    assert.equal(f.store.savedSticker({ file: `${md5}.jpg` }), undefined);
-    let adds: unknown[] = [];
-    event(f.store);
-    f.faux.setResponses([
-      answer(call('add_custom_face', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=a&rkey=1' })),
-      answer(call('modify_custom_face', { emoji_id: saved, desc: 'Two dolls bopping, for silly joy' })),
-      // The same image under another URL, as QQ signs each delivery anew.
-      answer(call('add_custom_face', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=b&rkey=2' })),
-      answer(call('add_custom_face', { file: `https://gxh.vip.qq.com/club/item/parcel/item/ff/${market}/raw300.gif` })),
-      context => { adds = context.messages.filter(message => message.role === 'toolResult' && message.toolName === 'add_custom_face'); return answer('Done'); },
-    ]);
-    await f.brain.run(f.store.claim(10)!);
-    assert.equal(adds.length, 3);
-    assert.doesNotMatch(JSON.stringify(adds[0]), /alreadySaved/);
-    assert.match(JSON.stringify(adds[1]), /\\"alreadySaved\\":true,\\"desc\\":\\"Two dolls bopping, for silly joy\\"/);
-    assert.doesNotMatch(JSON.stringify(adds[2]), /alreadySaved/);
-    // A received image is matched by the MD5 it is named by, a market face by its emoji_id.
-    const prompts: string[] = [];
-    const image = f.store.receive({ key: 'image', kind: 'message', at: Date.now(), text: '[image]', groupId: 100, actorId: 7, payload: { message: [
-      { type: 'image', data: { file: `${md5.toLowerCase()}.jpg`, summary: '[动画表情]' } },
-      { type: 'image', data: { file: `ff-${market}.gif`, emoji_id: market, summary: '[嘿嘿]' } },
-      { type: 'image', data: { file: 'CA3BD9F231FC29304CE90BB45EB88482.jpg' } },
-    ] } })!;
-    f.faux.setResponses([context => { prompts.push(JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')))); return answer('Nice'); }]);
-    await f.brain.run(f.store.claim(10)!);
-    const ref = eventRef(image.id);
-    assert.ok(prompts[0]!.includes(`${ref} 7: [image 0 [动画表情]][image 1 [嘿嘿]][image 2]`));
-    assert.ok(prompts[0]!.includes(`Image 0 in ${ref} (already your saved sticker ${saved}: Two dolls bopping, for silly joy) has no readable URL`));
-    assert.ok(prompts[0]!.includes(`Image 1 in ${ref} (already your saved sticker ${marketSaved}) has no readable URL`));
-    assert.ok(prompts[0]!.includes(`Image 2 in ${ref} has no readable URL`));
-    const deleted = f.store.beginAction(crypto.randomUUID(), 'delete_custom_face', { emoji_id: saved }, []).action;
-    f.store.finishAction(deleted.id, 'success', null);
-    assert.equal(f.store.savedSticker({ file: `${md5}.jpg` }), undefined);
-    assert.equal(f.store.savedSticker({ emoji_id: market })?.emojiId, marketSaved);
-  } finally { f.store.close(); }
-});
-
-test('a sticker is described as it is saved, in the same call and batch as a send, and keeps a description it already had', async () => {
-  const ids: Record<string, string> = { a: '900_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0', b: '900_0_0_0_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB_0_0' };
-  const calls: { kind: string; args: Record<string, unknown> }[] = [];
-  let refuse = false;
-  const f = fixture({ execute: async (kind: string, args: Record<string, unknown>) => {
-    calls.push({ kind, args });
-    if (kind === 'add_custom_face') return { emoji_id: ids[String(args.file).includes('fileid=b') ? 'b' : 'a'] };
-    if (kind === 'modify_custom_face' && refuse) throw new SnowLumaApiError({ status: 'failed', retcode: 1400, data: null, wording: 'bad desc' });
-    return kind === 'modify_custom_face' ? null : { message_id: -42 };
-  } });
-  f.brain.thought.lifeOnly = false;
-  const results = (context: { messages: any[] }) => context.messages.filter(message => message.role === 'toolResult' && message.toolName === 'add_custom_face').map(message => message.details as Record<string, any>);
-  try {
-    assert.equal((f.tools.current().find(tool => tool.name === 'add_custom_face')!.parameters as any).properties.desc.type, 'string');
-    let seen: Record<string, any>[] = [];
-    event(f.store);
-    f.faux.setResponses([
-      answer([call('add_custom_face', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=a&rkey=1', desc: '  A cat leaping, for happy moments ' }), call('send_group_msg', { group_id: 100, message: 'Saved it!' })]),
-      answer('Must not be called'),
-    ]);
-    await f.brain.run(f.store.claim(10)!);
-    // One model call saved, described, and replied, and the thought ended there, as after a batch of messages alone.
-    assert.deepEqual(calls.map(call => call.kind), ['add_custom_face', 'modify_custom_face', 'send_group_msg']);
-    assert.equal(f.faux.state.callCount, 1);
-    seen = results({ messages: f.brain.agent.state.messages });
-    assert.deepEqual(calls[0]!.args, { file: 'https://multimedia.nt.qq.com.cn/download?fileid=a&rkey=1' });
-    assert.deepEqual(calls[1]!.args, { emoji_id: ids.a, desc: 'A cat leaping, for happy moments' });
-    assert.equal(seen[0]!.described.outcome, 'success');
-    const recorded = f.store.actions().map(action => [action.kind, action.status, action.args]);
-    assert.deepEqual(recorded.filter(([kind]) => kind !== 'send_group_msg').reverse(), [['add_custom_face', 'success', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=a&rkey=1' }], ['modify_custom_face', 'success', { emoji_id: ids.a, desc: 'A cat leaping, for happy moments' }]]);
-    assert.deepEqual(f.store.savedStickers(), [{ emojiId: ids.a, desc: 'A cat leaping, for happy moments' }]);
-    // Saving it again under another URL keeps the description it has; a new sticker whose description fails stays saved.
-    calls.length = 0; refuse = true;
-    event(f.store);
-    f.faux.setResponses([
-      answer([call('add_custom_face', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=a&rkey=2', desc: 'Something else' }), call('add_custom_face', { file: 'https://multimedia.nt.qq.com.cn/download?fileid=b&rkey=3', desc: 'A dog sighing, for tired days' })]),
-      // The working context carries the first thought's save too.
-      context => { seen = results(context).slice(-2); return answer('Done'); },
-    ]);
-    await f.brain.run(f.store.claim(10)!);
-    assert.deepEqual(calls.map(call => call.kind), ['add_custom_face', 'add_custom_face', 'modify_custom_face']);
-    assert.deepEqual([seen[0]!.alreadySaved, seen[0]!.desc, seen[0]!.described], [true, 'A cat leaping, for happy moments', undefined]);
-    assert.equal(seen[1]!.outcome, 'success');
-    assert.deepEqual([seen[1]!.described.outcome, seen[1]!.described.error.wording], ['failed', 'bad desc']);
-    assert.match(seen[1]!.described.instruction, /saved, but its description was not set/);
-    assert.deepEqual(f.store.savedStickers(), [{ emojiId: ids.a, desc: 'A cat leaping, for happy moments' }, { emojiId: ids.b, desc: '' }]);
-    // Without modify_custom_face, the save takes no description.
-    f.cfg.snowluma.tools = { allow: '*', deny: ['modify_custom_face'] };
-    const add = f.tools.current().find(tool => tool.name === 'add_custom_face')!;
-    assert.deepEqual(add.parameters, findSnowLumaAction('add_custom_face').inputSchema);
-    assert.match(add.description, /after a successful save, use its returned emoji_id with modify_custom_face/);
   } finally { f.store.close(); }
 });
 

@@ -426,7 +426,7 @@ test('a cancelled thought leaves its images in view for the next thought, which 
 
 test('an observation shows its events as chat-record lines, with the QQ numbers, message IDs, and image URLs a thought acts on', async () => {
   const f = fixture();
-  f.tools.faces.names = async () => ({ 424: '续标识' }); f.tools.faces.image = async () => { throw new Error('no picture'); };
+  f.store.setSetting('faces', { 424: { name: '续标识' } });
   const receive = (kind: string, actorId: number, payload: Record<string, unknown>, groupId?: number) => f.store.receive({ key: crypto.randomUUID(), kind, at: Date.now(), text: '', groupId, actorId, payload })!;
   try {
     const tea = receive('message', 8, { message_type: 'group', message_id: 40, sender: { nickname: '寒火', card: '' }, message: [{ type: 'text', data: { text: 'Tea at five' } }] }, 100);

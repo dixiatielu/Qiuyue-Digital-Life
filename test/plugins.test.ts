@@ -31,7 +31,7 @@ test('plugin switches are independent, honor legacy switches, and block an alrea
     assert.deepEqual(f.plugins.activities(), []);
     assert.ok(!f.reviewTools.current().some(tool => ['search_web', 'read_webpage', 'share_qzone_feed'].includes(tool.name)));
     f.cfg.drawing.enabled = true; f.cfg.plugins.drawing = false;
-    const plugins = createPlugins(f.cfg, f.store);
+    const plugins = createPlugins(f.cfg, f.store, { execute: async () => ({}) });
     const runtime = new ToolRuntime(f.cfg, f.store, { execute: async () => ({}) }, () => f.brain.thought);
     assert.ok(!plugins.bind(runtime)([]).some(tool => tool.name === 'draw'));
     assert.deepEqual(pluginCredentials(f.cfg), { problems: [], warnings: [] });

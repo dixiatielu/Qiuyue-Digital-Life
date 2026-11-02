@@ -1,4 +1,4 @@
-import { Type, type TSchema } from 'typebox';
+import { Type } from 'typebox';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
 import { Store } from './store.js';
@@ -9,11 +9,10 @@ import { SnowLumaApiError } from '@snowluma/sdk';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLumaActionDefinition } from './snowluma-catalog.js';
 import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
-import { faceCaption, FaceCatalog } from './faces.js';
 import type { SemanticRecall } from './recall.js';
 import { PluginHost } from './plugins.js';
 import { createPlugins } from './plugins/index.js';
-import { ensureCurrent, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
+import { ensureCurrent, nativeToolDescription, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
 export { ensureCurrent, type ThoughtContext } from './tool-runtime.js';
 
 const string = (description: string, maxLength = 6000) => Type.String({ description, minLength: 1, maxLength });
@@ -64,15 +63,14 @@ function jpegImages(value: unknown): unknown {
   }
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jpegImages(item)]));
 }
-export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog; readonly plugins: PluginHost }
+export interface ToolSet { current(): AgentTool[]; readonly plugins: PluginHost }
 /** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
-const reviewTools = new Set(['read_chat_record', 'read_event', 'view_event_image', 'view_face', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity']);
+const reviewTools = new Set(['read_chat_record', 'read_event', 'view_event_image', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity']);
 export function forReview(tools: ToolSet): ToolSet {
-  return { faces: tools.faces, plugins: tools.plugins, current: () => tools.current().filter(tool => reviewTools.has(tool.name)) };
+  return { plugins: tools.plugins, current: () => tools.current().filter(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name)) };
 }
 
-export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall, plugins = createPlugins(config, store)): ToolSet {
-  const faces = new FaceCatalog(store, social);
+export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall, plugins = createPlugins(config, store, social, recall)): ToolSet {
   const runtime = new ToolRuntime(config, store, social, context);
   const tool = runtime.jsonTool.bind(runtime);
   const recordToolExperience = runtime.record.bind(runtime);
@@ -107,16 +105,6 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         ensureCurrent(store, context(), signal);
         context().sources.add(event.id);
         return { content: [{ type: 'text', text: `Image ${args.url !== undefined ? url : args.index} from event ${event.id}` }, { type: 'image', data: result.data.toString('base64'), mimeType: result.type }], details: {} };
-      },
-    },
-    {
-      name: 'view_face', label: 'view_face', description: "See what a QQ system face looks like, by the ID in a face segment, a reaction's emoji_id, or set_group_reaction's code. A face's name often says little about what it shows or how people use it.",
-      parameters: Type.Object({ id: Type.String({ description: 'Face ID', pattern: '^\\d{1,6}$' }) }), replay: 'never', executionMode: 'sequential',
-      execute: async (_callId, args: any, signal) => {
-        ensureCurrent(store, context(), signal);
-        const picture = await faces.image(args.id, signal);
-        ensureCurrent(store, context(), signal);
-        return { content: [{ type: 'text', text: faceCaption(args.id, await faces.names(signal)) }, { type: 'image', data: picture.toString('base64'), mimeType: 'image/png' }], details: {} };
       },
     },
     tool('inspect_actions', 'View recent action outcomes; specify an id to read the full record in chunks.', Type.Object({ id: Type.Optional(string('Action ID', 100)), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), args => {
@@ -162,7 +150,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
-        const record = new ChatRecord(store, config.snowluma.selfId, args.conversation, await faces.names(signal));
+        const record = new ChatRecord(store, config.snowluma.selfId, args.conversation, await plugins.emojiNames(undefined, signal), undefined, action => plugins.actionCaption(action));
         const limit = args.limit ?? config.development.recordLines;
         if (args.query || args.person) return { content: [{ type: 'text', text: record.matches(limit, { query: args.query, person: args.person }) }], details: {} };
         if (args.from && (!/(Z|[+-]\d{2}:\d{2})$/.test(args.from) || !Number.isFinite(Date.parse(args.from)))) throw new Error('from must be an ISO time with a timezone.');
@@ -208,7 +196,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     set_group_reaction: 'code is a QQ system face ID, or the code point of a Unicode emoji. Use view_face to see what a system face looks like before choosing one you do not know.',
     fetch_custom_face_detail: 'Returns saved emoji_id values, image URLs, and possibly empty descriptions. Choose based on actual content; do not guess image meanings.',
     send_custom_face: 'Use an emoji_id from an actual fetch_custom_face_detail result, add_custom_face receipt, or saved sticker an observation names. For a group pass group_id=<actual group ID> and emoji_id=<saved ID>; for a private chat use user_id instead. Specify only one target.',
-    add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success; after a successful save, use its returned emoji_id with modify_custom_face to add a description based on the image actually seen. QQ keeps one copy of an image, so alreadySaved in the local execution information means it was saved before and this only moved it to the front; keep its description unless it is wrong. If the outcome is unknown, verify it before taking further action.',
+    add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success; after a successful save, use its returned emoji_id with modify_custom_face to add a description based on the image actually seen. If the outcome is unknown, verify it before taking further action.',
     modify_custom_face: 'Set desc to a concise description of the actual image and its suitable emotional or conversational use. Use the emoji_id returned by a successful add_custom_face or an actual fetch_custom_face_detail result; do not guess image content.',
     delete_msg: 'The message_id must come from an actual message event or send receipt; negative values may also be valid.',
     get_qzone_feeds: 'A post tid may be null. For pagination use next_cursor unchanged; do not invent a missing tid or content.',
@@ -218,41 +206,24 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     send_group_ai_record: 'Sends the text as an AI voice message to the group directly; group chats only. Use a character_id from an actual get_ai_characters result unchanged. Keep the text short.',
     comment_qzone: 'tid and target_uin identify the post and its author. To reply to a top-level comment, provide both its comment_id and comment_uin (for example, comment_id="0" is valid). For a nested reply, use the parent comment ID and author and provide both target reply_uin and reply_name. Replies do not support images.',
   };
-  // Saving a sticker takes the description it is saved with, so saving, describing, and sending it need one model call (ADR-0010).
-  const describedAdd = 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Pass desc with a concise description of the image as you actually saw it and its suitable emotional or conversational use: once the save succeeds, it is set with modify_custom_face as an action of its own within this call, whose outcome appears as described in the local execution information, so you can save a sticker and send it or reply in the same batch. QQ keeps one copy of an image, so alreadySaved in the local execution information means it was saved before and this only moved it to the front; a description it already has is kept rather than replaced by desc, so use modify_custom_face if that one is wrong. If the outcome is unknown, verify it before taking further action.';
-  const describing = () => allowed(findSnowLumaAction('modify_custom_face'));
   /** One external action: recorded before it is sent and deduplicated, with an unconfirmed outcome kept as unknown (ADR-0008). */
   async function act(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
     const sent = plugins.resolveMedia(args) as Record<string, unknown>;
     return runtime.action(name, args, dispatch => dispatch(name, sent), signal);
   }
-  /** Describe a sticker just saved; a failure here leaves the save itself standing. */
-  async function describe(emojiId: string, desc: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    try {
-      ensureCurrent(store, context(), signal);
-      const { outcome, reused } = await act('modify_custom_face', { emoji_id: emojiId, desc }, signal);
-      if (outcome.status === 'success') return { actionId: outcome.id, outcome: 'success', ...(reused ? { reused } : {}) };
-      return { actionId: outcome.id, outcome: outcome.status, reused, error: outcome.result, instruction: outcome.status === 'unknown' ? 'The sticker is saved, but whether its description was set is unknown; check fetch_custom_face_detail before describing it again with modify_custom_face.' : 'The sticker is saved, but its description was not set; describe it with modify_custom_face if you still want to.' };
-    } catch (error) { return { outcome: 'failed', error: { message: errorText(error) }, instruction: 'The sticker is saved, but its description was not set; describe it with modify_custom_face if you still want to.' }; }
-  }
   const native = new Map(snowlumaCatalog.map(action => [action.name, nativeTool(action)]));
-  const nativeAdd = nativeTool(findSnowLumaAction('add_custom_face'), true);
-  const toolFor = (action: SnowLumaActionDefinition) => action.name === 'add_custom_face' && describing() ? nativeAdd : native.get(action.name)!;
-  function nativeTool(action: SnowLumaActionDefinition, describes = false): AgentTool {
-    const schema = action.inputSchema as TSchema & { properties?: Record<string, unknown> };
+  const toolFor = (action: SnowLumaActionDefinition) => native.get(action.name)!;
+  function nativeTool(action: SnowLumaActionDefinition): AgentTool {
     return {
       name: action.name, label: action.name,
       description: common.has(action.name)
-        ? [action.summary, `SnowLuma native interface ${action.name}; ${action.readOnly ? 'read-only query' : 'may have side effects and is subject to action budgets and deduplication'}.`, ...action.invariants, action.returns, action.stream ? 'Streaming results return an array of raw data frames in arrival order.' : '', describes ? describedAdd : usage[action.name]].filter(Boolean).join('\n')
+        ? nativeToolDescription(action, usage[action.name])
         : action.summary ?? action.name,
-      parameters: describes ? { ...schema, properties: { ...schema.properties, desc: { type: 'string', minLength: 1, maxLength: 500, description: 'Description of the image as actually seen and its suitable emotional or conversational use, set with modify_custom_face once the save succeeds' } } } : action.inputSchema,
+      parameters: action.inputSchema,
       replay: 'never', executionMode: 'sequential',
       execute: async (_callId, parameters, signal) => {
         // Normalized before the action is recorded, so its record shows what was sent.
         const args = jpegImages(parameters) as Record<string, unknown>;
-        // desc belongs to the modify_custom_face that follows a successful save, not to the save.
-        const desc = describes && typeof args.desc === 'string' && args.desc.trim() ? args.desc.trim() : undefined;
-        if (describes) delete args.desc;
         ensureCurrent(store, context(), signal);
         if (!allowed(action)) throw new Error('The operator has not enabled this SnowLuma interface.');
         let actionId: string | undefined; let reused = false; let value: unknown;
@@ -268,12 +239,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         const experience = recordToolExperience(`snowluma:${action.name}`, value);
         const serialized = JSON.stringify(value) ?? 'null';
         const truncated = serialized.length > 12000;
-        const saved = action.name === 'add_custom_face' ? String((value as { emoji_id?: unknown } | null)?.emoji_id ?? '') : '';
-        const previous = saved && store.stickerSaved(saved, actionId) ? store.stickerNote(saved) ?? '' : undefined;
-        const alreadySaved = previous !== undefined ? { alreadySaved: true, desc: previous } : {};
-        // A sticker saved before keeps the description it has; one it never had is given now.
-        const described = saved && desc !== undefined && !previous ? { described: await describe(saved, desc, signal) } : {};
-        const metadata = { sourceId: experience.sourceId, ...(actionId ? { actionId, outcome: 'success', reused } : {}), ...alreadySaved, ...described, truncated };
+        const metadata = { sourceId: experience.sourceId, ...(actionId ? { actionId, outcome: 'success', reused } : {}), truncated };
         return {
           content: [{ type: 'text', text: truncated ? serialized.slice(0, 12000) + '\n[Result truncated; the full result is stored in the source event payload.result and can be read in chunks using read_event]' : serialized }, { type: 'text', text: `Local execution information: ${JSON.stringify(metadata)}` }],
           details: metadata,
@@ -298,8 +264,8 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     tool('load_snowluma_tools', 'View detailed usage, parameters, results, examples, and constraints for enabled SnowLuma tools by original interface name. Tools are already directly available; this query does not change the tool set.', Type.Object({ names: Type.Array(string('Original SnowLuma interface name', 100), { minItems: 1, maxItems: 8 }) }), args => {
       const actions = [...new Set<string>(args.names)].map(findSnowLumaAction);
       for (const action of actions) if (!allowed(action)) throw new Error(`The operator has not enabled this SnowLuma interface: ${action.name}`);
-      return actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, inputSchema: toolFor(action).parameters, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }));
+      return actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, inputSchema: plugins.decorate(toolFor(action), runtime).parameters, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }));
     }),
   ];
-  return { faces, plugins, current: () => withPlugins(result, [...discovery, ...snowlumaCatalog.filter(allowed).map(toolFor)]) };
+  return { plugins, current: () => withPlugins(result, [...discovery, ...snowlumaCatalog.filter(allowed).map(toolFor)]) };
 }
