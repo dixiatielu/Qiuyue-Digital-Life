@@ -75,6 +75,8 @@
     "threshold": 0.65,
     "searchThreshold": 0.55,
     "limit": 3,
+    "stickerThreshold": 0.65,
+    "stickerLimit": 3,
     "timeoutMs": 15000,
     "selfNames": []
   },

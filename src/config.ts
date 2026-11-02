@@ -16,8 +16,8 @@ export interface Config {
   memory: { retentionDays: number; recallLimit: number; recentEvents: number; reflectionEveryEvents: number };
   development: { scopeChars: number; personChars: number; people: number; recordLines: number };
   web: { enabled: boolean; searchUrl: string; searchKeyEnv: string; timeoutMs: number; maxBytes: number };
-  /** Recall by meaning, through an OpenAI-compatible /embeddings endpoint. Both thresholds depend on the model: threshold for what messages call to mind, searchThreshold for the few words of a deliberate search, which score lower. */
-  embedding: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; threshold: number; searchThreshold: number; limit: number; timeoutMs: number; selfNames: string[] };
+  /** Recall by meaning, through an OpenAI-compatible /embeddings endpoint. Every threshold depends on the model: threshold for what messages call to mind, searchThreshold for the few words of a deliberate search, which score lower, and stickerThreshold for saved stickers whose descriptions fit what was said. */
+  embedding: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; threshold: number; searchThreshold: number; limit: number; stickerThreshold: number; stickerLimit: number; timeoutMs: number; selfNames: string[] };
 }
 
 export function loadConfig(path: string): Config {
@@ -37,7 +37,7 @@ export function loadConfig(path: string): Config {
     memory: { retentionDays: 90, recallLimit: 8, recentEvents: 30, reflectionEveryEvents: 100, ...raw.memory },
     development: { scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
     web: { enabled: true, searchUrl: 'https://api.deepseek.com/v1/tools/search', searchKeyEnv: 'DEEPSEEK_API_KEY', timeoutMs: 15_000, maxBytes: 2_000_000, ...raw.web },
-    embedding: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, timeoutMs: 15_000, selfNames: [], ...raw.embedding },
+    embedding: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [], ...raw.embedding },
   };
   if (!config.persona.trim()) throw new Error('The persona content in personaFile must not be empty.');
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
@@ -71,8 +71,8 @@ export function loadConfig(path: string): Config {
     if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('embedding.baseUrl must be an HTTP/HTTPS URL without credentials, query parameters, or a fragment, such as https://api.openai.com/v1.');
     if (typeof embedding.model !== 'string' || !embedding.model.trim()) throw new Error('embedding.model must not be empty.');
   }
-  for (const key of ['threshold', 'searchThreshold'] as const) if (typeof embedding[key] !== 'number' || !(embedding[key] > 0 && embedding[key] < 1)) throw new Error(`embedding.${key} must be between 0 and 1; calibrate it for the embedding model.`);
-  if (!Number.isSafeInteger(embedding.limit) || embedding.limit <= 0 || embedding.limit > 20) throw new Error('embedding.limit must be an integer from 1 to 20.');
+  for (const key of ['threshold', 'searchThreshold', 'stickerThreshold'] as const) if (typeof embedding[key] !== 'number' || !(embedding[key] > 0 && embedding[key] < 1)) throw new Error(`embedding.${key} must be between 0 and 1; calibrate it for the embedding model.`);
+  for (const key of ['limit', 'stickerLimit'] as const) if (!Number.isSafeInteger(embedding[key]) || embedding[key] <= 0 || embedding[key] > 20) throw new Error(`embedding.${key} must be an integer from 1 to 20.`);
   if (!Number.isSafeInteger(embedding.timeoutMs) || embedding.timeoutMs <= 0) throw new Error('embedding.timeoutMs must be a positive integer.');
   if (!Array.isArray(embedding.selfNames) || embedding.selfNames.some(name => typeof name !== 'string' || !name.trim())) throw new Error('embedding.selfNames must be an array of the names people call the digital life.');
   const permissions = config.snowluma.tools;

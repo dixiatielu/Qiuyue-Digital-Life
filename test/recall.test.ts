@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, type Message } from '@earendil-works/pi-ai';
 import { Store } from '../src/store.js';
 import { handleControl } from '../src/control.js';
-import { EmbeddingClient, SemanticRecall, memoryLines, queryText, type Embedder } from '../src/recall.js';
+import { EmbeddingClient, SemanticRecall, memoryLines, queryText, stickerLines, type Embedder } from '../src/recall.js';
 import { config, event, fixture } from './helpers.js';
 
 const updates = (messages: Message[]) => messages.flatMap(message => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<runtime_data>')
@@ -32,6 +32,13 @@ function embeddingConfig(changes: Partial<ReturnType<typeof config>['embedding']
 const remember = (store: Store, title: string, content: string, kind: 'note' | 'experience' | 'habit' = 'note') =>
   store.writeMemory({ kind, title, content, importance: 5, sources: [event(store, `source of ${title}`).id] }, false);
 const vectorRows = (store: Store) => store.db.prepare('SELECT memory_id, model FROM memory_vectors ORDER BY memory_id, chunk').all().map(row => [String(row.memory_id), String(row.model)]);
+const stickerAction = (store: Store, kind: string, args: Record<string, unknown>, result: unknown = null) => { const { action } = store.beginAction(crypto.randomUUID(), kind, args, []); store.finishAction(action.id, 'success', result); };
+/** A sticker saved through her own actions, described if desc is given. */
+const saveSticker = (store: Store, emojiId: string, desc?: string) => {
+  stickerAction(store, 'add_custom_face', { file: `https://example.com/${emojiId}.gif` }, { emoji_id: emojiId });
+  if (desc) stickerAction(store, 'modify_custom_face', { emoji_id: emojiId, desc });
+};
+const stickerRows = (store: Store) => store.db.prepare('SELECT emoji_id, model, desc FROM sticker_vectors ORDER BY emoji_id, chunk').all().map(row => [String(row.emoji_id), String(row.model), String(row.desc)]);
 
 test('memories are embedded line by line, and messages without placeholders, mentions, or her names', () => {
   assert.deepEqual(memoryLines({ content: '傍晚的群聊小记：\n1. 群友们聊新番聊得很热闹，大家都在追\\n2. 太好了\r\n3. 地铁说下次带小笼包来群里分享' }), ['1. 群友们聊新番聊得很热闹，大家都在追', '3. 地铁说下次带小笼包来群里分享']);
@@ -213,5 +220,74 @@ test('a thought sees the memories its messages call up, with the matching line, 
     f.faux.setResponses([context => { seen = updates(context.messages as Message[]).at(-1)?.recalled; return answer('Remembered'); }]);
     await f.brain.run(store.claim(20)!);
     assert.deepEqual((seen as { id: string; matchedLine: string }[]).map(item => [item.id, item.matchedLine]), [[song.id, '1. 练夜曲的副歌又破音了，有点烦']]);
+  } finally { await recall.stop(); store.close(); }
+});
+
+test('saved stickers are embedded by what they suit, come up for what is said, follow a new description, and go when deleted', async () => {
+  assert.deepEqual(stickerLines('少女捧着包子流口水，适合表达想吃小笼包'), ['适合表达想吃小笼包', '少女捧着包子流口水，适合表达想吃小笼包']);
+  assert.deepEqual(stickerLines('举着对勾牌子笑，表示赞同'), ['表示赞同', '举着对勾牌子笑，表示赞同']);
+  assert.deepEqual(stickerLines(' A cat leaping '), ['A cat leaping']);
+  const store = new Store(':memory:'); store.bindAccount(900);
+  const food = '少女捧着包子流口水，适合表达想吃小笼包'; const rain = '少女在雨里打伞，适合表达天气不好';
+  saveSticker(store, 'food', food); saveSticker(store, 'rain', rain); saveSticker(store, 'plain');
+  const embedder = topics();
+  const recall = new SemanticRecall(embeddingConfig(), store, embedder);
+  try {
+    recall.start(); await recall.idle();
+    // A sticker without a description says nothing to match.
+    assert.deepEqual(stickerRows(store), [['food', 'topics', food], ['food', 'topics', food], ['rain', 'topics', rain], ['rain', 'topics', rain]]);
+    assert.ok(embedder.calls.some(texts => texts[0] === '适合表达想吃小笼包'));
+    const hungry = event(store, '好想吃小笼包'); const weather = event(store, '今天天气真差'); const chat = event(store, '随便聊聊');
+    await recall.idle();
+    assert.deepEqual(recall.stickerSuggestions([hungry]).map(item => [item.emojiId, item.desc]), [['food', food]]);
+    assert.deepEqual(recall.stickerSuggestions([chat]), []);
+    assert.deepEqual(new Set(recall.stickerSuggestions([hungry, weather, chat]).map(item => item.emojiId)), new Set(['food', 'rain']));
+    assert.deepEqual(recall.stickerSuggestions([hungry, weather], new Set(['food'])).map(item => item.emojiId), ['rain']);
+    stickerAction(store, 'modify_custom_face', { emoji_id: 'food', desc: '少女看着窗外，适合表达天气转晴' });
+    stickerAction(store, 'delete_custom_face', { emoji_id: 'rain' });
+    await recall.idle();
+    assert.deepEqual(stickerRows(store), [['food', 'topics', '少女看着窗外，适合表达天气转晴'], ['food', 'topics', '少女看着窗外，适合表达天气转晴']]);
+    assert.deepEqual(recall.stickerSuggestions([hungry]), []);
+    assert.deepEqual(recall.stickerSuggestions([weather]).map(item => item.emojiId), ['food']);
+  } finally { await recall.stop(); store.close(); }
+});
+
+test('sticker vectors are reused after a restart, a rejected description holds up no other, and another model starts over', async () => {
+  const store = new Store(':memory:'); store.bindAccount(900);
+  saveSticker(store, 'food', '少女捧着包子，适合表达想吃小笼包');
+  let recall = new SemanticRecall(embeddingConfig(), store, topics());
+  try {
+    recall.start(); await recall.idle(); await recall.stop();
+    saveSticker(store, 'bad', '这一张的描述坏了，适合表达天气');
+    saveSticker(store, 'rain', '少女打伞，适合表达天气不好');
+    const again = topics('topics', texts => texts.some(text => text.includes('坏')) ? Object.assign(new Error('HTTP 400'), { status: 400 }) : undefined);
+    recall = new SemanticRecall(embeddingConfig(), store, again); recall.start(); await recall.idle();
+    assert.ok(again.calls.every(texts => !texts.some(text => text.includes('小笼包'))), 'vectors saved before a restart are reused');
+    assert.deepEqual([...new Set(stickerRows(store).map(([id]) => id))], ['food', 'rain']);
+    assert.deepEqual(store.logs(10).filter(log => log.kind === 'recall_error').map(log => (log.data as { stage: string; emojiId: string })), [{ stage: 'sticker', emojiId: 'bad', message: 'HTTP 400' }]);
+    const hungry = event(store, '小笼包'); await recall.idle();
+    assert.deepEqual(recall.stickerSuggestions([hungry]).map(item => item.emojiId), ['food']);
+    await recall.stop();
+    recall = new SemanticRecall(embeddingConfig({ model: 'other' }), store, topics('other')); recall.start(); await recall.idle();
+    assert.deepEqual(new Set(stickerRows(store).map(([, model]) => model)), new Set(['other']));
+  } finally { await recall.stop(); store.close(); }
+});
+
+test('an observation brings the saved stickers that fit what was said, and none when nothing fits', async () => {
+  const store = new Store(':memory:'); store.bindAccount(900);
+  saveSticker(store, '900_0_0_0_F00D_0_0', '少女捧着包子流口水，适合表达想吃小笼包');
+  const recall = new SemanticRecall(embeddingConfig(), store, topics());
+  const f = fixture(undefined, store, undefined, recall);
+  const prompts: string[] = [];
+  const observe = () => f.faux.setResponses([context => { prompts.push(JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')))); return answer(''); }]);
+  try {
+    recall.start(); await recall.idle();
+    event(store, '好想吃小笼包'); await recall.idle();
+    observe(); await f.brain.run(store.claim(20)!);
+    assert.match(prompts[0]!, /Saved stickers of yours whose descriptions fit what was just said, in case you want to send one with send_custom_face/);
+    assert.ok(prompts[0]!.includes('900_0_0_0_F00D_0_0'));
+    event(store, '随便聊聊'); await recall.idle();
+    observe(); await f.brain.run(store.claim(20)!);
+    assert.doesNotMatch(prompts[1]!, /Saved stickers of yours/);
   } finally { await recall.stop(); store.close(); }
 });

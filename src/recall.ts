@@ -40,8 +40,22 @@ export function queryText(text: string, faces: Record<string, string>, selfNames
   return value.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * What a sticker's description is matched by: the clause saying what it suits, from 适合, 表示, or 用于 on, which matches what people say
+ * far better than how the sticker looks, and the whole description for one written otherwise.
+ */
+export function stickerLines(desc: string): string[] {
+  const whole = desc.trim();
+  const index = Math.max(...['适合', '表示', '用于'].map(word => whole.lastIndexOf(word)));
+  const use = index > 0 ? whole.slice(index) : '';
+  return use ? [use, whole] : [whole];
+}
+
 /** A memory a thought calls to mind, with the line of it that matched. */
 export interface Recollection { memory: Memory; line: string; similarity: number }
+/** A saved sticker whose description fits what a thought's messages say. */
+export interface StickerSuggestion { emojiId: string; desc: string; similarity: number }
+type Line = { line: string; vector: Float32Array };
 
 const BATCH = 10;
 const KEPT_MESSAGES = 2000;
@@ -51,20 +65,32 @@ const unit = (vector: Float32Array) => {
   norm = Math.sqrt(norm); return vector.map(value => value / norm);
 };
 const dot = (a: Float32Array, b: Float32Array) => { let sum = 0; for (let i = 0; i < a.length; i++) sum += a[i]! * b[i]!; return sum; };
+/** The line most alike to any of the queries. */
+function closestLine(queries: Float32Array[], lines: Line[]) {
+  let best = { line: '', similarity: -1 };
+  for (const query of queries) for (const { line, vector } of lines) {
+    if (vector.length !== query.length) continue;
+    const similarity = dot(query, vector);
+    if (similarity > best.similarity) best = { line, similarity };
+  }
+  return best;
+}
+const stickerActions = new Set(['add_custom_face', 'modify_custom_face', 'delete_custom_face']);
 
 /**
- * Recall by meaning (ADR-0009). Memories are embedded line by line once written and messages once they arrive,
+ * Recall by meaning (ADR-0009). Memories are embedded line by line once written, saved stickers once described, and messages once they arrive,
  * so spontaneous recall only compares vectors and never waits on the embedding model; a message not embedded in time is left out.
  * Only a deliberate search embeds its query when it is made.
  */
 export class SemanticRecall {
-  private lines = new Map<string, { line: string; vector: Float32Array }[]>();
+  private lines = new Map<string, Line[]>();
+  private stickers = new Map<string, { desc: string; lines: Line[] }>();
   private messages = new Map<string, Float32Array>();
   private waiting = new Map<string, string>();
   private embedding?: Promise<void>;
   private indexing?: Promise<void>;
   private reindex = false;
-  /** Memories whose text the endpoint rejected; they wait for a restart rather than hold up the rest. */
+  /** Memories, and sticker descriptions as id:desc, whose text the endpoint rejected; they wait for a restart rather than hold up the rest. */
   private rejected = new Set<string>();
   private pausedUntil = 0;
   private retry?: ReturnType<typeof setTimeout>;
@@ -74,8 +100,10 @@ export class SemanticRecall {
   start() {
     this.store.dropOtherVectors(this.embedder.model);
     for (const { memoryId, line, vector } of this.store.memoryVectors(this.embedder.model)) this.lines.set(memoryId, [...this.lines.get(memoryId) ?? [], { line, vector }]);
+    for (const { emojiId, desc, line, vector } of this.store.stickerVectors(this.embedder.model)) this.stickers.set(emojiId, { desc, lines: [...this.stickers.get(emojiId)?.lines ?? [], { line, vector }] });
     this.unsubscribe = this.store.subscribe(notice => {
       if (notice.kind === 'environment') this.observe(notice.event);
+      if (notice.kind === 'action' && notice.action.status === 'success' && stickerActions.has(notice.action.kind)) this.index();
       if (notice.kind === 'trace' && notice.name === 'memory_written') this.index();
       if (notice.kind === 'trace' && notice.name === 'memory_forgotten') for (const id of (notice.data as { ids?: string[] }).ids ?? []) this.lines.delete(id);
     });
@@ -108,17 +136,24 @@ export class SemanticRecall {
     const found = new Map<string, Memory & { matchedLine?: string }>([...lexical.map(memory => [memory.id, memory] as const), ...semantic.map(({ memory, line }) => [memory.id, { ...memory, matchedLine: line }] as const)]);
     return [...scores].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([id]) => found.get(id)!);
   }
+  /** Saved stickers whose descriptions the messages of a thought most fit, apart from those already suggested: at most embedding.stickerLimit, each at least embedding.stickerThreshold alike. */
+  stickerSuggestions(events: EnvironmentEvent[], exclude: ReadonlySet<string> = new Set()): StickerSuggestion[] {
+    const queries = events.map(event => this.messages.get(event.id)).filter((vector): vector is Float32Array => vector !== undefined);
+    if (!queries.length) return [];
+    const found: StickerSuggestion[] = [];
+    for (const [emojiId, { desc, lines }] of this.stickers) {
+      if (exclude.has(emojiId)) continue;
+      const { similarity } = closestLine(queries, lines);
+      if (similarity >= this.config.embedding.stickerThreshold) found.push({ emojiId, desc, similarity });
+    }
+    return found.sort((a, b) => b.similarity - a.similarity).slice(0, this.config.embedding.stickerLimit);
+  }
   /** Memories among ids whose closest line is at least threshold alike to any query, most alike first. */
   private closest(queries: Float32Array[], ids: Set<string>, threshold: number, limit: number): Recollection[] {
     const found: { id: string; line: string; similarity: number }[] = [];
     for (const [id, lines] of this.lines) {
       if (!ids.has(id)) continue;
-      let best = { line: '', similarity: -1 };
-      for (const query of queries) for (const { line, vector } of lines) {
-        if (vector.length !== query.length) continue;
-        const similarity = dot(query, vector);
-        if (similarity > best.similarity) best = { line, similarity };
-      }
+      const best = closestLine(queries, lines);
       if (best.similarity >= threshold) found.push({ id, ...best });
     }
     return found.sort((a, b) => b.similarity - a.similarity).slice(0, limit).flatMap(({ id, line, similarity }) => {
@@ -149,28 +184,54 @@ export class SemanticRecall {
   }
   private index() {
     if (this.indexing) { this.reindex = true; return; }
-    this.indexing = this.indexMemories().finally(() => { this.indexing = undefined; if (this.reindex) { this.reindex = false; this.index(); } });
+    this.indexing = this.indexMemories().then(done => { if (done) return this.indexStickers(); }).finally(() => { this.indexing = undefined; if (this.reindex) { this.reindex = false; this.index(); } });
   }
-  private async indexMemories() {
+  /** Embeds memories not yet embedded; false when it stopped early, for an outage or a stop. */
+  private async indexMemories(): Promise<boolean> {
     while (!this.controller.signal.aborted) {
       const memory = this.store.unindexedMemories(this.embedder.model, this.rejected.size + 1).find(item => !this.rejected.has(item.id));
-      if (!memory) return;
+      if (!memory) return true;
       const lines = memoryLines(memory);
       try {
         const vectors: Float32Array[] = [];
         for (let start = 0; start < lines.length; start += BATCH) vectors.push(...await this.embedder.embed(lines.slice(start, start + BATCH).map(line => `${memory.title}：${line}`), this.controller.signal));
         const entries = lines.map((line, index) => ({ line, vector: unit(vectors[index]!) }));
-        if (this.controller.signal.aborted) return;
+        if (this.controller.signal.aborted) return false;
         if (this.store.saveMemoryVectors(memory.id, this.embedder.model, entries)) this.lines.set(memory.id, entries);
       } catch (error) {
-        const status = (error as { status?: number }).status;
-        if (status === 400 || status === 413 || status === 422) { this.rejected.add(memory.id); this.store.log('recall_error', { stage: 'memory', memoryId: memory.id, message: errorText(error) }); continue; }
+        if (this.rejects(error)) { this.rejected.add(memory.id); this.store.log('recall_error', { stage: 'memory', memoryId: memory.id, message: errorText(error) }); continue; }
         this.fail(error, { stage: 'memory', memoryId: memory.id });
-        this.retry = setTimeout(() => this.index(), 60_000); this.retry.unref?.();
+        this.retryLater();
+        return false;
+      }
+    }
+    return false;
+  }
+  /** Embeds each saved sticker by its description, again when it is described anew; a deleted sticker's vectors go. */
+  private async indexStickers() {
+    const saved = new Map(this.store.savedStickers().filter(sticker => sticker.desc.trim()).map(sticker => [sticker.emojiId, sticker.desc]));
+    for (const [emojiId, { desc }] of this.stickers) if (saved.get(emojiId) !== desc) this.stickers.delete(emojiId);
+    this.store.keepStickerVectors(saved);
+    for (const [emojiId, desc] of saved) {
+      if (this.controller.signal.aborted) return;
+      if (this.stickers.has(emojiId) || this.rejected.has(`${emojiId}:${desc}`)) continue;
+      const lines = stickerLines(desc);
+      try {
+        const vectors = await this.embedder.embed(lines, this.controller.signal);
+        const entries = lines.map((line, index) => ({ line, vector: unit(vectors[index]!) }));
+        if (this.controller.signal.aborted) return;
+        if (this.store.saveStickerVectors(emojiId, this.embedder.model, desc, entries)) this.stickers.set(emojiId, { desc, lines: entries });
+      } catch (error) {
+        if (this.rejects(error)) { this.rejected.add(`${emojiId}:${desc}`); this.store.log('recall_error', { stage: 'sticker', emojiId, message: errorText(error) }); continue; }
+        this.fail(error, { stage: 'sticker', emojiId });
+        this.retryLater();
         return;
       }
     }
   }
+  /** The endpoint refuses this text itself, so retrying it would fail the same way. */
+  private rejects(error: unknown) { const status = (error as { status?: number }).status; return status === 400 || status === 413 || status === 422; }
+  private retryLater() { clearTimeout(this.retry); this.retry = setTimeout(() => this.index(), 60_000); this.retry.unref?.(); }
   private fail(error: unknown, detail: Record<string, string>) {
     if (this.controller.signal.aborted) return;
     // One failure pauses message embedding for a minute, so an outage logs one error rather than one per message.

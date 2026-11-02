@@ -56,6 +56,8 @@ const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool
 const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
 /** Messages, stickers, reactions, and pokes (ADR-0002): their success receipts need no call of their own, and a newer message in their chat makes an unsent one stale. */
 const socialActions = new Set(['send_private_msg', 'send_group_msg', 'send_msg', 'send_custom_face', 'send_group_ai_record', 'set_group_reaction', 'set_msg_emoji_like', 'send_poke', 'friend_poke', 'group_poke']);
+/** A sticker saved and described in one call needs no call of its own either; one saved without a description, or described before, still does. */
+const describedSticker = (tool: string, details: unknown) => tool === 'add_custom_face' && (details as { described?: { outcome?: unknown } } | undefined)?.described?.outcome === 'success';
 /** The chat an action is aimed at: group:<id> or private:<qq>. */
 function targetChat(args: unknown): string | undefined {
   const { group_id: group, user_id: user, message_type: type } = (args ?? {}) as Record<string, unknown>;
@@ -88,6 +90,8 @@ export class PiBrain implements Brain {
   private seen = new Set<string>();
   /** System faces whose picture this thought has seen. */
   private facesSeen = new Set<string>();
+  /** Saved stickers this thought has been shown as fitting what was said. */
+  private stickersShown = new Set<string>();
   private turns = 0;
   private runId = '';
   private observations: EnvironmentEvent[] = [];
@@ -124,7 +128,7 @@ export class PiBrain implements Brain {
       convertToLlm: toModelMessages,
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
       beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
-      afterToolCall: async ({ toolCall, isError }) => socialActions.has(toolCall.name) && !isError ? { terminate: true } : undefined,
+      afterToolCall: async ({ toolCall, isError, result }) => !isError && (socialActions.has(toolCall.name) || describedSticker(toolCall.name, result.details)) ? { terminate: true } : undefined,
       prepareRequest: async ({ context, model: currentModel }, signal) => {
         const first = this.turns === 0;
         // Observations steered in for stale chats have entered by now.
@@ -369,6 +373,10 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (use read_event to read truncated content):\n${JSON.stringify(observation.events.map(event => displayEvent(event, preview, faces)))}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
+    // Saved stickers that fit what was said come with it, each once a thought, so sending one needs no call to look them up (ADR-0009).
+    const stickers = this.recall?.stickerSuggestions(observation.events, this.stickersShown) ?? [];
+    for (const sticker of stickers) this.stickersShown.add(sticker.emojiId);
+    if (stickers.length) content.push({ type: 'text', text: `Saved stickers of yours whose descriptions fit what was just said, in case you want to send one with send_custom_face; sending none is fine too:\n${JSON.stringify(stickers.map(({ emojiId, desc }) => ({ emoji_id: emojiId, desc })))}` });
     let count = 0;
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
       const sticker = this.store.savedSticker(segment.data ?? {});
@@ -457,7 +465,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = [];
-    this.seen.clear(); this.facesSeen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.facesSeen.clear(); this.stickersShown.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     const self = this.config.snowluma.selfId;
     this.engaged = new Set(observation.events.filter(event => event.actorId !== self && !isAmbient(event.kind, event.actorId, self)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;

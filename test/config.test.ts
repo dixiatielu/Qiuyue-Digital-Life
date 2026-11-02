@@ -104,13 +104,15 @@ test('embedding is off by default and, when on, needs an endpoint, a model, and 
     const load = (embedding: Record<string, unknown>) => { writeFileSync(path, JSON.stringify({ ...base, embedding })); return loadConfig(path); };
     const on = { enabled: true, baseUrl: 'https://llm.example/v1', model: 'embedder' };
     delete base.embedding;
-    assert.deepEqual(load({}).embedding, { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, timeoutMs: 15_000, selfNames: [] });
+    assert.deepEqual(load({}).embedding, { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [] });
     assert.equal(load({ ...on, selfNames: ['秋月'] }).embedding.selfNames[0], '秋月');
     for (const baseUrl of ['', 'ftp://llm.example', 'https://user:pass@llm.example/v1', 'https://llm.example/v1?key=1']) assert.throws(() => load({ ...on, baseUrl }), /embedding.baseUrl/);
     assert.throws(() => load({ ...on, model: ' ' }), /embedding.model/);
     for (const threshold of [0, 1, '0.6']) assert.throws(() => load({ ...on, threshold }), /embedding.threshold/);
     for (const searchThreshold of [0, 1.2, null]) assert.throws(() => load({ ...on, searchThreshold }), /embedding.searchThreshold/);
     for (const limit of [0, 21, 1.5]) assert.throws(() => load({ ...on, limit }), /embedding.limit/);
+    for (const stickerThreshold of [0, 1, '0.65']) assert.throws(() => load({ ...on, stickerThreshold }), /embedding.stickerThreshold/);
+    for (const stickerLimit of [0, 21, 2.5]) assert.throws(() => load({ ...on, stickerLimit }), /embedding.stickerLimit/);
     assert.throws(() => load({ ...on, selfNames: [''] }), /selfNames/);
     assert.throws(() => load({ ...on, apiKeyEnv: 'not-a-name' }), /environment variable/);
     assert.throws(() => load({ ...on, enabled: 'yes' }), /boolean/);

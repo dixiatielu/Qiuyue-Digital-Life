@@ -63,6 +63,7 @@ export class Store {
       CREATE TRIGGER IF NOT EXISTS memory_delete AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE id=old.id; END;
       CREATE TABLE IF NOT EXISTS memory_vectors(memory_id TEXT NOT NULL, chunk INTEGER NOT NULL, model TEXT NOT NULL, line TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(memory_id,chunk));
       CREATE TRIGGER IF NOT EXISTS memory_vectors_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_vectors WHERE memory_id=old.id; END;
+      CREATE TABLE IF NOT EXISTS sticker_vectors(emoji_id TEXT NOT NULL, chunk INTEGER NOT NULL, model TEXT NOT NULL, desc TEXT NOT NULL, line TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(emoji_id,chunk));
       CREATE TABLE IF NOT EXISTS tombstones(source_key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
       CREATE TABLE IF NOT EXISTS pursuits(id TEXT PRIMARY KEY, title TEXT NOT NULL, progress TEXT NOT NULL, fictional INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -379,7 +380,7 @@ export class Store {
   /** Memories a deliberate search may find: current ones of every kind, and with historical their earlier versions too. */
   searchableIds(historical: boolean): Set<string> { return new Set(this.db.prepare(`SELECT id FROM memories${historical ? '' : ' WHERE active=1'}`).all().map(row => String(row.id))); }
   /** Vectors from another embedding model cannot be compared with this one's. */
-  dropOtherVectors(model: string) { this.db.prepare('DELETE FROM memory_vectors WHERE model!=?').run(model); }
+  dropOtherVectors(model: string) { this.db.prepare('DELETE FROM memory_vectors WHERE model!=?').run(model); this.db.prepare('DELETE FROM sticker_vectors WHERE model!=?').run(model); }
   /** Vectors of each memory's lines for one embedding model, in line order. */
   memoryVectors(model: string): { memoryId: string; line: string; vector: Float32Array }[] {
     return this.db.prepare('SELECT * FROM memory_vectors WHERE model=? ORDER BY memory_id,chunk').all(model)
@@ -398,6 +399,25 @@ export class Store {
       lines.forEach(({ line, vector }, chunk) => insert.run(memoryId, chunk, model, line, new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength)));
       return true;
     });
+  }
+  /** Vectors of saved stickers' descriptions for one embedding model, each with the description it was made from. */
+  stickerVectors(model: string): { emojiId: string; desc: string; line: string; vector: Float32Array }[] {
+    return this.db.prepare('SELECT * FROM sticker_vectors WHERE model=? ORDER BY emoji_id,chunk').all(model)
+      .map(row => ({ emojiId: String(row.emoji_id), desc: String(row.desc), line: String(row.line), vector: new Float32Array(Uint8Array.from(row.vector as Uint8Array).buffer) }));
+  }
+  /** Replace a sticker's vectors, unless it was deleted or described anew while they were made. */
+  saveStickerVectors(emojiId: string, model: string, desc: string, lines: { line: string; vector: Float32Array }[]): boolean {
+    return this.transaction(() => {
+      if (!this.stickerSaved(emojiId) || this.stickerNote(emojiId) !== desc) return false;
+      this.db.prepare('DELETE FROM sticker_vectors WHERE emoji_id=?').run(emojiId);
+      const insert = this.db.prepare('INSERT INTO sticker_vectors VALUES (?,?,?,?,?,?)');
+      lines.forEach(({ line, vector }, chunk) => insert.run(emojiId, chunk, model, desc, line, new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength)));
+      return true;
+    });
+  }
+  /** Drop the vectors of stickers deleted since, or described anew. */
+  keepStickerVectors(saved: Map<string, string>) {
+    for (const row of this.db.prepare('SELECT DISTINCT emoji_id, desc FROM sticker_vectors').all()) if (saved.get(String(row.emoji_id)) !== String(row.desc)) this.db.prepare('DELETE FROM sticker_vectors WHERE emoji_id=?').run(String(row.emoji_id));
   }
   forgetPlan(root: string): string[] {
     if (!this.memory(root) && !this.event(root)) throw new Error('Record does not exist.');
@@ -576,6 +596,20 @@ export class Store {
   stickerNote(emojiId: string): string | undefined {
     const row = this.db.prepare("SELECT json_extract(args,'$.desc') AS note FROM actions WHERE kind='modify_custom_face' AND status='success' AND json_extract(args,'$.emoji_id')=? ORDER BY created_at DESC LIMIT 1").get(emojiId);
     return row?.note ? String(row.note) : undefined;
+  }
+  /** Stickers saved through her own actions and not deleted since, each with the description last given to it. Stickers saved elsewhere, such as on a phone, are not known here. */
+  savedStickers(): { emojiId: string; desc: string }[] {
+    const saved = new Map<string, string>();
+    for (const row of this.db.prepare("SELECT kind, args, result FROM actions WHERE kind IN ('add_custom_face','modify_custom_face','delete_custom_face') AND status='success' ORDER BY created_at,rowid").all()) {
+      const args = parse<Record<string, unknown>>(String(row.args));
+      if (row.kind === 'add_custom_face') {
+        const emojiId = row.result ? parse<{ emoji_id?: unknown } | null>(String(row.result))?.emoji_id : undefined;
+        if (typeof emojiId === 'string' && emojiId) saved.set(emojiId, saved.get(emojiId) ?? '');
+      } else if (typeof args.emoji_id === 'string' && saved.has(args.emoji_id)) {
+        if (row.kind === 'delete_custom_face') saved.delete(args.emoji_id); else saved.set(args.emoji_id, typeof args.desc === 'string' ? args.desc : '');
+      }
+    }
+    return [...saved].map(([emojiId, desc]) => ({ emojiId, desc }));
   }
   /** Whether a sticker was saved, apart from one save of it, and not deleted since. */
   stickerSaved(emojiId: string, except?: string): boolean {

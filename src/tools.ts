@@ -243,7 +243,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     send_private_msg: quote,
     set_group_reaction: 'code is a QQ system face ID, or the code point of a Unicode emoji. Use view_face to see what a system face looks like before choosing one you do not know.',
     fetch_custom_face_detail: 'Returns saved emoji_id values, image URLs, and possibly empty descriptions. Choose based on actual content; do not guess image meanings.',
-    send_custom_face: 'Use an emoji_id from an actual fetch_custom_face_detail result. For a group pass group_id=<actual group ID> and emoji_id=<saved ID>; for a private chat use user_id instead. Specify only one target.',
+    send_custom_face: 'Use an emoji_id from an actual fetch_custom_face_detail result, add_custom_face receipt, or saved sticker an observation names. For a group pass group_id=<actual group ID> and emoji_id=<saved ID>; for a private chat use user_id instead. Specify only one target.',
     add_custom_face: 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Check the receipt to confirm success; after a successful save, use its returned emoji_id with modify_custom_face to add a description based on the image actually seen. QQ keeps one copy of an image, so alreadySaved in the local execution information means it was saved before and this only moved it to the front; keep its description unless it is wrong. If the outcome is unknown, verify it before taking further action.',
     modify_custom_face: 'Set desc to a concise description of the actual image and its suitable emotional or conversational use. Use the emoji_id returned by a successful add_custom_face or an actual fetch_custom_face_detail result; do not guess image content.',
     delete_msg: 'The message_id must come from an actual message event or send receipt; negative values may also be valid.',
@@ -254,17 +254,45 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     send_group_ai_record: 'Sends the text as an AI voice message to the group directly; group chats only. Use a character_id from an actual get_ai_characters result unchanged. Keep the text short.',
     comment_qzone: 'tid and target_uin identify the post and its author. To reply to a top-level comment, provide both its comment_id and comment_uin (for example, comment_id="0" is valid). For a nested reply, use the parent comment ID and author and provide both target reply_uin and reply_name. Replies do not support images.',
   };
+  // Saving a sticker takes the description it is saved with, so saving, describing, and sending it need one model call (ADR-0010).
+  const describedAdd = 'Use an accessible image URL, base64:// data, or a file:// path on the SnowLuma server for file. Pass desc with a concise description of the image as you actually saw it and its suitable emotional or conversational use: once the save succeeds, it is set with modify_custom_face as an action of its own within this call, whose outcome appears as described in the local execution information, so you can save a sticker and send it or reply in the same batch. QQ keeps one copy of an image, so alreadySaved in the local execution information means it was saved before and this only moved it to the front; a description it already has is kept rather than replaced by desc, so use modify_custom_face if that one is wrong. If the outcome is unknown, verify it before taking further action.';
+  const describing = () => allowed(findSnowLumaAction('modify_custom_face'));
+  /** One external action: recorded before it is sent and deduplicated, with an unconfirmed outcome kept as unknown (ADR-0008). */
+  async function act(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
+    const attempt = store.beginAction(`snowluma:${crypto.randomUUID()}`, name, args, [...context().sources], [...context().triggers], config.limits.actionsPerHour);
+    if (attempt.fresh) {
+      try { store.finishAction(attempt.action.id, 'success', await social.execute(name, args, signal)); }
+      catch (error) { store.finishAction(attempt.action.id, definitelyFailed(error) ? 'failed' : 'unknown', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
+    }
+    return { outcome: store.actionById(attempt.action.id)!, reused: !attempt.fresh };
+  }
+  /** Describe a sticker just saved; a failure here leaves the save itself standing. */
+  async function describe(emojiId: string, desc: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    try {
+      ensureCurrent(store, context(), signal);
+      const { outcome, reused } = await act('modify_custom_face', { emoji_id: emojiId, desc }, signal);
+      if (outcome.status === 'success') return { actionId: outcome.id, outcome: 'success', ...(reused ? { reused } : {}) };
+      return { actionId: outcome.id, outcome: outcome.status, reused, error: outcome.result, instruction: outcome.status === 'unknown' ? 'The sticker is saved, but whether its description was set is unknown; check fetch_custom_face_detail before describing it again with modify_custom_face.' : 'The sticker is saved, but its description was not set; describe it with modify_custom_face if you still want to.' };
+    } catch (error) { return { outcome: 'failed', error: { message: errorText(error) }, instruction: 'The sticker is saved, but its description was not set; describe it with modify_custom_face if you still want to.' }; }
+  }
   const native = new Map(snowlumaCatalog.map(action => [action.name, nativeTool(action)]));
-  function nativeTool(action: SnowLumaActionDefinition): AgentTool {
+  const nativeAdd = nativeTool(findSnowLumaAction('add_custom_face'), true);
+  const toolFor = (action: SnowLumaActionDefinition) => action.name === 'add_custom_face' && describing() ? nativeAdd : native.get(action.name)!;
+  function nativeTool(action: SnowLumaActionDefinition, describes = false): AgentTool {
+    const schema = action.inputSchema as TSchema & { properties?: Record<string, unknown> };
     return {
       name: action.name, label: action.name,
       description: common.has(action.name)
-        ? [action.summary, `SnowLuma native interface ${action.name}; ${action.readOnly ? 'read-only query' : 'may have side effects and is subject to action budgets and deduplication'}.`, ...action.invariants, action.returns, action.stream ? 'Streaming results return an array of raw data frames in arrival order.' : '', usage[action.name]].filter(Boolean).join('\n')
+        ? [action.summary, `SnowLuma native interface ${action.name}; ${action.readOnly ? 'read-only query' : 'may have side effects and is subject to action budgets and deduplication'}.`, ...action.invariants, action.returns, action.stream ? 'Streaming results return an array of raw data frames in arrival order.' : '', describes ? describedAdd : usage[action.name]].filter(Boolean).join('\n')
         : action.summary ?? action.name,
-      parameters: action.inputSchema, replay: 'never', executionMode: 'sequential',
+      parameters: describes ? { ...schema, properties: { ...schema.properties, desc: { type: 'string', minLength: 1, maxLength: 500, description: 'Description of the image as actually seen and its suitable emotional or conversational use, set with modify_custom_face once the save succeeds' } } } : action.inputSchema,
+      replay: 'never', executionMode: 'sequential',
       execute: async (_callId, parameters, signal) => {
         // Normalized before the action is recorded, so its record shows what was sent.
         const args = jpegImages(parameters) as Record<string, unknown>;
+        // desc belongs to the modify_custom_face that follows a successful save, not to the save.
+        const desc = describes && typeof args.desc === 'string' && args.desc.trim() ? args.desc.trim() : undefined;
+        if (describes) delete args.desc;
         ensureCurrent(store, context(), signal);
         if (!allowed(action)) throw new Error('The operator has not enabled this SnowLuma interface.');
         let actionId: string | undefined; let reused = false; let value: unknown;
@@ -272,13 +300,8 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
           try { value = await social.execute(action.name, args, signal); }
           catch (error) { throw new Error(JSON.stringify({ error: error instanceof SnowLumaApiError ? error.response : { message: errorText(error) } })); }
         } else {
-          const attempt = store.beginAction(`snowluma:${crypto.randomUUID()}`, action.name, args, [...context().sources], [...context().triggers], config.limits.actionsPerHour);
-          actionId = attempt.action.id; reused = !attempt.fresh;
-          if (attempt.fresh) {
-            try { store.finishAction(actionId, 'success', await social.execute(action.name, args, signal)); }
-            catch (error) { store.finishAction(actionId, definitelyFailed(error) ? 'failed' : 'unknown', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
-          }
-          const outcome = store.actionById(actionId)!;
+          const attempt = await act(action.name, args, signal);
+          const outcome = attempt.outcome; actionId = outcome.id; reused = attempt.reused;
           if (outcome.status !== 'success') throw new Error(JSON.stringify({ actionId, outcome: outcome.status, reused, error: outcome.result, instruction: 'Use inspect_actions to check the action record.' }));
           value = outcome.result;
         }
@@ -286,8 +309,11 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         const serialized = JSON.stringify(value) ?? 'null';
         const truncated = serialized.length > 12000;
         const saved = action.name === 'add_custom_face' ? String((value as { emoji_id?: unknown } | null)?.emoji_id ?? '') : '';
-        const alreadySaved = saved && store.stickerSaved(saved, actionId) ? { alreadySaved: true, desc: store.stickerNote(saved) ?? '' } : {};
-        const metadata = { sourceId: experience.sourceId, ...(actionId ? { actionId, outcome: 'success', reused } : {}), ...alreadySaved, truncated };
+        const previous = saved && store.stickerSaved(saved, actionId) ? store.stickerNote(saved) ?? '' : undefined;
+        const alreadySaved = previous !== undefined ? { alreadySaved: true, desc: previous } : {};
+        // A sticker saved before keeps the description it has; one it never had is given now.
+        const described = saved && desc !== undefined && !previous ? { described: await describe(saved, desc, signal) } : {};
+        const metadata = { sourceId: experience.sourceId, ...(actionId ? { actionId, outcome: 'success', reused } : {}), ...alreadySaved, ...described, truncated };
         return {
           content: [{ type: 'text', text: truncated ? serialized.slice(0, 12000) + '\n[Result truncated; the full result is stored in the source event payload.result and can be read in chunks using read_event]' : serialized }, { type: 'text', text: `Local execution information: ${JSON.stringify(metadata)}` }],
           details: metadata,
@@ -312,11 +338,11 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     tool('load_snowluma_tools', 'View detailed usage, parameters, results, examples, and constraints for enabled SnowLuma tools by original interface name. Tools are already directly available; this query does not change the tool set.', Type.Object({ names: Type.Array(string('Original SnowLuma interface name', 100), { minItems: 1, maxItems: 8 }) }), args => {
       const actions = [...new Set<string>(args.names)].map(findSnowLumaAction);
       for (const action of actions) if (!allowed(action)) throw new Error(`The operator has not enabled this SnowLuma interface: ${action.name}`);
-      return actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, inputSchema: action.inputSchema, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }));
+      return actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, inputSchema: toolFor(action).parameters, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }));
     }),
   );
   const base = result.filter(tool => config.web.enabled || !['read_webpage', 'search_web'].includes(tool.name));
   // Sharing reads the account's Qzone cookies and sends a message, so it follows the permissions of those interfaces.
   const shareable = () => allowed(findSnowLumaAction('get_cookies')) && ['send_private_msg', 'send_group_msg'].some(name => allowed(findSnowLumaAction(name)));
-  return { faces, current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(action => native.get(action.name)!)] };
+  return { faces, current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(toolFor)] };
 }
