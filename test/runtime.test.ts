@@ -197,6 +197,48 @@ test('rest marked on a planned wake holds free time back until that wake comes o
   } finally { await runtime.stop(); store.close(); }
 });
 
+test('a rest holds group chat not addressed to her; when it ends, the wake comes, then one note on all that waited', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-01T14:30:00Z') });
+  const cfg = config(); cfg.life.freeTime.enabled = false;
+  const store = new Store(':memory:', true); store.bindAccount(900);
+  const runs: string[][] = []; let note: Record<string, unknown> | undefined;
+  const brain: Brain = {
+    streaming: true, thought: thought(),
+    run: async observation => {
+      runs.push(observation.events.map(item => item.kind === 'message' ? item.text : item.kind));
+      note ??= observation.events.find(item => item.kind === 'rest_backlog')?.payload;
+      store.acknowledge(observation.batchId);
+    },
+    steer: async () => false, consolidate: async () => {}, abort: () => {},
+  };
+  const runtime = new LifeRuntime(cfg, store, brain);
+  const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); await runtime.idle(); };
+  const hour = 3_600_000;
+  try {
+    store.schedule('Get up', 'life', Date.now() + 8 * hour, [], true);
+    runtime.start(); await flush();
+    const since = Date.now();
+    await step(60_000);
+    const night = Array.from({ length: 15 }, (_, index) => event(store, `Night ${index}`));
+    event(store, 'Elsewhere', 200);
+    store.receive({ key: crypto.randomUUID(), kind: 'notice:group_msg_emoji_like:add', at: Date.now(), groupId: 100, actorId: 8, text: 'group_msg_emoji_like', payload: { user_id: 8 } });
+    store.receive({ key: crypto.randomUUID(), kind: 'notice:notify:input_status', at: Date.now(), actorId: 7, text: 'notify', payload: {} });
+    await step(cfg.limits.ambientDelayMs); assert.deepEqual(runs, []);
+    store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), actorId: 7, text: 'Still up?', payload: { message_type: 'private', message: [{ type: 'text', data: { text: 'Still up?' } }] } });
+    await step(0); assert.deepEqual(runs, [['notice:notify:input_status', 'Still up?']]);
+    await step(8 * hour); await step(0);
+    assert.deepEqual(runs.slice(1), [['wake'], ['rest_backlog']]);
+    assert.deepEqual(note, { since, until: since + 60_000 + cfg.limits.ambientDelayMs + 8 * hour, chats: [
+      { conversation: 'group:100', from: since + 60_000, messages: 15, notices: 1 },
+      { conversation: 'group:200', from: since + 60_000, messages: 1, notices: 0 },
+    ] });
+    // What a rest held is perceived through the note, not observed event by event, so it brings no memory review closer.
+    assert.equal(store.event(night[0]!.id)?.status, 'processed');
+    assert.equal(store.pending(), 0); assert.equal(store.processedCount(), 4);
+    assert.equal(store.setting('restingSince'), null);
+  } finally { await runtime.stop(); store.close(); }
+});
+
 test('a life wake starts a thought of its own: it waits out a running thought and is not claimed with chat', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const cfg = config(); cfg.life.freeTime.enabled = false;

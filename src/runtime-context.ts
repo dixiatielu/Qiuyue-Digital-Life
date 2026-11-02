@@ -13,6 +13,10 @@ export type RuntimeSnapshot = Record<string, unknown>;
 type Entry = { id: string };
 type ArrayUpdate = { upsert: Entry[]; removedIds: string[] };
 const collections = new Set(['recentEvents', 'recalled', 'actualActions', 'activeCommitmentsAndPlans', 'pursuits', 'myHabits', 'practices', 'impressions']);
+/** Memories runtime_data has brought stay in the working context until compaction, so a delta removes one only when it no longer holds. */
+const lasting = ['recalled', 'myHabits', 'practices', 'impressions'];
+/** Recent events come with the observations that bring them; only a snapshot, which stands in for compacted exchanges, lists them. */
+const snapshotOnly = new Set(['recentEvents']);
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /** Keep the warm message prefix intact; only changed fields and records are appended. */
@@ -20,7 +24,7 @@ export function runtimeUpdate(current: RuntimeSnapshot, previous?: RuntimeSnapsh
   if (!previous) return { format: 'snapshot', ...current };
   const changes: RuntimeSnapshot = {};
   for (const [key, value] of Object.entries(current)) {
-    if (key === 'now' || equal(value, previous[key])) continue;
+    if (key === 'now' || snapshotOnly.has(key) || equal(value, previous[key])) continue;
     if (collections.has(key)) {
       const before = new Map(((previous[key] ?? []) as Entry[]).map(item => [item.id, item]));
       const after = value as Entry[];
@@ -30,6 +34,24 @@ export function runtimeUpdate(current: RuntimeSnapshot, previous?: RuntimeSnapsh
     } else changes[key] = value;
   }
   return Object.keys(changes).length ? { format: 'delta', now: current.now, ...changes } : undefined;
+}
+
+/**
+ * What a delta brings the working context to, from what it already shows. A memory already shown stays as shown while it holds,
+ * even when what is said no longer calls it to mind, since its earlier upsert is still in the context; an action keeps its latest outcome.
+ */
+export function carry(current: RuntimeSnapshot, shown: RuntimeSnapshot, holding: (memoryIds: string[]) => Set<string>): RuntimeSnapshot {
+  const view: RuntimeSnapshot = { ...current };
+  const held = holding(lasting.flatMap(key => ((shown[key] ?? []) as Entry[]).map(item => item.id)));
+  for (const key of lasting) {
+    const before = (shown[key] ?? []) as Entry[];
+    const ids = new Set(before.map(item => item.id));
+    view[key] = [...before.filter(item => held.has(item.id)), ...((current[key] ?? []) as Entry[]).filter(item => !ids.has(item.id))];
+  }
+  const actions = new Map(((shown.actualActions ?? []) as Entry[]).map(action => [action.id, action]));
+  for (const action of (current.actualActions ?? []) as Entry[]) actions.set(action.id, action);
+  view.actualActions = [...actions.values()];
+  return view;
 }
 
 /** Rebuild the exact baseline after restart or rollback, without forcing another full snapshot. */

@@ -1,6 +1,7 @@
 import type { Action, EnvironmentEvent } from './domain.js';
 import { conversationOf, eventRef, type Store } from './store.js';
 import { faceLabel } from './faces.js';
+import { textTokens } from './context.js';
 
 const ZONE_OFFSET = 8 * 3_600_000;
 const LINE_LIMIT = 300;
@@ -28,6 +29,16 @@ export class ChatRecord {
     const header = page.lines.length ? `${this.title()}, from ${recordTime(from)}:` : `${this.title()}: nothing from ${recordTime(from)} on.`;
     const footer = complete ? 'This is the end of the record so far.' : `More follows: read_chat_record with from="${recordTime(next!)}".`;
     return { text: [header, this.legend(page), ...page.lines, footer].filter(Boolean).join('\n'), next: complete ? undefined : next, through: next };
+  }
+
+  /** Everything from one time through another, as it happened. Beyond budget tokens, the earliest lines are left out and counted. */
+  span(from: number, until: number, budget: number): { text: string; omitted: number } {
+    const { events, actions } = this.store.conversationRecord(this.conversation, from, Number.MAX_SAFE_INTEGER, until);
+    const { lines } = this.render(events, actions);
+    let omitted = 0; let tokens = lines.reduce((sum, line) => sum + textTokens(line) + 1, 0);
+    while (omitted < lines.length && tokens > budget) tokens -= textTokens(lines[omitted++]!) + 1;
+    const kept = lines.slice(omitted);
+    return { text: [`${this.title()}, from ${recordTime(from)} through ${recordTime(until)}:`, this.legend({ lines: kept }), ...(kept.length ? kept : ['(nothing)'])].filter(Boolean).join('\n'), omitted };
   }
 
   /** The latest items containing a phrase or written by one person, in order. */

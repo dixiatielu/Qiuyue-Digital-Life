@@ -33,7 +33,9 @@ export function handleControl(store: Store, request: ControlRequest, runtime?: L
       if (content.length > 12000 || !memory.active) throw new Error('Correction content is too long, or the record is not the current version.');
       runtime?.brain.abort();
       const source = store.receive({ key: `correction:${crypto.randomUUID()}`, kind: 'operator_correction', at: Date.now(), text: content, payload: { supersedes: memory.id } }, true)!;
+      const reach = store.revisionReach(memory.id);
       const corrected = store.writeMemory({ ...memory, content, sources: [source.id], supersedes: memory.id }, true);
+      store.noticeRevision(corrected, reach);
       store.bumpGeneration(); return corrected;
     }
   }

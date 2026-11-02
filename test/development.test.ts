@@ -246,3 +246,30 @@ test('review waits for a quiet moment and lists the chats it has not read', asyn
     assert.equal(f.faux.state.callCount, 2);
   } finally { await runtime.stop(); f.store.close(); }
 });
+
+test('her own revision reports what it reached in its result and starts no thought; an operator correction comes to her as an event', async () => {
+  const f = fixture();
+  try {
+    f.store.bindAccount(900);
+    const source = say(f.store, 7, 'I moved to Wuhan', { groupId: undefined });
+    f.store.acknowledge(f.store.claim(20)!.batchId);
+    const fact = f.store.writeMemory({ kind: 'understanding', title: 'Where P7 lives', content: 'Lives in Beijing', importance: 5, sources: [source.id] }, false);
+    const plan = f.store.writeMemory({ kind: 'note', title: 'Visit plan', content: 'Visit P7 in Beijing', importance: 4, sources: [fact.id] }, false);
+    const visit = f.store.schedule('Visit P7', 'commitment', Date.now() + 86_400_000, [fact.id]);
+    say(f.store, 7, 'Wuhan, remember?', { groupId: undefined });
+    let result: Record<string, unknown> = {};
+    f.faux.setResponses([
+      () => answer(call('remember', { kind: 'understanding', title: 'Where P7 lives', content: 'Lives in Wuhan', importance: 5, sources: [source.id], supersedes: fact.id })),
+      context => { const last = context.messages.at(-1)!; result = JSON.parse((last.content as { text: string }[])[0]!.text); return answer('Noted'); },
+    ]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.deepEqual(Object.keys(result), ['id', 'kind', 'supersedes', 'withdrawn', 'cites']);
+    assert.deepEqual(result.withdrawn, [{ id: plan.id, kind: 'note', title: 'Visit plan' }]);
+    assert.deepEqual(result.cites, [{ id: visit.id, kind: 'commitment', title: 'Visit P7' }]);
+    assert.equal(f.store.pending(), 0);
+    handleControl(f.store, { args: ['memory', 'correct', String(result.id), 'Lives in Wuhan, near the lake'] });
+    const [revision] = f.store.claim(20)!.events;
+    assert.equal(revision?.kind, 'memory_revision');
+    assert.match(revision!.text, new RegExp(`revised outside your thoughts: m:\\S+ replaces ${result.id}\\.`));
+  } finally { f.store.close(); }
+});

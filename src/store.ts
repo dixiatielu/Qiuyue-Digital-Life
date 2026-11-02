@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Action, DevelopmentKind, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Pursuit, Wake } from './domain.js';
-import { developmentKinds, isAmbient, isDevelopment, isHeartbeat } from './domain.js';
+import { addressedTo, developmentKinds, isAmbient, isDevelopment, isHeartbeat } from './domain.js';
 import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
 import type { Face } from './faces.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -12,11 +12,14 @@ const json = (value: unknown) => JSON.stringify(value);
 const parse = <T>(value: unknown): T => JSON.parse(String(value)) as T;
 const id = (prefix: string) => `${prefix}:${randomUUID()}`;
 export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
-const claimable = "status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life')";
+/** While the digital life rests, group chat not addressed to it waits instead of starting or steering a thought (ADR-0016). */
+const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND group_id IS NOT NULL AND coalesce(json_extract(payload,'$.message_type'),'')!='private' AND addressed=0";
+/** Parameters: whether life wakes may be claimed, then whether the digital life rests. */
+const claimable = `status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') AND (?=0 OR NOT (${restHolds}))`;
 /** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
 const recallable = `active=1 AND kind NOT IN (${developmentKinds.map(kind => `'${kind}'`).join(',')})`;
 /** Events the program writes about its own scheduling and bookkeeping; they record nothing anyone else did. */
-const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap']);
+const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap', 'rest_backlog']);
 /** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
 const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+)$/, practice: /^(global|group:\d+)$/, impression: /^person:\d+$/ };
 /** A conversation is group:<id> or private:<qq>; its record is what happened there. */
@@ -29,6 +32,8 @@ export function conversationOf(value: string): { type: 'group' | 'private'; id: 
 export const eventRef = (eventId: string) => `#${eventId.slice(2, 10)}`;
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
 
+/** What a revision reaches; see Store.revisionReach. */
+export interface RevisionReach { withdrawn: { id: string; kind: string; title: string }[]; cites: { id: string; kind: string; title: string }[] }
 /** Local receive times of claimable events: the earliest waking one, the latest of any kind, and the earliest ambient one. */
 export interface PendingTiming { first?: number; last?: number; ambient?: number }
 export type StoreNotice =
@@ -75,7 +80,9 @@ export class Store {
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='received_at'").get()) this.db.exec('ALTER TABLE events ADD COLUMN received_at INTEGER');
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name='scope'").get()) this.db.exec('ALTER TABLE memories ADD COLUMN scope TEXT');
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('wakes') WHERE name='rest'").get()) this.db.exec('ALTER TABLE wakes ADD COLUMN rest INTEGER NOT NULL DEFAULT 0');
-    for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {} })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
+    // Whether an event is addressed to the digital life is settled when it arrives, while the message it replies to is known to be its own.
+    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='addressed'").get()) this.db.exec('ALTER TABLE events ADD COLUMN addressed INTEGER NOT NULL DEFAULT 0');
+    for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
     const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
     if (self) this.selfId = parse<number>(self.value);
   }
@@ -178,7 +185,8 @@ export class Store {
     processed ||= isHeartbeat(input.kind);
     if (this.db.prepare('SELECT 1 FROM tombstones WHERE source_key=?').get(input.key)) return;
     const eventId = id('e'); const receivedAt = Date.now();
-    const result = this.db.prepare('INSERT OR IGNORE INTO events(id,source_key,kind,at,group_id,actor_id,text,payload,status,received_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(eventId, input.key, input.kind, input.at, input.groupId ?? null, input.actorId ?? null, input.text, json(input.payload), processed ? 'processed' : 'pending', receivedAt);
+    const addressed = this.selfId !== undefined && addressedTo(this.selfId, input, messageId => this.sentMessage(messageId));
+    const result = this.db.prepare('INSERT OR IGNORE INTO events(id,source_key,kind,at,group_id,actor_id,text,payload,status,received_at,addressed) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(eventId, input.key, input.kind, input.at, input.groupId ?? null, input.actorId ?? null, input.text, json(input.payload), processed ? 'processed' : 'pending', receivedAt, addressed ? 1 : 0);
     if (!result.changes) return;
     const event: EnvironmentEvent = { ...input, id: eventId, status: processed ? 'processed' : 'pending', receivedAt };
     this.notify({ kind: 'environment', event }); return event;
@@ -193,9 +201,9 @@ export class Store {
   private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, groupId: row.group_id ?? undefined, actorId: row.actor_id ?? undefined, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined }; }
   event(eventId: string): EnvironmentEvent | undefined { const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(eventId); return row ? this.eventRow(row) : undefined; }
   recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
-  claim(limit: number, allowLife = true): { batchId: string; events: EnvironmentEvent[] } | undefined {
+  claim(limit: number, allowLife = true, resting = false): { batchId: string; events: EnvironmentEvent[] } | undefined {
     return this.transaction(() => {
-      const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, limit);
+      const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, resting ? 1 : 0, limit);
       if (!claimed.length) return;
       // A life wake starts a thought of its own instead of riding along with chat (ADR-0015).
       const life = (row: Record<string, any>) => row.kind === 'wake' && parse<Record<string, unknown>>(row.payload).wakeKind === 'life';
@@ -229,9 +237,9 @@ export class Store {
       this.notify({ kind: 'state' });
     });
   }
-  pendingTiming(allowLife = true): PendingTiming {
+  pendingTiming(allowLife = true, resting = false): PendingTiming {
     // Rows from before received_at existed count as long overdue.
-    const row = this.db.prepare(`SELECT min(CASE WHEN ambient(kind,actor_id) THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient(kind,actor_id) THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0)!;
+    const row = this.db.prepare(`SELECT min(CASE WHEN ambient(kind,actor_id) THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient(kind,actor_id) THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0, resting ? 1 : 0)!;
     const time = (value: unknown) => value == null ? undefined : Number(value);
     return { first: time(row.first), last: time(row.last), ambient: time(row.ambient) };
   }
@@ -296,12 +304,32 @@ export class Store {
         this.db.prepare(`WITH RECURSIVE dependent(id) AS (SELECT ? UNION SELECT owner_id FROM sources JOIN dependent ON source_id=dependent.id)
           UPDATE memories SET active=0 WHERE id IN (SELECT id FROM dependent) AND id!=?`).run(previous.id, memoryId);
         this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(memoryId, previous.id);
-        const revision = this.receive({ key: `revision:${memoryId}`, kind: 'memory_revision', at: Date.now(), text: 'An understanding has been revised; interpretations depending on the old understanding have been removed from everyday recall. Check affected activities and commitments.', payload: { memoryId, supersedes: previous.id } });
-        if (revision) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(revision.id, memoryId);
       }
       this.log('memory_written', { id: memoryId, kind: input.kind, supersedes: input.supersedes, ...(scope ? { scope } : {}) });
     });
     return this.memory(memoryId)!;
+  }
+  /** Which of these memories are current. */
+  activeMemories(memoryIds: string[]): Set<string> { return new Set(this.db.prepare('SELECT id FROM memories WHERE active=1 AND id IN (SELECT value FROM json_each(?))').all(json(memoryIds)).map(row => String(row.id))); }
+  /** What revising a memory reaches: the memories resting on it, which leave everyday recall with it, and the plans, pursuits, and activity under way that cite any of them. */
+  revisionReach(memoryId: string): RevisionReach {
+    const reached = new Set(this.db.prepare('WITH RECURSIVE dependent(id) AS (SELECT ? UNION SELECT owner_id FROM sources JOIN dependent ON source_id=dependent.id) SELECT id FROM dependent').all(memoryId).map(row => String(row.id)));
+    const withdrawn = this.db.prepare('SELECT id, kind, title FROM memories WHERE active=1 AND id!=? AND id IN (SELECT value FROM json_each(?))').all(memoryId, json([...reached])).map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title) }));
+    const activity = this.settings().activity;
+    const cites = [
+      ...this.wakes().filter(wake => reached.has(wake.id)).map(wake => ({ id: wake.id, kind: wake.kind, title: wake.title })),
+      ...this.pursuits().filter(pursuit => reached.has(pursuit.id)).map(pursuit => ({ id: pursuit.id, kind: 'pursuit', title: pursuit.title })),
+      ...(activity && reached.has('state:activity') ? [{ id: 'state:activity', kind: 'activity', title: activity }] : []),
+    ];
+    return { withdrawn, cites };
+  }
+  /** A revision the digital life did not make in a thought of its own, such as an operator correction, comes to it as an event, with what it reached. Its own revisions report this in their result. */
+  noticeRevision(memory: Memory, reach: RevisionReach) {
+    const list = (items: { id: string; title: string }[]) => items.map(item => `${item.id} (${item.title})`).join('; ');
+    this.transaction(() => {
+      const revision = this.receive({ key: `revision:${memory.id}`, kind: 'memory_revision', at: Date.now(), text: `An understanding was revised outside your thoughts: ${memory.id} replaces ${memory.supersedes}.${reach.withdrawn.length ? ` Memories resting on the old version have left everyday recall: ${list(reach.withdrawn)}.` : ''}${reach.cites.length ? ` What is under way cites it: ${list(reach.cites)}; check whether it still holds.` : ''}`, payload: { memoryId: memory.id, supersedes: memory.supersedes ?? null, ...reach } });
+      if (revision) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(revision.id, memory.id);
+    });
   }
   private ownMessage(source: string): boolean {
     const event = this.event(source); if (!event) return false;
@@ -465,6 +493,18 @@ export class Store {
       }
     });
   }
+  /** Whether the digital life rests now: until a wake it marked as rest comes due, and only while life mode is on (ADR-0015, ADR-0016). */
+  resting(now = Date.now()): boolean { return this.settings().lifeEnabled && this.db.prepare("SELECT 1 FROM wakes WHERE rest=1 AND status='pending' AND due_at>? LIMIT 1").get(now) !== undefined; }
+  /** Group chat a rest is holding back, in order. */
+  restHeld(): EnvironmentEvent[] { return this.db.prepare(`SELECT * FROM events WHERE status='pending' AND ${restHolds} ORDER BY at,rowid`).all().map(row => this.eventRow(row)); }
+  /** Record pending events as perceived without an observation of their own. They do not count toward memory review, which still finds them in the chat record. */
+  setAside(eventIds: string[]) {
+    const write = () => {
+      for (const eventId of eventIds) this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE id=? AND status='pending'").run(eventId);
+      this.notifyEvents(eventIds);
+    };
+    if (this.db.isTransaction) write(); else this.transaction(write);
+  }
   /** When someone other than the digital life last did something that can start a thought. */
   lastHeard(selfId: number): number | undefined {
     const row = this.db.prepare("SELECT max(coalesce(received_at,at)) AS at FROM events WHERE (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND coalesce(actor_id,0)!=? AND NOT ambient(kind,actor_id)").get(selfId)!;
@@ -504,10 +544,10 @@ export class Store {
     return { target, events: `${type === 'group' ? 'group_id=?' : 'group_id IS NULL AND actor_id=?'} AND (kind='message' OR kind LIKE 'notice:%') AND kind!='notice:notify:input_status'`, actions: `status='success' AND ${type === 'group' ? "CAST(json_extract(args,'$.group_id') AS INTEGER)=?" : "json_extract(args,'$.group_id') IS NULL AND CAST(json_extract(args,'$.user_id') AS INTEGER)=?"}` };
   }
   /** A page of one conversation from a time on: messages and notices, with this account's completed actions there. Events sharing the last time stay together. */
-  conversationRecord(conversation: string, from: number, limit: number): { events: EnvironmentEvent[]; actions: Action[]; complete: boolean } {
+  conversationRecord(conversation: string, from: number, limit: number, until = Number.MAX_SAFE_INTEGER): { events: EnvironmentEvent[]; actions: Action[]; complete: boolean } {
     const filter = this.recordFilter(conversation);
-    const edge = this.db.prepare(`SELECT at FROM events WHERE ${filter.events} AND at>=? ORDER BY at,rowid LIMIT 1 OFFSET ?`).get(filter.target, from, limit - 1);
-    const end = edge ? Number(edge.at) : Number.MAX_SAFE_INTEGER;
+    const edge = this.db.prepare(`SELECT at FROM events WHERE ${filter.events} AND at>=? AND at<=? ORDER BY at,rowid LIMIT 1 OFFSET ?`).get(filter.target, from, until, limit - 1);
+    const end = edge ? Number(edge.at) : until;
     return {
       events: this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND at>=? AND at<=? ORDER BY at,rowid`).all(filter.target, from, end).map(row => this.eventRow(row)),
       actions: this.db.prepare(`SELECT * FROM actions WHERE ${filter.actions} AND created_at>=? AND created_at<=? ORDER BY created_at`).all(filter.target, from, end).map(row => this.action(row)),

@@ -163,3 +163,31 @@ test('events from before receive times were recorded count as overdue, and ambie
     assert.equal(store.event(typing.id)?.receivedAt, typing.receivedAt);
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('while the digital life rests, group chat not addressed to it is neither claimed nor timed', () => {
+  const store = new Store(':memory:', true); store.bindAccount(900);
+  try {
+    const { action } = store.beginAction('send-1', 'send_group_msg', { group_id: 100, message: 'Hi' }, []);
+    store.finishAction(action.id, 'success', { message_id: -42 });
+    const receive = (kind: string, payload: Record<string, unknown>, groupId: number | undefined = 100, actorId = 7) => store.receive({ key: crypto.randomUUID(), kind, at: Date.now(), groupId, actorId, text: kind, payload })!;
+    const say = (...message: unknown[]) => receive('message', { message_type: 'group', message });
+    const chatter = say({ type: 'text', data: { text: 'Chatter' } });
+    const reaction = receive('notice:group_msg_emoji_like:add', { user_id: 8 }, 100, 8);
+    const pokeOther = receive('notice:notify:poke', { user_id: 7, target_id: 8 });
+    const mention = say({ type: 'at', data: { qq: '900' } }, { type: 'text', data: { text: ' Awake?' } });
+    const reply = say({ type: 'reply', data: { id: '-42' } }, { type: 'text', data: { text: 'Nice' } });
+    const poke = receive('notice:notify:poke', { user_id: 7, target_id: 900 });
+    const ban = receive('notice:group_ban:ban', { user_id: 900, operator_id: 7, duration: 60 }, 100, 900);
+    const whisper = receive('message', { message_type: 'private', message: [{ type: 'text', data: { text: 'Psst' } }] }, undefined);
+    const temporary = receive('message', { message_type: 'private', message: [{ type: 'text', data: { text: 'From the group' } }] });
+    assert.equal(store.resting(), false);
+    store.schedule('Get up', 'life', Date.now() + 3_600_000, [], true);
+    assert.equal(store.resting(), true);
+    assert.deepEqual(store.restHeld().map(item => item.id), [chatter.id, reaction.id, pokeOther.id]);
+    assert.deepEqual(store.claim(20, true, true)?.events.map(item => item.id), [mention.id, reply.id, poke.id, ban.id, whisper.id, temporary.id]);
+    assert.deepEqual(store.pendingTiming(true, true), { first: undefined, last: undefined, ambient: undefined });
+    assert.equal(store.pendingTiming(true, false).first, chatter.receivedAt);
+    // A rest belongs to autonomous life; with life mode off, nothing is held.
+    store.setSetting('lifeEnabled', false); assert.equal(store.resting(), false);
+  } finally { store.close(); }
+});

@@ -5,6 +5,7 @@ import { deferred, event, fixture } from './helpers.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { ActionNotDispatchedError } from '../src/snowluma.js';
 import type { Store } from '../src/store.js';
+import { ChatRecord } from '../src/record.js';
 
 /** A private message from person 7. */
 const say = (store: Store, text: string) => store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, actorId: 7, payload: { message_type: 'private', message: [{ type: 'text', data: { text } }] } })!;
@@ -431,4 +432,26 @@ test('after maxPreemptions in a row the next decision is carried out as made', a
     assert.deepEqual(f.sent.map(item => item.args.message), ['As decided']);
     assert.equal(f.store.logs().filter(log => log.kind === 'thought_preempted').length, 1);
   } finally { release.resolve(); f.store.close(); }
+});
+
+test('when a rest ends, the group chat it held comes in one observation as a chat record, without its earliest lines beyond the budget', async () => {
+  const f = fixture();
+  try {
+    const from = Date.now() - 3_600_000;
+    const night = Array.from({ length: 40 }, (_, index) => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: from + index * 60_000, text: `Night ${index}`, groupId: 100, actorId: 7, payload: { message_type: 'group', sender: { nickname: 'Owl' }, message: [{ type: 'text', data: { text: `Night ${index}` } }] } })!);
+    f.store.setAside(night.map(item => item.id));
+    const until = Date.now();
+    f.store.receive({ key: 'rest:1', kind: 'rest_backlog', at: until, text: 'While you rested, group chat waited. Its record follows.', payload: { since: from, until, chats: [{ conversation: 'group:100', from, messages: 40, notices: 0 }] } });
+    f.faux.setResponses([context => {
+      const text = JSON.stringify(context.messages);
+      assert.match(text, /Chat record of group 100, from .* through .*/);
+      assert.match(text, /Owl: Night 0\b/); assert.match(text, /Owl: Night 39\b/);
+      assert.equal(text.match(/"kind":"message"/g), null);
+      return answer('Good morning');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+    const record = new ChatRecord(f.store, 900, 'group:100').span(from, until, 60);
+    assert.ok(record.omitted > 0);
+    assert.doesNotMatch(record.text, /Night 0\b/); assert.match(record.text, /Night 39\b/);
+  } finally { f.store.close(); }
 });

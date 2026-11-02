@@ -4,13 +4,13 @@ import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type I
 import type { Config } from './config.js';
 import type { Monitor } from './monitor.js';
 import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
-import { errorText, eventChat, isAmbient } from './domain.js';
+import { addressedTo, errorText, eventChat, isAmbient } from './domain.js';
 import { Store, conversationOf, digest } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
-import { actionSummary, applyRuntimeUpdate, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
-import { recordTime } from './record.js';
+import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
+import { ChatRecord, recordTime } from './record.js';
 import { faceCaption, faceIds, nameFaces } from './faces.js';
 import type { SemanticRecall } from './recall.js';
 
@@ -132,9 +132,11 @@ export class PiBrain implements Brain {
         ensureCurrent(store, this.thought, signal);
         const runtime = this.runtimeContext();
         let messages = [...context.messages];
-        const update = runtimeUpdate(runtime, this.runtimeSnapshot);
+        const shown = this.shown(messages, runtime);
+        const view = shown ? carry(runtime, shown, ids => store.activeMemories(ids)) : runtime;
+        const update = runtimeUpdate(view, shown);
         if (update) messages.push(this.runtimeMessage(update));
-        this.runtimeSnapshot = runtime;
+        this.runtimeSnapshot = view;
         const { window, budget } = this.budget(currentModel);
         const route = this.route(currentModel);
         let measured: TokenMeasurement;
@@ -190,10 +192,21 @@ All enabled SnowLuma interfaces can be called directly using their original name
 New observations can change your activity. Consider the target, setting, and information-sharing scope when acting. historyGroups lists the groups whose missed messages the runtime recovers after a disconnect and passes to you; you need not check them. The operator configures interface permissions. Check action receipts and investigate unknown outcomes first; the runtime handles action identifiers and deduplication.
 Distinguish actual experiences, reported claims, inferences, fictional daily life, and tool results. runtime_data provides the life-mode switch; when disabled, stop autonomous life activities, but continue social commitments and memory maintenance.
 Decide which experiences are important and save them with remember. When revising an understanding, retain its sources and previous version. Keep what people corrected or contradicted in what you save. Your feelings are yours to record, but how someone took your words is only what their replies show; what the record does not show, such as whether something helped or what they did after their last message, stays unknown.
-Record what you are doing with set_activity. After accepting a future obligation, save it with schedule_activity as commitment; use life for your own plans. When your chats have been quiet for a while, a free-time wake may come for your own life; when you go to sleep or want time to yourself, set rest on the activity you will wake for, such as getting up or the end of a nap, and none comes before it. Call finish_activity when a plan is completed or cancelled. What you pursue over days, such as a song you are learning or a series you follow, is kept with update_pursuit and ended with finish_pursuit; runtime_data lists those under way. Progress takes time and may stall; record it when it moves or stalls.${this.config.life.allowFiction ? ' Save fictional daily life with remember as fiction, or set fictional on a diary entry that includes it.' : ''} What you say about your own day must agree with your recorded activity and pursuits, and anything you say you did online, such as posting or sharing, must be an action you actually took; what you say you saw there must be in its result. What you see online comes back to mind later only if you save it with remember, citing the result's sourceId. You may rest when nothing is pending.
+Record what you are doing with set_activity. After accepting a future obligation, save it with schedule_activity as commitment; use life for your own plans. When your chats have been quiet for a while, a free-time wake may come for your own life; when you go to sleep or want time to yourself, set rest on the activity you will wake for, such as getting up or the end of a nap. Until it comes, no free-time wake comes and group chat reaches you only where someone mentions, replies to, or pokes you; private chats and your other plans come as usual. When the rest ends, a rest_backlog note brings what the groups said meanwhile as a chat record. If you get up early, finish or reschedule that activity. Call finish_activity when a plan is completed or cancelled. What you pursue over days, such as a song you are learning or a series you follow, is kept with update_pursuit and ended with finish_pursuit; runtime_data lists those under way. Progress takes time and may stall; record it when it moves or stalls.${this.config.life.allowFiction ? ' Save fictional daily life with remember as fiction, or set fictional on a diary entry that includes it.' : ''} What you say about your own day must agree with your recorded activity and pursuits, and anything you say you did online, such as posting or sharing, must be an action you actually took; what you say you saw there must be in its result. What you see online comes back to mind later only if you save it with remember, citing the result's sourceId. You may rest when nothing is pending.
 Working context continues across thinking runs; when space is limited, a continuity summary replaces earlier exchanges. runtime_data provides timestamped state and observations; later snapshots update earlier state. Current activity, commitments, and actual action outcomes in the latest snapshot take precedence over old exchanges and summaries. Use recall, read_event, or inspect_actions for detailed evidence. recalled holds at most a few memories that what was just said calls to mind, each with the matchedLine that matched; they can be only loosely related, so follow them or let them pass. It is often empty, which does not mean you have no memory of the matter; use recall to look deliberately. Working context and summaries are persisted; still use remember to save important experiences, understandings, and notes. Use read_context with ctx: record IDs in the summary to read pre-compaction originals in chunks. A memory_maintenance event means it is time to organize your memories.`;
-    return legacy ? base : base + `\nruntime_data format=snapshot represents the complete current state; format=delta contains only changed fields, and omitted fields retain their previous values. Apply upserts by id and remove removedIds in recentEvents, recalled, actualActions, activeCommitmentsAndPlans, pursuits, myHabits, practices, and impressions. Replace other fields directly. Action summaries omit internal provenance; use inspect_actions with an id for full evidence. Heartbeats are saved as connection records.
+    return legacy ? base : base + `\nruntime_data format=snapshot represents the complete current state; format=delta contains only changed fields, and omitted fields retain their previous values. Apply upserts by id and remove removedIds in recalled, actualActions, activeCommitmentsAndPlans, pursuits, myHabits, practices, and impressions. Replace other fields directly. recentEvents comes only in snapshots, since observations bring new events. A memory in recalled or your development stays until removed, which happens only when it no longer holds, and an action whose result you already have is not repeated. Action summaries omit internal provenance; use inspect_actions with an id for full evidence. Heartbeats are saved as connection records.
 Your development is yours to keep alongside the operator's persona. Habits are your own ways of acting and expressing yourself, including your own expression style. Practices are what the people around you do in which situations: how long and how often they write, punctuation and tone words, slang, stickers and reactions, joining chains, or anything else you notice. Habits and practices hold everywhere by default; give one a group:<id> scope only when it clearly belongs to that group alone, such as its rules. An impression is your current understanding of one person and your relationship with them, including what they want from you; a way of talking or answering seen in one person alone belongs there, not in a habit or practice. A habit says when it applies and when it does not. runtime_data supplies myHabits, practices, and impressions for the current settings and people. Knowing a practice does not mean adopting it, and the persona above takes precedence over your habits where they disagree. Each scope has a size limit: merge with supersedes or retire with retire_memory instead of piling entries up. A habit or impression cannot rest only on your own messages, notes, or judgments. When a memory_maintenance event lists unreviewed chats, read them with read_chat_record and revise your development from what you see.`;
+  }
+  /** What the working context already shows of runtime state: what runtime_data has said, and the actions whose results came back to it as tool results. */
+  private shown(messages: AgentMessage[], runtime: RuntimeSnapshot): RuntimeSnapshot | undefined {
+    const previous = this.runtimeSnapshot;
+    if (!previous) return;
+    const known = new Set(((previous.actualActions ?? []) as { id: string }[]).map(action => action.id));
+    const fresh = (runtime.actualActions as { id: string }[]).filter(action => !known.has(action.id));
+    if (!fresh.length) return previous;
+    const results = messages.flatMap(message => message.role === 'toolResult' ? message.content.flatMap(block => block.type === 'text' ? [block.text] : []) : []);
+    const seen = fresh.filter(action => results.some(text => text.includes(action.id)));
+    return seen.length ? { ...previous, actualActions: [...((previous.actualActions ?? []) as unknown[]), ...seen] } : previous;
   }
   private runtimeMessage(data: RuntimeSnapshot): Message {
     return { role: 'user', content: `<runtime_data>\n${JSON.stringify(data)}\n</runtime_data>`, timestamp: Date.now() };
@@ -351,9 +364,11 @@ Your development is yours to keep alongside the operator's persona. Habits are y
   private async message(observation: Observation): Promise<ObservationMessage> {
     const preview = Math.max(80, Math.min(2000, Math.floor(this.config.limits.contextTokens / (observation.events.length * 8))));
     const ids = [...new Set(observation.events.flatMap(faceIds))];
-    const faces = ids.length ? await this.tools.faces.names(this.controller.signal) : {};
+    const rests = observation.events.filter(event => event.kind === 'rest_backlog');
+    const faces = ids.length || rests.length ? await this.tools.faces.names(this.controller.signal) : {};
     const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (use read_event to read truncated content):\n${JSON.stringify(observation.events.map(event => displayEvent(event, preview, faces)))}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
+    for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
     let count = 0;
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
       const sticker = this.store.savedSticker(segment.data ?? {});
@@ -379,6 +394,16 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       content.push({ type: 'text', text: faceCaption(id, faces) }, { type: 'image', data: picture.toString('base64'), mimeType: 'image/png' });
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
+  }
+  /** The group chat a rest held, read as a chat record from where it began. Each group's share of a quarter of the context bounds its record, which beyond that leaves out its earliest lines and says where they begin (ADR-0016). */
+  private restRecord(payload: Record<string, unknown>, faces: Record<string, string>) {
+    const { until, chats } = payload as { until: number; chats: { conversation: string; from: number; messages: number; notices: number }[] };
+    const items = chats.reduce((sum, chat) => sum + chat.messages + chat.notices, 0) || 1;
+    return chats.map(chat => {
+      const share = Math.floor(this.config.limits.contextTokens / 4 * (chat.messages + chat.notices) / items);
+      const { text, omitted } = new ChatRecord(this.store, this.config.snowluma.selfId, chat.conversation, faces).span(chat.from, until, share);
+      return omitted ? `${text}\n[The earliest ${omitted} lines did not fit; read them with read_chat_record from="${recordTime(chat.from)}".]` : text;
+    }).join('\n\n');
   }
   /** What a life wake sees of its own days: the local time, how recent plans went, what happens to come to mind, and what it can actually do online. */
   private lifeContext() {
@@ -457,11 +482,8 @@ Your development is yours to keep alongside the operator's persona. Habits are y
   }
   /** A message to the digital life in a chat this thought is engaged in: anything in a private chat, or a mention of or reply to it in a group. */
   private addressed(event: EnvironmentEvent): boolean {
-    const self = this.config.snowluma.selfId; const chat = eventChat(event);
-    if (event.kind !== 'message' || event.actorId === self || !chat || !this.engaged.has(chat)) return false;
-    if (chat.startsWith('private:')) return true;
-    const segments = (Array.isArray(event.payload.message) ? event.payload.message : []) as { type?: string; data?: Record<string, unknown> }[];
-    return segments.some(segment => (segment.type === 'at' && Number(segment.data?.qq) === self) || (segment.type === 'reply' && this.store.sentMessage(Number(segment.data?.id))));
+    const chat = eventChat(event);
+    return event.kind === 'message' && chat !== undefined && this.engaged.has(chat) && addressedTo(this.config.snowluma.selfId, event, id => this.store.sentMessage(id));
   }
   /** Stop a thought whose model is deciding without a newer addressed message; a call already answered is left to its tools. */
   private preempt(event: EnvironmentEvent): boolean {

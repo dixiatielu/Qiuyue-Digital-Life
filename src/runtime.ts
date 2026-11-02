@@ -1,7 +1,7 @@
 import type { Config } from './config.js';
 import type { Brain } from './brain.js';
 import { Store, type PendingTiming } from './store.js';
-import { errorText, type Wake } from './domain.js';
+import { errorText, type EnvironmentEvent, type Wake } from './domain.js';
 import { recordTime } from './record.js';
 
 export interface FreeTimeView { now: number; heardAt: number; quietMs: number; lifeWakes: { at: number; freeTime: boolean }[]; plans: Wake[] }
@@ -46,21 +46,23 @@ export class LifeRuntime {
       const now = Date.now();
       if (now >= this.nextRetention) { this.store.retain(this.config.memory.retentionDays); this.nextRetention = now + 3_600_000; }
       this.store.enqueueDue(now);
+      // After due wakes are queued, so the wake a rest was for ends it.
+      const resting = this.rest(now);
       if ((this.config.limits.modelCallsPerDay !== null && this.store.dailyCalls() >= this.config.limits.modelCallsPerDay) || now < this.retryAfter) return;
-      let pending = this.store.pendingTiming(settings.lifeEnabled);
+      let pending = this.store.pendingTiming(settings.lifeEnabled, resting);
       // Events received above (due wakes) are stamped after `now`; time them against a later clock.
       let checkedAt = Date.now();
       // Consolidation is housekeeping: an event that can wake a thought takes attention back at once.
       if (this.consolidating) { if (pending.first !== undefined) this.brain.abort(); return; }
       if (this.work && !this.brain.streaming) return;
       const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
-      if (this.queueReview(idle, now) || (idle && settings.lifeEnabled && this.offerFreeTime(now))) { pending = this.store.pendingTiming(settings.lifeEnabled); checkedAt = Date.now(); }
-      if (!this.ready(pending, checkedAt)) {
+      if (this.queueReview(idle, now) || (idle && settings.lifeEnabled && this.offerFreeTime(now))) { pending = this.store.pendingTiming(settings.lifeEnabled, resting); checkedAt = Date.now(); }
+      if (!this.ready(pending, checkedAt, resting)) {
         if (idle && !this.consolidated && pending.first === undefined) this.consolidate();
         return;
       }
       // A life wake waits for the thought under way to end rather than steering it.
-      const observation = this.store.claim(this.config.limits.batchSize, settings.lifeEnabled && !this.work);
+      const observation = this.store.claim(this.config.limits.batchSize, settings.lifeEnabled && !this.work, resting);
       if (!observation) return;
       this.store.log('observation_dispatched', { batchId: observation.batchId, mode: this.work ? 'steer' : 'run', events: observation.events.length, waitedMs: checkedAt - Math.min(...observation.events.map(event => event.receivedAt ?? checkedAt)) });
       if (this.work) {
@@ -107,11 +109,33 @@ export class LifeRuntime {
     this.store.receive({ key: `free-time:${now}`, kind: 'wake', at: now, text: `Free time: your chats have been quiet for ${heardAt ? `${minutes} minutes` : 'a while'}. Do something of your own or rest, as you like.`, payload: { wakeKind: 'life', freeTime: true } });
     return true;
   }
-  /** A burst starts one thought once the environment goes quiet; ambient events never wake or steer on their own. */
-  private ready({ first, last, ambient }: PendingTiming, now: number) {
+  /** A burst starts one thought once the environment goes quiet; ambient events never wake or steer on their own, and during a rest they wait for something that does. */
+  private ready({ first, last, ambient }: PendingTiming, now: number, resting: boolean) {
     const { debounceMs, maxDelayMs, ambientDelayMs } = this.config.limits;
-    if (first === undefined) return !this.work && ambient !== undefined && now - ambient >= ambientDelayMs;
+    if (first === undefined) return !this.work && !resting && ambient !== undefined && now - ambient >= ambientDelayMs;
     return this.work !== undefined || now - (last ?? first) >= debounceMs || now - first >= maxDelayMs;
+  }
+  /** Whether the digital life rests now. A rest holds back group chat not addressed to it; when the rest ends, all of it comes at once as one note, read as a chat record (ADR-0016). */
+  private rest(now: number) {
+    const resting = this.store.resting(now);
+    const since = this.store.setting<number | null>('restingSince');
+    if (resting && since === null) this.store.setSetting('restingSince', now);
+    if (!resting && since !== null) this.store.transaction(() => { this.setAsideRest(since, now); this.store.setSetting('restingSince', null); });
+    return resting;
+  }
+  private setAsideRest(since: number, now: number) {
+    const held = this.store.restHeld();
+    if (!held.length) return;
+    const groups = new Map<number, EnvironmentEvent[]>();
+    for (const event of held) groups.set(event.groupId!, [...groups.get(event.groupId!) ?? [], event]);
+    const chats = [...groups].map(([groupId, events]) => {
+      const messages = events.filter(event => event.kind === 'message').length;
+      return { conversation: `group:${groupId}`, from: events[0]!.at, messages, notices: events.length - messages };
+    });
+    // One observation by events would be several times the size of the same chat as a record, and would come in batches.
+    this.store.setAside(held.map(event => event.id));
+    const lines = chats.map(chat => `${chat.conversation}: ${chat.messages} messages${chat.notices ? ` and ${chat.notices} notices such as reactions and pokes` : ''} from ${recordTime(chat.from)}`);
+    this.store.receive({ key: `rest:${since}`, kind: 'rest_backlog', at: now, text: `While you rested from ${recordTime(since)} to ${recordTime(now)}, group chat not addressed to you waited: ${lines.join('; ')}. Its record follows.`, payload: { since, until: now, chats } });
   }
   /** Compact an oversized working context once per idle period, so a later observation does not wait for it. */
   private consolidate() {

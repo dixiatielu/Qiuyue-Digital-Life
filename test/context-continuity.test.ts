@@ -22,7 +22,9 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   // Keeping corrections and unknown outcomes, and one person's ways in their impression, added 155 more: 230 more window.
   // Free-time wakes, rest, and saving what was seen online added 127 more: 190 more window.
   // How a thought ends, and that new messages come by themselves, added 98 more: 150 more window.
-  f.cfg.limits.contextTokens = 14480;
+  // What a rest holds back added 91 more: 140 more window.
+  // That runtime_data does not repeat what the context shows, and what a revision reaches, added 120 more: 180 more window.
+  f.cfg.limits.contextTokens = 14800;
   f.cfg.limits.outputReserveTokens = 4096;
   f.cfg.compaction.keepRecentTokens = 1500;
   f.cfg.compaction.summaryMaxTokens = 512;
@@ -45,7 +47,8 @@ test('new runs preserve the exact preceding request prefix and assistant-only co
     f.faux.setResponses([context => {
       assert.deepEqual(context.messages.slice(0, prefix.length), prefix);
       assert.match(JSON.stringify(context.messages), /Judgment only in the previous model reply/);
-      assert.equal(snapshots(context.messages).length, 2);
+      // The first message came in its own observation, so no delta repeats it as a recent event.
+      assert.equal(snapshots(context.messages).length, 1);
       return answer('Continue');
     }]);
     await f.brain.run(f.store.claim(20)!);

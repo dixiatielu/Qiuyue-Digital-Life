@@ -186,3 +186,39 @@ test('images seen in a thought are folded when it ends, so later thoughts and re
     await f.brain.run(f.store.claim(20)!);
   } finally { f.store.close(); }
 });
+
+test('a delta repeats neither a memory already shown nor an action result already in context, and removes a memory only when it no longer holds', async () => {
+  const f = fixture();
+  try {
+    f.store.bindAccount(900);
+    const from = (actorId: number, text: string) => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, groupId: 100, actorId, payload: { message_type: 'group', message: [{ type: 'text', data: { text } }] } })!;
+    const seven = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Teases a lot', importance: 5, scope: 'person:7', sources: [from(7, 'Source').id] }, false);
+    const eight = f.store.writeMemory({ kind: 'impression', title: 'P8', content: 'Quiet', importance: 5, scope: 'person:8', sources: [from(8, 'Source').id] }, false);
+    f.store.acknowledge(f.store.claim(20)!.batchId);
+    const ids = (items: { id: string }[]) => items.map(item => item.id);
+    from(7, 'Hi');
+    f.faux.setResponses([context => {
+      assert.deepEqual(ids(updates(context.messages).at(-1).impressions), [seven.id]);
+      return answer(call('send_group_msg', { group_id: 100, message: 'Hi' }));
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+    from(8, 'Hello');
+    f.faux.setResponses([context => {
+      const delta = updates(context.messages).at(-1);
+      assert.deepEqual(ids(delta.impressions.upsert), [eight.id]); assert.deepEqual(delta.impressions.removedIds, []);
+      assert.equal(delta.actualActions, undefined); assert.equal(delta.recentEvents, undefined);
+      return answer('Quiet');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+    from(7, 'Back again');
+    f.faux.setResponses([context => { assert.equal(updates(context.messages).length, 2); return answer('Quiet'); }]);
+    await f.brain.run(f.store.claim(20)!);
+    const revised = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Teases, kindly', importance: 5, scope: 'person:7', sources: [from(7, 'Kidding').id], supersedes: seven.id }, false);
+    f.faux.setResponses([context => {
+      const delta = updates(context.messages).at(-1);
+      assert.deepEqual(ids(delta.impressions.upsert), [revised.id]); assert.deepEqual(delta.impressions.removedIds, [seven.id]);
+      return answer('Quiet');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+  } finally { f.store.close(); }
+});
