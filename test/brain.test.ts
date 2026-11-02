@@ -379,6 +379,27 @@ test('a reply from the person being answered cancels the call deciding the reply
   } finally { await runtime.stop(); f.store.close(); }
 });
 
+test('a cancelled thought leaves its images in view for the next thought, which folds them when it ends', async () => {
+  const f = fixture(); const calling = deferred();
+  try {
+    say(f.store, 'Look at this'); f.faux.setResponses([answer('Seen')]);
+    await f.brain.run(f.store.claim(10)!);
+    // Loading an image needs a public URL, so place an observed image in the working context directly.
+    f.brain.agent.state.messages.push({ role: 'observation', batchId: 'b:image', eventIds: ['e:image'], lifeOnly: false, timestamp: Date.now(), content: [{ type: 'text', text: 'The following is image 0 from event e:image' }, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }] });
+    say(f.store, 'What do you think?'); f.faux.setResponses([deciding(calling, 'unused')]);
+    const work = f.brain.run(f.store.claim(10)!); await calling.promise;
+    say(f.store, 'Who am I to you?'); const preempting = f.store.claim(10)!;
+    assert.equal(await f.brain.steer(preempting), false); f.store.releaseBatch(preempting.batchId); await work;
+    assert.ok(!f.store.logs().some(log => log.kind === 'context_folded'));
+    f.restart();
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /aGVsbG8=/); return answer(call('send_private_msg', { user_id: 7, message: 'A cute cat' })); }]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.deepEqual(f.sent.map(item => item.args.message), ['A cute cat']);
+    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /aGVsbG8=/);
+    assert.equal((f.store.logs().find(log => log.kind === 'context_folded')?.data as { images?: number }).images, 1);
+  } finally { f.store.close(); }
+});
+
 test('in a group only a mention of or reply to the digital life cancels the call; other messages steer at the boundary', async () => {
   const f = fixture(); const groupMessage = (actorId: number, text: string, segments: unknown[]) => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, groupId: 100, actorId, payload: { message: segments } })!;
   try {

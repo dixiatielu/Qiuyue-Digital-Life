@@ -491,7 +491,8 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       else if (this.agent.state.errorMessage) throw new Error(this.agent.state.errorMessage);
       this.controller.signal.throwIfAborted();
       ensureCurrent(this.store, this.thought);
-      this.fold();
+      // The next thought decides again, so a preempted one leaves what it was looking at for it to fold.
+      if (!this.preempted) this.fold();
       this.store.saveContext(this.checkpoint(), [...this.seen], this.compactions);
       this.seen.clear();
     }
