@@ -48,6 +48,11 @@ export interface Brain {
   abort(): void;
 }
 
+/** What a persisted working context belongs to: when any of it changes, the next start begins a fresh one. */
+export function contextIdentity(config: Config, tools: ToolSet, legacy = false) {
+  return digest({ instructions: systemInstructions(config, legacy), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration) });
+}
+
 export class PiBrain implements Brain {
   readonly agent: Agent;
   thought: ThoughtContext = { generation: 0, sources: new Set(), triggers: new Set(), lifeOnly: true };
@@ -80,8 +85,8 @@ export class PiBrain implements Brain {
     const { model, stream } = backend ?? createModelBackend(config.model);
     this.stream = stream;
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
-    this.identity = digest({ instructions: this.instructions(), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration) });
-    this.legacyIdentity = digest({ instructions: this.instructions(true), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration) });
+    this.identity = contextIdentity(config, tools);
+    this.legacyIdentity = contextIdentity(config, tools, true);
     this.agent = new Agent({
       initialState: { model: config.model.baseUrl ? { ...model, baseUrl: config.model.baseUrl } : model, systemPrompt: this.instructions(), tools: tools.current(), thinkingLevel: config.model.thinkingLevel ?? 'off' },
       streamFn: (target, context, options) => stream(target, context, { ...options, maxTokens: Math.min(config.limits.outputReserveTokens, target.maxTokens) }),

@@ -57,6 +57,7 @@ export class PluginHost {
     }
   }
   private enabled(plugin: LifePlugin) { return plugin.enabled?.() ?? true; }
+  enabledIds(): string[] { return this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.id); }
   /** Bind once per thinking process; the primary process and review share plugin lifetimes, not thought state. */
   bind(runtime: ToolRuntime): (builtins: AgentTool[], following?: AgentTool[]) => AgentTool[] {
     const registered = this.plugins.map(plugin => ({ plugin, tools: plugin.tools(runtime).map(tool => ({ ...tool, execute: async (...args: Parameters<AgentTool['execute']>) => {

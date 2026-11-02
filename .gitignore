@@ -5,6 +5,7 @@ dist/
 !.env.example
 config.json
 persona.md
+system-prompt.md
 data/
 *.sqlite*
 *.sock

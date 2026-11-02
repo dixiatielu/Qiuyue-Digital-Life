@@ -3,11 +3,16 @@ import { dirname, resolve } from 'node:path';
 import { findSnowLumaAction, type SnowLumaPermissions } from './snowluma-catalog.js';
 import { validateModelConfig, type ModelConfig } from './model.js';
 import { pluginIds } from './plugins/index.js';
+import { checkSystemPrompt } from './prompts.js';
 
 export interface Config {
   database: string;
   socket: string;
   persona: string;
+  /** The operator's own system prompt template from systemPromptFile, in place of the built-in one. */
+  systemPrompt?: string;
+  /** The management web page, a process apart from the daemon (ADR-0020); service is the systemd user unit it may restart, or null. */
+  webui: { host: string; port: number; tokenEnv: string; service: string | null };
   /** Optional per-plugin switches; drawing.enabled and web.enabled still govern their capabilities. */
   plugins: Partial<Record<typeof pluginIds[number], boolean>>;
   model: ModelConfig;
@@ -30,10 +35,13 @@ export function loadConfig(path: string): Config {
   const base = dirname(resolve(path));
   if (typeof raw.personaFile !== 'string' || !raw.personaFile.trim()) throw new Error('The personaFile configuration must be a non-empty file path.');
   const persona = readFileSync(resolve(base, raw.personaFile), 'utf8');
+  if (raw.systemPromptFile !== undefined && (typeof raw.systemPromptFile !== 'string' || !raw.systemPromptFile.trim())) throw new Error('systemPromptFile must be a non-empty file path when set.');
   const config: Config = {
     database: resolve(base, raw.database ?? 'data/life.sqlite'),
     socket: resolve(base, raw.socket ?? 'data/control.sock'),
     persona,
+    ...(raw.systemPromptFile === undefined ? {} : { systemPrompt: readFileSync(resolve(base, raw.systemPromptFile), 'utf8') }),
+    webui: webuiSettings(raw),
     plugins: raw.plugins ?? {},
     model: { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...raw.model },
     snowluma: { url: 'ws://127.0.0.1:3001', tokenEnv: 'SNOWLUMA_TOKEN', selfId: 0, groups: [], maxStreamBytes: 32_000_000, ...raw.snowluma, tools: { allow: '*', deny: [], ...raw.snowluma?.tools } },
@@ -47,6 +55,7 @@ export function loadConfig(path: string): Config {
     drawing: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', timeoutMs: 300_000, ...raw.drawing, dir: resolve(base, raw.drawing?.dir ?? 'data/drawings') },
   };
   if (!config.persona.trim()) throw new Error('The persona content in personaFile must not be empty.');
+  if (config.systemPrompt !== undefined) checkSystemPrompt(config.systemPrompt);
   if (raw.plugins !== undefined && (!raw.plugins || typeof raw.plugins !== 'object' || Array.isArray(raw.plugins))) throw new Error('plugins must be an object of plugin IDs and boolean switches.');
   for (const [id, enabled] of Object.entries(config.plugins)) {
     if (!(pluginIds as readonly string[]).includes(id)) throw new Error(`Unknown plugin: ${id}`);
@@ -96,4 +105,14 @@ export function loadConfig(path: string): Config {
     findSnowLumaAction(name);
   }
   return config;
+}
+
+/** The web page's own settings, readable even when the rest of the configuration is not, so the page can still open to repair it. */
+export function webuiSettings(raw: Record<string, any>): Config['webui'] {
+  const webui = { host: '127.0.0.1', port: 8848, tokenEnv: 'WEBUI_TOKEN', service: null, ...raw.webui };
+  if (typeof webui.host !== 'string' || !webui.host.trim()) throw new Error('webui.host must be a listening address such as 127.0.0.1.');
+  if (!Number.isSafeInteger(webui.port) || webui.port <= 0 || webui.port > 65535) throw new Error('webui.port must be a port number.');
+  if (typeof webui.tokenEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(webui.tokenEnv)) throw new Error('Credential settings must be environment variable names.');
+  if (webui.service !== null && (typeof webui.service !== 'string' || !/^[\w@.:-]+$/.test(webui.service))) throw new Error('webui.service must be a systemd user unit name or null.');
+  return webui;
 }

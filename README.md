@@ -80,6 +80,20 @@ Use these commands with `npm start -- <command> --config config.json` after buil
 
 Run `npm start -- help` for all commands, including memory correction and deletion. Restart the daemon after changing core configuration.
 
+### Management page
+
+```bash
+npm start -- webui --config config.json
+```
+
+A web page for the same work: live status and timeline, pause and life switches, configuration, plugins and QQ interface permissions, the persona file and the digital life's own development, the system prompt, model providers, and the credentials in `.env`. It runs apart from the daemon, so it stays up while the daemon restarts and still opens when the configuration no longer loads.
+
+- **Access:** it listens on `webui.host`:`webui.port` (default `127.0.0.1:8848`); from another machine, use an SSH tunnel such as `ssh -L 8848:127.0.0.1:8848 <server>`. Sign in with the value of `WEBUI_TOKEN` (named by `webui.tokenEnv`); without it, each start prints a one-time sign-in link.
+- **Saving:** every save checks the configuration the way the daemon loads it, refuses a file changed elsewhere since the page read it, and keeps earlier versions under `data/webui/history`. Changes take effect when the daemon restarts. The page says whether that restart continues the current working context; changing the persona, system prompt, model, or tool set starts a fresh one.
+- **System prompt:** saving it writes `system-prompt.md` beside `config.json` (outside git) and sets `systemPromptFile`; without that setting the built-in prompt is used. The page warns when the built-in prompt has changed since your file was saved.
+- **Restarts:** set `webui.service` to the daemon's systemd user unit, such as `qiuyue-digital-life.service`, to start, stop, and restart it from the page. A restart can wait until no thought or memory review is under way.
+- **Providers:** the page keeps provider endpoints in `data/webui/providers.json`; choosing one copies its address, API, and key variable into `model`, `embedding`, or `drawing`. The daemon reads only `config.json`.
+
 ## How it works
 
 ```mermaid

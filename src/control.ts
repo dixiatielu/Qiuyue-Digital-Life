@@ -2,7 +2,8 @@ import { ui } from './ui-language.js';
 import { createServer, createConnection, type Server, type Socket } from 'node:net';
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Store } from './store.js';
+import { Store } from './store.js';
+import type { Config } from './config.js';
 import type { LifeRuntime } from './runtime.js';
 import { errorText } from './domain.js';
 import type { DisplayCursor, Monitor } from './monitor.js';
@@ -80,6 +81,15 @@ export async function serveControl(path: string, handler: (request: ControlReque
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { chmodSync(path, 0o600); resolve(); }); });
   return Object.assign(server, { closeClients() { for (const client of clients) client.destroy(); } });
+}
+
+/** Ask the daemon, or with none running, answer from the database under the daemon lease as the daemon would. */
+export async function requestControl(config: Config, request: ControlRequest): Promise<unknown> {
+  try { return await callControl(config.socket, request); }
+  catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  const store = new Store(config.database, config.life.enabled);
+  try { const release = store.acquireDaemon(); try { store.bindAccount(config.snowluma.selfId); return handleControl(store, request); } finally { release(); } }
+  finally { store.close(); }
 }
 
 export function callControl(path: string, request: ControlRequest): Promise<unknown> {

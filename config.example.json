@@ -93,5 +93,11 @@
     "retries": 1,
     "idleRatio": 0.85,
     "idleAfterMs": 30000
+  },
+  "webui": {
+    "host": "127.0.0.1",
+    "port": 8848,
+    "tokenEnv": "WEBUI_TOKEN",
+    "service": null
   }
 }

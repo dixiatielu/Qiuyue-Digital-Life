@@ -80,6 +80,20 @@ npm start -- tui --config config.json
 
 执行 `npm start -- help` 可查看全部命令，包括记忆修正和删除。修改核心配置后需重启常驻进程。
 
+### 管理网页
+
+```bash
+npm start -- webui --config config.json
+```
+
+用网页完成同样的管理：实时状态和时间线、暂停与自主生活开关、配置、插件与 QQ 接口权限、人格文件与数字生命自己的发展、系统提示词、模型供应商，以及 `.env` 中的凭据。它独立于常驻进程运行，常驻进程重启时网页不断开；配置无法加载时也能打开网页修复。
+
+- **访问：** 监听 `webui.host`:`webui.port`（默认 `127.0.0.1:8848`）；从其他机器访问请用 SSH 隧道，例如 `ssh -L 8848:127.0.0.1:8848 <服务器>`。用 `WEBUI_TOKEN`（变量名由 `webui.tokenEnv` 指定）的值登录；未设置时每次启动会打印一次性登录链接。
+- **保存：** 每次保存都按常驻进程的方式校验配置；如果文件在网页读取后被其他地方改过，会拒绝保存；历史版本保存在 `data/webui/history`。修改在常驻进程重启后生效。网页会提示重启后是否延续当前的工作上下文：修改人格、系统提示词、模型或工具集会让工作上下文重新开始。
+- **系统提示词：** 保存时写入 `config.json` 旁的 `system-prompt.md`（不在 git 中），并设置 `systemPromptFile`；不设置时使用内置提示词。内置提示词在你保存之后有更新时，网页会提示。
+- **重启：** 把 `webui.service` 设为常驻进程的 systemd 用户服务名（例如 `qiuyue-digital-life.service`），就能在网页上启动、停止和重启它。重启可以等到没有思考和记忆整理在进行时再执行。
+- **供应商：** 网页把供应商端点保存在 `data/webui/providers.json`；选用某个供应商时，会把它的地址、API 和密钥变量复制到 `model`、`embedding` 或 `drawing`。常驻进程只读 `config.json`。
+
 ## 工作原理
 
 ```mermaid
