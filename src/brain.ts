@@ -41,7 +41,6 @@ function summaryBody(message: AgentMessage) {
   const end = body.lastIndexOf('\nOriginal record IDs: ');
   return end < 0 ? body : body.slice(0, end);
 }
-const reviewing = (observation: Observation) => observation.events.some(event => event.kind === 'memory_maintenance');
 /** Local date, weekday, and time; models often misjudge the weekday when left to work it out from an ISO timestamp. */
 function localParts(at: number) {
   return Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at).map(part => [part.type, part.value]));
@@ -72,6 +71,7 @@ export interface Brain {
   readonly streaming: boolean;
   readonly thought: ThoughtContext;
   run(observation: Observation): Promise<void>;
+  review(observation: Observation): Promise<void>;
   steer(observation: Observation): Promise<boolean>;
   consolidate(): Promise<void>;
   abort(): void;
@@ -368,8 +368,8 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, this.config.snowluma.selfId, observation.events, faces, preview)}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
-    // Saved stickers that fit what was said come with it, each once a thought, so sending one needs no call to look them up (ADR-0009).
-    const stickers = this.recall?.stickerSuggestions(observation.events, this.stickersShown) ?? [];
+    // Saved stickers that fit what was said come with it, each once a thought, so sending one needs no call to look them up (ADR-0009). A review sends nothing.
+    const stickers = this.thought.reviewing ? [] : this.recall?.stickerSuggestions(observation.events, this.stickersShown) ?? [];
     for (const sticker of stickers) this.stickersShown.add(sticker.emojiId);
     if (stickers.length) content.push({ type: 'text', text: `Saved stickers of yours whose descriptions fit what was just said, in case you want to send one with send_custom_face; sending none is fine too:\n${JSON.stringify(stickers.map(({ emojiId, desc }) => ({ emoji_id: emojiId, desc })))}` });
     let count = 0;
@@ -477,7 +477,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     this.engaged = new Set(observation.events.filter(event => event.actorId !== self && !isAmbient(event.kind, event.actorId, self)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
-    this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true, reviewing: reviewing(observation) };
+    this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true };
     this.display(monitor => monitor.startRun(this.runId, observation));
     try {
       const message = await this.message(observation);
@@ -495,6 +495,29 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     }
     catch (error) { this.revert(rollback, generation); throw error; }
     finally { this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; this.display(monitor => monitor.endRun()); }
+  }
+  /** A memory review runs apart from the conversations, in a working context of its own that starts from runtime state and ends with it; nothing steers into it (ADR-0012). */
+  async review(observation: Observation) {
+    const generation = this.store.settings().generation;
+    this.resetContext(); this.compactions = [];
+    this.seen.clear(); this.facesSeen.clear(); this.stickersShown.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.engaged = new Set(); this.stale.clear(); this.preempted = false;
+    this.controller = new AbortController();
+    this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: false, reviewing: true };
+    this.store.log('review_started', { runId: this.runId, eventIds: observation.events.map(event => event.id) });
+    try {
+      const message = await this.message(observation);
+      this.controller.signal.throwIfAborted();
+      await this.agent.prompt(message);
+      if (this.agent.state.errorMessage) throw new Error(this.agent.state.errorMessage);
+      this.controller.signal.throwIfAborted();
+      this.store.log('review_finished', { runId: this.runId, calls: this.turns });
+    }
+    finally {
+      // Its exchanges were archived turn by turn; only the context itself is let go.
+      for (const compacted of this.compactions) this.store.log('context_compacted', compacted);
+      this.agent.clearAllQueues(); this.phase = 'idle'; this.resetContext();
+    }
   }
   /** A message to the digital life in a chat this thought is engaged in: anything in a private chat, or a mention of or reply to it in a group. */
   private addressed(event: EnvironmentEvent): boolean {
@@ -559,7 +582,6 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     // The run may have ended, or another begun, while images were downloading.
     if (!this.streaming || this.runId !== runId) return false;
     this.observations.push(...observation.events);
-    this.thought.reviewing ||= reviewing(observation);
     this.display(monitor => monitor.observation(observation));
     this.agent.steer(message); return true;
   }

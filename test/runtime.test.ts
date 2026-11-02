@@ -143,7 +143,7 @@ test('a quiet stretch, its length drawn afresh each time, offers free time when 
     run: async observation => { runs.push(observation.events.map(item => item.payload)); store.acknowledge(observation.batchId); },
     steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
-  const runtime = new LifeRuntime(cfg, store, brain, () => draws.shift() ?? 0);
+  const runtime = new LifeRuntime(cfg, store, brain, undefined, () => draws.shift() ?? 0);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); };
   const offered = () => runs.filter(events => events.some(payload => payload.freeTime)).length;
   const minute = 60_000;
@@ -177,7 +177,7 @@ test('rest marked on a planned wake holds free time back until that wake comes o
     run: async observation => { runs.push(observation.events.map(item => item.payload)); store.acknowledge(observation.batchId); },
     steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
-  const runtime = new LifeRuntime(cfg, store, brain, () => 0);
+  const runtime = new LifeRuntime(cfg, store, brain, undefined, () => 0);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); };
   const offered = () => runs.filter(events => events.some(payload => payload.freeTime)).length;
   const hour = 3_600_000;

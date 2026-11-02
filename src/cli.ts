@@ -7,7 +7,7 @@ import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
 import { SnowLumaAdapter } from './snowluma.js';
-import { createTools } from './tools.js';
+import { createTools, forReview } from './tools.js';
 import { PiBrain } from './brain.js';
 import { LifeRuntime } from './runtime.js';
 import { callControl, handleControl, serveControl } from './control.js';
@@ -73,6 +73,7 @@ async function main() {
   const monitor = new Monitor(config, store);
   let runtime: LifeRuntime | undefined;
   let brain: PiBrain;
+  let reviewer: PiBrain;
   const social = new SnowLumaAdapter(config.snowluma, store, () => { void runtime?.tick(); });
   const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding)) : undefined;
   const drawings = config.drawing.enabled ? new Drawings(store, new ImageClient(config.drawing), config.drawing.dir, config.memory.retentionDays) : undefined;
@@ -80,7 +81,9 @@ async function main() {
   try {
     store.bindAccount(config.snowluma.selfId);
     brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought, recall, drawings), undefined, monitor, recall);
-    runtime = new LifeRuntime(config, store, brain);
+    // Review runs beside the thoughts with tools of its own; the live view follows the thoughts, and review shows there through its trace (ADR-0012).
+    reviewer = new PiBrain(config, store, forReview(createTools(config, store, social, () => reviewer.thought, recall, drawings)), undefined, undefined, recall);
+    runtime = new LifeRuntime(config, store, brain, reviewer);
     server = await serveControl(config.socket, request => handleControl(store, request, runtime), monitor);
     // Recovery must precede live collection; perception keeps running even if paused.
     store.recover(); drawings?.recover();

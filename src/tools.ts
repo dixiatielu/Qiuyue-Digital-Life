@@ -15,7 +15,7 @@ import { faceCaption, FaceCatalog } from './faces.js';
 import type { SemanticRecall } from './recall.js';
 import type { Drawings } from './drawing.js';
 
-/** reviewing: a memory_maintenance event is part of this thought. */
+/** reviewing: this thought is a memory review, which runs apart from the conversations (ADR-0012). */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean }
 export function ensureCurrent(store: Store, context: ThoughtContext, signal?: AbortSignal) {
   signal?.throwIfAborted();
@@ -72,6 +72,11 @@ function jpegImages(value: unknown): unknown {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jpegImages(item)]));
 }
 export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog; readonly drawings?: Drawings }
+/** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
+const reviewTools = new Set(['read_chat_record', 'read_event', 'view_event_image', 'view_face', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity']);
+export function forReview(tools: ToolSet): ToolSet {
+  return { faces: tools.faces, drawings: tools.drawings, current: () => tools.current().filter(tool => reviewTools.has(tool.name)) };
+}
 
 export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall, drawings?: Drawings): ToolSet {
   const web = new WebReader(config.web);
@@ -159,7 +164,10 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       // What it wrote is in the call; what the revision reached is all the result adds.
       const reach = args.supersedes ? store.revisionReach(args.supersedes) : undefined;
       const memory = store.writeMemory(args, config.life.allowFiction, config.development);
-      return { id: memory.id, kind: memory.kind, ...(memory.scope ? { scope: memory.scope } : {}), ...(memory.supersedes ? { supersedes: memory.supersedes } : {}), ...(memory.fictional ? { fictional: true } : {}), ...(reach?.withdrawn.length ? { withdrawn: reach.withdrawn } : {}), ...(reach?.cites.length ? { cites: reach.cites } : {}) };
+      // A review cannot revise what is under way, so the conversations hear of what cites the old version.
+      const handedOn = context().reviewing && reach?.cites.length;
+      if (handedOn) store.noticeRevision(memory, reach);
+      return { id: memory.id, kind: memory.kind, ...(memory.scope ? { scope: memory.scope } : {}), ...(memory.supersedes ? { supersedes: memory.supersedes } : {}), ...(memory.fictional ? { fictional: true } : {}), ...(reach?.withdrawn.length ? { withdrawn: reach.withdrawn } : {}), ...(reach?.cites.length ? { cites: reach.cites } : {}), ...(handedOn ? { citesHandedOn: 'Your conversations hear of these and revise or finish them; a review cannot.' } : {}) };
     }),
     tool('retire_memory', 'Retire a habit, practice, or impression that no longer holds. It leaves everyday use; its history remains.', Type.Object({ id: string('Memory ID', 100) }), args => store.retireMemory(args.id)),
     {
@@ -176,8 +184,8 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         const mark = store.reviewMark(args.conversation);
         const from = args.from ? Date.parse(args.from) : mark;
         const page = record.page(from, limit);
-        // Reading on from the review point moves it. A jump ahead skips what lies between, which only a review means to do.
-        if (page.through !== undefined && (from <= mark || context().reviewing)) store.markReviewed(args.conversation, page.through);
+        // Only a review moves the review point, a jump ahead included, since skipping is its choice; a conversation looking back would make it skip lines unread (ADR-0012).
+        if (page.through !== undefined && context().reviewing) store.markReviewed(args.conversation, page.through);
         // Reading on past the end would only wait for what comes anyway, which is how a conversation falls into polling.
         const caughtUp = page.next === undefined && !context().reviewing;
         return { content: [{ type: 'text', text: caughtUp ? `${page.text}\nNewer messages come to you by themselves; you need not read again to wait for them. If you just want to read along, as people lurk (潜水) in a group, reply empty.` : page.text }], details: {} };
@@ -187,6 +195,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     tool('schedule_activity', 'Schedule a life activity or an accepted social commitment.', Type.Object({ title: string('Activity and associated people or groups', 1000), kind: Type.Union([Type.Literal('life'), Type.Literal('commitment')]), at: string('ISO time with timezone, for example 2026-10-28T09:00:00+08:00', 100), rest: Type.Optional(Type.Boolean({ description: 'You rest until this activity, as when going to sleep or taking a nap: no free-time wake comes before it, and group chat reaches you only where someone mentions, replies to, or pokes you' })) }), args => {
       const dueAt = Date.parse(args.at);
       if (!/(Z|[+-]\d{2}:\d{2})$/.test(args.at)) throw new Error('The time must include a timezone.');
+      if (context().reviewing && (args.kind !== 'commitment' || args.rest)) throw new Error('A review schedules only commitments it finds still owed; life plans and rest belong to your conversations.');
       if (args.kind === 'life' && !store.settings().lifeEnabled) throw new Error('Life mode is disabled; life activities cannot be started.');
       if (dueAt < Date.now() + config.life.minWakeMs) throw new Error('The wake interval is too short; adjust the plan.');
       return store.schedule(args.title, args.kind, dueAt, [...context().sources], args.rest);

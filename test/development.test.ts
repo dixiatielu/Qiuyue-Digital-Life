@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fauxAssistantMessage as answer, fauxToolCall as call, type Message } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentTools, type Message } from '@earendil-works/pi-ai';
 import { Store, eventRef } from '../src/store.js';
 import { ChatRecord } from '../src/record.js';
 import { handleControl } from '../src/control.js';
 import { LifeRuntime } from '../src/runtime.js';
-import { event, fixture } from './helpers.js';
+import { deferred, event, fixture } from './helpers.js';
 
 const limits = { scopeChars: 60, personChars: 40 };
 function say(store: Store, actorId: number, text: string, options: { groupId?: number; messageId?: number; name?: string; at?: number; segments?: unknown[] } = {}) {
@@ -132,7 +132,7 @@ test('the chat record names faces and reactions, shows what its own stickers are
   } finally { f.store.close(); }
 });
 
-test('reading on from the review point moves it forward, while lookups and jumps ahead do not', async () => {
+test('only a review moves the review point, by reading on or jumping ahead, while a conversation looking back leaves it', async () => {
   const f = fixture();
   try {
     f.store.bindAccount(900);
@@ -153,12 +153,21 @@ test('reading on from the review point moves it forward, while lookups and jumps
     ]);
     event(f.store, 'A new message', 100);
     await f.brain.run(f.store.claim(20)!);
-    assert.equal(f.store.reviewMark('group:100'), t + 1001);
-    assert.deepEqual(f.store.reviewBacklog(900).find(item => item.conversation === 'group:100')?.messages, 4);
-    // In a review, a jump ahead is a deliberate skip.
-    f.store.receive({ key: 'review', kind: 'memory_maintenance', at: Date.now(), text: 'Review', payload: {} });
-    f.faux.setResponses([answer(call('read_chat_record', { conversation: 'group:100', from: new Date(t + 3000).toISOString(), limit: 1 })), answer('Skipped ahead')]);
-    await f.brain.run(f.store.claim(20)!);
+    assert.ok(f.store.reviewMark('group:100') < t);
+    assert.deepEqual(f.store.reviewBacklog(900).find(item => item.conversation === 'group:100')?.messages, 6);
+    // A review reads on from the point, and its jump ahead is a deliberate skip.
+    const review = f.store.receive({ key: 'review', kind: 'memory_maintenance', at: Date.now(), text: 'Review', payload: {} }, true)!;
+    f.reviewFaux.setResponses([
+      answer(call('read_chat_record', { conversation: 'group:100', limit: 2 })),
+      context => {
+        assert.match(JSON.stringify(context.messages.at(-1)), /line 0.*line 1/);
+        assert.equal(f.store.reviewMark('group:100'), t + 1001);
+        assert.deepEqual(f.store.reviewBacklog(900).find(item => item.conversation === 'group:100')?.messages, 4);
+        return answer(call('read_chat_record', { conversation: 'group:100', from: new Date(t + 3000).toISOString(), limit: 1 }));
+      },
+      answer('Skipped ahead'),
+    ]);
+    await f.reviewer.review({ batchId: 'review', events: [review] });
     assert.equal(f.store.reviewMark('group:100'), t + 3001);
   } finally { f.store.close(); }
 });
@@ -232,19 +241,19 @@ test('a review sees the development of the chats it lists and of the people who 
     const speaker = write('impression', 'person:7', 'Likes teasing');
     const friend = write('impression', 'person:8', 'Chats privately');
     write('impression', 'person:9', 'Did not speak');
-    f.store.receive({ key: 'review', kind: 'memory_maintenance', at: Date.now(), text: 'Review', payload: { backlog: f.store.reviewBacklog(900) } });
-    f.faux.setResponses([context => {
+    const review = f.store.receive({ key: 'review', kind: 'memory_maintenance', at: Date.now(), text: 'Review', payload: { backlog: f.store.reviewBacklog(900) } }, true)!;
+    f.reviewFaux.setResponses([context => {
       const snapshot = updates(context.messages as Message[]).at(-1);
       assert.deepEqual(snapshot.practices.map((item: { id: string }) => item.id), [rule.id]);
       assert.deepEqual(snapshot.impressions.map((item: { id: string }) => item.id), [speaker.id, friend.id]);
       return answer('Reviewed');
     }]);
-    await f.brain.run(f.store.claim(20)!);
+    await f.reviewer.review({ batchId: 'review', events: [review] });
   } finally { f.store.close(); }
 });
 
 test('review waits for a quiet moment and lists the chats it has not read', async () => {
-  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
   try {
     f.store.bindAccount(900);
     f.cfg.memory.reflectionEveryEvents = 1; f.cfg.compaction.idleAfterMs = 60_000;
@@ -254,18 +263,107 @@ test('review waits for a quiet moment and lists the chats it has not read', asyn
     runtime.start(); await runtime.idle();
     // Just settled: not yet quiet, and the backlog is under three times the threshold.
     await runtime.tick(); await runtime.idle();
-    assert.equal(f.store.pending(), 0);
+    assert.equal(f.store.pending(), 0); assert.equal(f.reviewFaux.state.callCount, 0);
     f.cfg.compaction.idleAfterMs = 0;
-    f.faux.setResponses([context => {
+    f.reviewFaux.setResponses([context => {
       const review = JSON.stringify(context.messages.at(-1));
-      assert.match(review, /memory_maintenance.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record.*person=900/);
+      assert.match(review, /memory_maintenance.*apart from your conversations.*schedule it as a commitment.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record.*person=900/);
       // What happened comes before form: corrections, unknown outcomes, and one person's ways kept in their impression.
       assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*say it is unknown.*into your impression of them/);
       return answer('Reviewed');
     }]);
     await runtime.tick(); await runtime.idle();
-    assert.equal(f.faux.state.callCount, 2);
+    assert.equal(f.faux.state.callCount, 1); assert.equal(f.reviewFaux.state.callCount, 1);
   } finally { await runtime.stop(); f.store.close(); }
+});
+
+test('a review runs beside a conversation: new messages reach the thought, never the review, which sends nothing and keeps no context', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
+  const deciding = deferred(); const release = deferred();
+  try {
+    f.store.bindAccount(900);
+    f.cfg.memory.reflectionEveryEvents = 1; f.cfg.compaction.idleAfterMs = 0;
+    say(f.store, 7, 'Earlier chat'); f.store.acknowledge(f.store.claim(1)!.batchId);
+    f.reviewFaux.setResponses([
+      async context => {
+        deciding.resolve();
+        const tools = getCurrentTools(context.messages).map(tool => tool.name);
+        assert.ok(['read_chat_record', 'remember', 'retire_memory', 'schedule_activity'].every(name => tools.includes(name)));
+        assert.ok(!tools.some(name => ['send_group_msg', 'send_private_msg', 'send_custom_face', 'set_activity', 'finish_activity', 'update_pursuit'].includes(name)));
+        await release.promise;
+        return answer(call('inspect_actions', {}));
+      },
+      context => { assert.doesNotMatch(JSON.stringify(context.messages), /Are you there/); return answer('Reviewed'); },
+    ]);
+    runtime.start(); await deciding.promise;
+    // The conversation goes on while the review is still deciding.
+    say(f.store, 7, 'Are you there?');
+    const exchanges = (messages: unknown[]) => JSON.stringify(messages.filter(message => (message as { role: string }).role !== 'system'));
+    f.faux.setResponses([context => {
+      release.resolve();
+      assert.doesNotMatch(exchanges(context.messages), /memory_maintenance/);
+      return answer(call('send_group_msg', { group_id: 100, message: 'Here' }));
+    }]);
+    await runtime.tick(); await runtime.idle();
+    assert.deepEqual(f.sent.map(item => item.args.message), ['Here']);
+    assert.equal(f.faux.state.callCount, 1); assert.equal(f.reviewFaux.state.callCount, 2);
+    assert.doesNotMatch(exchanges(f.brain.agent.state.messages), /memory_maintenance/);
+    assert.equal(f.reviewer.agent.state.messages.length, 1);
+  } finally { release.resolve(); await runtime.stop(); f.store.close(); }
+});
+
+test('a review schedules only commitments, and hands on a revision that something under way cites', async () => {
+  const f = fixture();
+  try {
+    f.store.bindAccount(900);
+    const said = say(f.store, 7, 'I moved to Wuhan', { groupId: undefined });
+    f.store.acknowledge(f.store.claim(20)!.batchId);
+    const where = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Lives in Beijing', importance: 5, scope: 'person:7', sources: [said.id] }, false);
+    const style = f.store.writeMemory({ kind: 'habit', title: 'Short replies', content: 'Short replies', importance: 5, sources: [said.id] }, false);
+    f.store.schedule('Visit P7 in Beijing', 'commitment', Date.now() + 86_400_000, [where.id]);
+    const at = new Date(Date.now() + 3_600_000).toISOString();
+    const review = f.store.receive({ key: 'review', kind: 'memory_maintenance', at: Date.now(), text: 'Review', payload: {} }, true)!;
+    const results = (messages: Message[]) => messages.filter(message => message.role === 'toolResult');
+    f.reviewFaux.setResponses([
+      answer([call('schedule_activity', { title: 'Read in the evening', kind: 'life', at }), call('schedule_activity', { title: 'Nap', kind: 'commitment', at, rest: true }), call('schedule_activity', { title: 'Send P7 the photo I promised', kind: 'commitment', at })]),
+      context => {
+        const [life, rest, owed] = results(context.messages as Message[]);
+        assert.match(JSON.stringify(life), /schedules only commitments/); assert.match(JSON.stringify(rest), /schedules only commitments/);
+        assert.equal(owed?.role === 'toolResult' && owed.isError, false);
+        return answer([
+          call('remember', { kind: 'impression', title: 'P7', content: 'Lives in Wuhan now', importance: 6, scope: 'person:7', sources: [said.id], supersedes: where.id }),
+          call('remember', { kind: 'habit', title: 'Short replies', content: 'Short replies, longer in private', importance: 5, sources: [said.id], supersedes: style.id }),
+        ]);
+      },
+      context => {
+        const [impression, habit] = results(context.messages as Message[]).slice(-2);
+        assert.match(JSON.stringify(impression), /cites.*Visit P7 in Beijing.*citesHandedOn/);
+        assert.doesNotMatch(JSON.stringify(habit), /citesHandedOn/);
+        return answer('Reviewed');
+      },
+    ]);
+    await f.reviewer.review({ batchId: 'review', events: [review] });
+    assert.deepEqual(f.store.wakes().map(wake => wake.title).sort(), ['Send P7 the photo I promised', 'Visit P7 in Beijing']);
+    // Only the revision a plan cites comes to the conversations, as an event that starts a thought.
+    const handed = f.store.claim(20)!.events;
+    assert.deepEqual(handed.map(item => item.kind), ['memory_revision']);
+    assert.match(handed[0]!.text, /Visit P7 in Beijing/);
+  } finally { f.store.close(); }
+});
+
+test('revising or citing a version that was already replaced names the version that holds now', () => {
+  const store = new Store(':memory:'); store.bindAccount(900);
+  try {
+    const said = say(store, 7, 'Call me Qi');
+    const impression = (content: string, supersedes?: string) => store.writeMemory({ kind: 'impression', title: 'P7', content, importance: 5, scope: 'person:7', sources: [said.id], supersedes }, false);
+    const first = impression('Goes by P7');
+    const second = impression('Goes by Qi', first.id);
+    // A review that read the first version revises it after a conversation already has.
+    assert.throws(() => impression('Goes by P7, likes jokes', first.id), new RegExp(`already been revised\\. Its current version is ${second.id} \\(P7\\): Goes by Qi Revise that version instead, keeping what it added`));
+    assert.throws(() => store.writeMemory({ kind: 'experience', title: 'Nickname', content: 'P7 has a nickname', importance: 4, sources: [first.id] }, false), new RegExp(`read its current version first: ${first.id}\\. Its current version is ${second.id}`));
+    store.retireMemory(second.id);
+    assert.throws(() => impression('Goes by Qi still', second.id), /^Error: The memory to revise does not exist or has already been revised\.$/);
+  } finally { store.close(); }
 });
 
 test('her own revision reports what it reached in its result and starts no thought; an operator correction comes to her as an event', async () => {

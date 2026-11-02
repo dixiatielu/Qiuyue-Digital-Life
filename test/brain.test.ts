@@ -328,16 +328,20 @@ test('pursuits carry across days and fresh contexts, stay fictional once fiction
   } finally { f.store.close(); }
 });
 
-test('memory maintenance continues with life mode disabled and stays in the main brain', async () => {
-  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
+test('memory maintenance continues with life mode disabled and runs apart from the main brain', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
   try {
     f.cfg.memory.reflectionEveryEvents = 1;
     const source = event(f.store, 'A group member mentioned reading an interesting book today'); f.store.acknowledge(f.store.claim(1)!.batchId);
-    f.faux.setResponses([
+    f.reviewFaux.setResponses([
       context => { assert.match(JSON.stringify(context), /memory_maintenance/); return answer(call('remember', { kind: 'experience', title: 'Reading discussion', content: 'Heard a group member share thoughts on reading', importance: 6, sources: [source.id] })); }, answer('Consolidation completed'),
     ]);
     runtime.start(); await runtime.idle();
     assert.equal(f.store.settings().lifeEnabled, false); assert.equal(f.store.search('reading').length, 1); assert.equal(f.sent.length, 0);
+    // No thought took it up, and the review left its context behind when it ended.
+    assert.equal(f.faux.state.callCount, 0); assert.equal(f.store.pending(), 0);
+    assert.equal(f.reviewer.agent.state.messages.length, 1);
+    assert.ok(f.store.logs().some(log => log.kind === 'review_finished'));
   } finally { await runtime.stop(); f.store.close(); }
 });
 

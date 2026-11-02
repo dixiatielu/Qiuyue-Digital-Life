@@ -203,7 +203,8 @@ export class Store {
   }
   private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, groupId: row.group_id ?? undefined, actorId: row.actor_id ?? undefined, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined }; }
   event(eventId: string): EnvironmentEvent | undefined { const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(eventId); return row ? this.eventRow(row) : undefined; }
-  recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
+  /** A review's prompt is perceived by the review alone, which has it as its observation (ADR-0012). */
+  recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' AND kind!='memory_maintenance' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
   claim(limit: number, allowLife = true, resting = false): { batchId: string; events: EnvironmentEvent[] } | undefined {
     return this.transaction(() => {
       const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, resting ? 1 : 0, limit);
@@ -261,6 +262,12 @@ export class Store {
     if (!input.content.trim() || input.content.length > 12_000 || input.title.length > 200) throw new Error('Memory content is empty or too long.');
     if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
     if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
+    // A review and a conversation may revise the same version; the later one merges into what the first wrote (ADR-0012).
+    const previous = input.supersedes ? this.memory(input.supersedes) : undefined;
+    if (input.supersedes && (!previous || !previous.active)) {
+      const current = previous && this.currentVersion(previous.id);
+      throw new Error(current ? `The memory to revise has already been revised. ${current} Revise that version instead, keeping what it added.` : 'The memory to revise does not exist or has already been revised.');
+    }
     const sources = [...new Set(input.sources.map(source => this.resolve(source)))];
     const scope = isDevelopment(input.kind) ? input.scope ?? (input.kind === 'impression' ? undefined : 'global') : undefined;
     let subjects = input.subjects ?? [];
@@ -287,14 +294,12 @@ export class Store {
     for (const source of sources) {
       const event = this.event(source); const memory = this.memory(source);
       if (!event && !memory) throw new Error(`Source does not exist or has been deleted: ${source}`);
-      if (memory && !memory.active) throw new Error(`Source has been revised; read its current version first: ${source}`);
+      if (memory && !memory.active) { const current = this.currentVersion(source); throw new Error(`Source has been revised; read its current version first: ${source}${current ? `. ${current}` : ''}`); }
       if (event?.groupId) groups.add(event.groupId);
       for (const group of memory?.groups ?? []) groups.add(group);
       fictional ||= memory?.fictional ?? false;
     }
     if (fictional && !allowFiction) throw new Error('Fictional daily life is disabled; fictional experiences and derived content cannot be saved.');
-    const previous = input.supersedes ? this.memory(input.supersedes) : undefined;
-    if (input.supersedes && (!previous || !previous.active)) throw new Error('The memory to revise does not exist or has already been revised.');
     for (const group of previous?.groups ?? []) groups.add(group);
     fictional ||= previous?.fictional ?? false;
     if (fictional && !allowFiction) throw new Error('Fictional daily life and revisions must retain their fictional sources.');
@@ -311,6 +316,13 @@ export class Store {
       this.log('memory_written', { id: memoryId, kind: input.kind, supersedes: input.supersedes, ...(scope ? { scope } : {}) });
     });
     return this.memory(memoryId)!;
+  }
+  /** The version that replaced a revised memory and still holds, described for whoever would revise or cite the old one. */
+  private currentVersion(memoryId: string): string | undefined {
+    const row = this.db.prepare('WITH RECURSIVE later(id) AS (SELECT ? UNION SELECT memories.id FROM memories JOIN later ON memories.supersedes=later.id) SELECT * FROM memories WHERE active=1 AND id IN (SELECT id FROM later) ORDER BY created_at DESC,rowid DESC LIMIT 1').get(memoryId);
+    if (!row) return;
+    const current = this.memoryRow(row);
+    return `Its current version is ${current.id} (${current.title}): ${current.content}`;
   }
   /** Which of these memories are current. */
   activeMemories(memoryIds: string[]): Set<string> { return new Set(this.db.prepare('SELECT id FROM memories WHERE active=1 AND id IN (SELECT value FROM json_each(?))').all(json(memoryIds)).map(row => String(row.id))); }

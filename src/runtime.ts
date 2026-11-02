@@ -27,7 +27,10 @@ export class LifeRuntime {
   private nextFreeTime = 0;
   /** The quiet stretch being waited out: since when, and how long this one must last. */
   private quiet = { heardAt: -1, needMs: 0 };
-  constructor(readonly config: Config, readonly store: Store, readonly brain: Brain, private random = Math.random) {}
+  /** The memory review under way, which runs beside the thoughts rather than taking their turn (ADR-0012). */
+  private reviewing?: Promise<void>;
+  /** Without a reviewer, no review runs. */
+  constructor(readonly config: Config, readonly store: Store, readonly brain: Brain, readonly reviewer?: Brain, private random = Math.random) {}
   start() {
     if (this.started) throw new Error('The runtime has already started.');
     this.started = true;
@@ -42,6 +45,7 @@ export class LifeRuntime {
     try {
       const settings = this.store.settings();
       if (settings.paused || (this.work && settings.generation !== this.brain.thought.generation)) this.brain.abort();
+      if (settings.paused || (this.reviewing && settings.generation !== this.reviewer!.thought.generation)) this.reviewer?.abort();
       if (settings.paused) return;
       const now = Date.now();
       if (now >= this.nextRetention) { this.store.retain(this.config.memory.retentionDays); this.nextRetention = now + 3_600_000; }
@@ -52,11 +56,12 @@ export class LifeRuntime {
       let pending = this.store.pendingTiming(settings.lifeEnabled, resting);
       // Events received above (due wakes) are stamped after `now`; time them against a later clock.
       let checkedAt = Date.now();
+      const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
+      this.startReview(idle, now);
       // Consolidation is housekeeping: an event that can wake a thought takes attention back at once.
       if (this.consolidating) { if (pending.first !== undefined) this.brain.abort(); return; }
       if (this.work && !this.brain.streaming) return;
-      const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
-      if (this.queueReview(idle, now) || (idle && settings.lifeEnabled && this.offerFreeTime(now))) { pending = this.store.pendingTiming(settings.lifeEnabled, resting); checkedAt = Date.now(); }
+      if (idle && settings.lifeEnabled && this.offerFreeTime(now)) { pending = this.store.pendingTiming(settings.lifeEnabled, resting); checkedAt = Date.now(); }
       if (!this.ready(pending, checkedAt, resting)) {
         if (idle && !this.consolidated && pending.first === undefined) this.consolidate();
         return;
@@ -83,18 +88,27 @@ export class LifeRuntime {
     } catch (error) { this.store.log('runtime_error', { message: errorText(error) }); }
     finally { this.ticking = false; }
   }
-  /** Review waits for a quiet moment, unless the backlog has grown well past its threshold. */
-  private queueReview(idle: boolean, now: number) {
+  /** Review waits for a quiet moment, unless the backlog has grown well past its threshold. One runs at a time, apart from the conversations (ADR-0012). */
+  private startReview(idle: boolean, now: number) {
+    const reviewer = this.reviewer;
+    if (!reviewer || this.reviewing) return;
     const count = this.store.processedCount();
     const watermark = this.store.setting<number>('reflectionWatermark');
     const every = this.config.memory.reflectionEveryEvents;
-    if (count - watermark < every || (!idle && count - watermark < every * 3)) return false;
+    if (count - watermark < every || (!idle && count - watermark < every * 3)) return;
     const backlog = this.store.reviewBacklog(this.config.snowluma.selfId, now);
     const chats = backlog.map(item => `${item.conversation}: ${item.messages} new messages since ${recordTime(item.since)}`).join('; ');
-    const text = `Time to consolidate memory; there is no need to speak in a group. ${chats ? `Unreviewed chat records: ${chats}. Read them with read_chat_record, which continues where your last review stopped; you decide how much to read. Start with what happened as the record shows it. Find what someone asked of you and whether you did it, where someone corrected, questioned, or contradicted you, or said again something you had not taken up, and check what you said you did or saw against your actions; keep those corrections in what you save. Your own feelings are yours to write, but how someone took your words is only what their replies show, and what they did after their last message, such as going to sleep or back to work, is unknown unless they said so. Where the record does not show whether something helped, say it is unknown rather than how you hoped it went. Then look at how as much as what. After reading a chat, read your own lines there alone with read_chat_record person=${this.config.snowluma.selfId}. Quote a few of yours beside a few of theirs from the same moments and say how they differ in form, not content: what most of their lines share that yours lack, and what yours share that theirs lack. Look at length, punctuation and tone words, messages that are only a sticker or image, several short messages in a row, joining in, and how they responded to you. Then do the same for reactions and stickers. Count your own reactions, stickers, and messages in your lines, and ask whether anyone else reacted or sent stickers that often over the same stretch. Look at which ones they use in which situations and on whose messages, and how they use them, such as alone, after a few words, or joining others' reactions. Open a few of their stickers with view_event_image to see what they are. Record what you see as practices, keep what suits you as habits, and revise impressions of people. A habit says when it applies and when it does not. Development holds everywhere unless it belongs to one group alone. Before you revise a habit or practice, see whose lines its examples come from: if they all come from one person, it is about that person even when it is worded for friends in general, so put what still holds into your impression of them and retire the habit or practice instead of revising it.` : 'Review recent experiences and revise practices, habits, and impressions of people.'} Save important experiences too, and retire entries that no longer hold.`;
-    this.store.receive({ key: `maintenance:${watermark}:${count}`, kind: 'memory_maintenance', at: now, text, payload: { backlog } });
+    const text = `Time to consolidate memory, apart from your conversations: new messages go to them as usual, and nothing you do here reaches anyone. If you find something you still owe someone, schedule it as a commitment. ${chats ? `Unreviewed chat records: ${chats}. Read them with read_chat_record, which continues where your last review stopped; you decide how much to read. Start with what happened as the record shows it. Find what someone asked of you and whether you did it, where someone corrected, questioned, or contradicted you, or said again something you had not taken up, and check what you said you did or saw against your actions; keep those corrections in what you save. Your own feelings are yours to write, but how someone took your words is only what their replies show, and what they did after their last message, such as going to sleep or back to work, is unknown unless they said so. Where the record does not show whether something helped, say it is unknown rather than how you hoped it went. Then look at how as much as what. After reading a chat, read your own lines there alone with read_chat_record person=${this.config.snowluma.selfId}. Quote a few of yours beside a few of theirs from the same moments and say how they differ in form, not content: what most of their lines share that yours lack, and what yours share that theirs lack. Look at length, punctuation and tone words, messages that are only a sticker or image, several short messages in a row, joining in, and how they responded to you. Then do the same for reactions and stickers. Count your own reactions, stickers, and messages in your lines, and ask whether anyone else reacted or sent stickers that often over the same stretch. Look at which ones they use in which situations and on whose messages, and how they use them, such as alone, after a few words, or joining others' reactions. Open a few of their stickers with view_event_image to see what they are. Record what you see as practices, keep what suits you as habits, and revise impressions of people. A habit says when it applies and when it does not. Development holds everywhere unless it belongs to one group alone. Before you revise a habit or practice, see whose lines its examples come from: if they all come from one person, it is about that person even when it is worded for friends in general, so put what still holds into your impression of them and retire the habit or practice instead of revising it.` : 'Review recent experiences and revise practices, habits, and impressions of people.'} Save important experiences too, and retire entries that no longer hold.`;
+    // Perceived by the review alone, so no thought claims it.
+    const event = this.store.receive({ key: `maintenance:${watermark}:${count}`, kind: 'memory_maintenance', at: now, text, payload: { backlog } }, true);
     this.store.setSetting('reflectionWatermark', count);
-    return true;
+    if (!event) return;
+    const timeout = this.config.limits.runTimeoutMs === null ? undefined : setTimeout(() => reviewer.abort(), this.config.limits.runTimeoutMs);
+    // What it read and saved before stopping stays; the next review reads on from there.
+    this.reviewing = reviewer.review({ batchId: `review:${event.id}`, events: [event] }).catch(error => { this.store.log('review_stopped', { message: errorText(error) }); }).finally(() => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      this.reviewing = undefined;
+    });
   }
   /** Once a minute while idle, see whether the quiet stretch, its length drawn afresh each time one begins, offers a free-time life wake (ADR-0015). */
   private offerFreeTime(now: number) {
@@ -144,8 +158,8 @@ export class LifeRuntime {
       this.consolidating = false; this.work = undefined;
     });
   }
-  async idle() { await this.work; await this.steering; }
-  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); await this.work; await this.steering; }
+  async idle() { await this.work; await this.steering; await this.reviewing; }
+  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); this.reviewer?.abort(); await this.work; await this.steering; await this.reviewing; }
   control(command: string, value?: boolean) {
     this.store.transaction(() => {
       if (command === 'pause' || command === 'resume') this.store.setSetting('paused', command === 'pause');
@@ -153,7 +167,7 @@ export class LifeRuntime {
       else throw new Error('Unknown control command.');
       this.store.bumpGeneration();
     });
-    this.brain.abort();
+    this.brain.abort(); this.reviewer?.abort();
     if (command === 'resume') this.retryAfter = 0;
     if (command === 'life' && value && !this.store.wakes().some(wake => wake.kind === 'life')) this.store.schedule('Plan your own life according to your current persona and interests.', 'life', Date.now());
     this.store.log('control', { command, value });
