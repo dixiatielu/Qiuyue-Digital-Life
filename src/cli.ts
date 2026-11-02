@@ -16,7 +16,7 @@ import { resolveModel } from './model.js';
 import { Monitor } from './monitor.js';
 import { followDisplay } from './display-client.js';
 import { EmbeddingClient, SemanticRecall } from './recall.js';
-import { Drawings, ImageClient } from './drawing.js';
+import { createPlugins, pluginCredentials } from './plugins/index.js';
 
 async function main() {
   process.umask(0o077);
@@ -53,9 +53,8 @@ async function main() {
     } catch (error) { problems.push(errorText(error)); }
     if (!process.env[config.model.apiKeyEnv]) problems.push(ui(`Missing ${config.model.apiKeyEnv}.`, `缺少 ${config.model.apiKeyEnv}。`));
     if (config.embedding.enabled && !process.env[config.embedding.apiKeyEnv]) problems.push(ui(`Missing ${config.embedding.apiKeyEnv} for embedding.`, `缺少 embedding 所需的 ${config.embedding.apiKeyEnv}。`));
-    if (config.drawing.enabled && !process.env[config.drawing.apiKeyEnv]) problems.push(ui(`Missing ${config.drawing.apiKeyEnv} for drawing.`, `缺少画图所需的 ${config.drawing.apiKeyEnv}。`));
+    const plugins = pluginCredentials(config); problems.push(...plugins.problems); warnings.push(...plugins.warnings);
     if (!config.embedding.enabled) warnings.push(ui('embedding is disabled; thoughts will not recall memories on their own, though recall still works when asked for.', 'embedding 未启用；思考时不会自动想起记忆，主动回忆仍可用。'));
-    if (config.web.enabled && !process.env[config.web.searchKeyEnv]) warnings.push(ui(`Missing ${config.web.searchKeyEnv}; web search is unavailable, but known webpages can still be read.`, `缺少 ${config.web.searchKeyEnv}；联网搜索不可用，已知网页仍可阅读。`));
     console.log(JSON.stringify({ valid: problems.length === 0, problems, warnings, runtime: process.version, snowlumaConfigured: Boolean(config.snowluma.selfId) }, null, 2));
     if (problems.length) process.exitCode = 1; return;
   }
@@ -76,17 +75,22 @@ async function main() {
   let reviewer: PiBrain;
   const social = new SnowLumaAdapter(config.snowluma, store, () => { void runtime?.tick(); });
   const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding)) : undefined;
-  const drawings = config.drawing.enabled ? new Drawings(store, new ImageClient(config.drawing), config.drawing.dir, config.memory.retentionDays) : undefined;
+  const plugins = createPlugins(config, store);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
+  const stopServices = async () => {
+    const results = await Promise.allSettled([social.close(), runtime?.stop(), recall?.stop(), plugins.stop()]);
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+    if (errors.length) throw new AggregateError(errors, errors.map(errorText).join('; '));
+  };
   try {
     store.bindAccount(config.snowluma.selfId);
-    brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought, recall, drawings), undefined, monitor, recall);
+    brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought, recall, plugins), undefined, monitor, recall);
     // Review runs beside the thoughts with tools of its own; the live view follows the thoughts, and review shows there through its trace (ADR-0012).
-    reviewer = new PiBrain(config, store, forReview(createTools(config, store, social, () => reviewer.thought, recall, drawings)), undefined, undefined, recall);
+    reviewer = new PiBrain(config, store, forReview(createTools(config, store, social, () => reviewer.thought, recall, plugins)), undefined, undefined, recall);
     runtime = new LifeRuntime(config, store, brain, reviewer);
     server = await serveControl(config.socket, request => handleControl(store, request, runtime), monitor);
     // Recovery must precede live collection; perception keeps running even if paused.
-    store.recover(); drawings?.recover();
+    store.recover(); await plugins.start();
     // Messages are embedded as they arrive, so recall starts listening before perception does.
     recall?.start();
     await social.connect();
@@ -95,14 +99,19 @@ async function main() {
     let stopping = false;
     const shutdown = async () => {
       if (stopping) return; stopping = true;
-      await Promise.all([social.close(), runtime!.stop(), recall?.stop(), drawings?.stop()]);
-      monitor.close(); server!.closeClients();
-      await new Promise<void>(resolve => server!.close(() => resolve()));
-      release(); store.close();
+      try { await stopServices(); }
+      finally {
+        monitor.close(); server!.closeClients();
+        await new Promise<void>(resolve => server!.close(() => resolve()));
+        release(); store.close();
+      }
     };
-    process.once('SIGINT', () => { void shutdown(); }); process.once('SIGTERM', () => { void shutdown(); });
+    const onShutdown = () => { void shutdown().catch(error => { console.error(errorText(error)); process.exitCode = 1; }); };
+    process.once('SIGINT', onShutdown); process.once('SIGTERM', onShutdown);
   } catch (error) {
-    await Promise.all([social.close(), runtime?.stop(), recall?.stop(), drawings?.stop()]); monitor.close(); server?.closeClients(); server?.close(); release(); store.close(); throw error;
+    try { await stopServices(); } catch (cleanupError) { console.error(errorText(cleanupError)); }
+    finally { monitor.close(); server?.closeClients(); server?.close(); release(); store.close(); }
+    throw error;
   }
 }
 

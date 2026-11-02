@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SnowLumaApiError } from '@snowluma/sdk';
-import { fixture } from './helpers.js';
+import { deferred, fixture } from './helpers.js';
 
 const post = (tid: string) => ({ cell_common: { feed_id: tid }, cell_operation: { share_outside: { share_access_resource: { resource_id: `v2_${tid}`, busi_id: 'qzone_feed' } } }, cell_feed_transfer: `transfer-${tid}` });
 // The card is sent as the exact text Qzone signed, escapes included.
@@ -90,4 +90,28 @@ test('sharing is offered only while get_qzone_share_ark and a send interface are
     f.cfg.snowluma.tools = { allow: '*', deny: ['send_private_msg'] }; assert.ok(offered());
     f.cfg.snowluma.tools = { allow: '*', deny: ['send_private_msg', 'send_group_msg'] }; assert.ok(!offered());
   } finally { f.store.close(); }
+});
+
+test('a share uses the core action budget and checks its actual target permission', async () => {
+  const { f, calls, run } = qzone();
+  try {
+    f.cfg.snowluma.tools.deny = ['send_private_msg'];
+    await assert.rejects(run('share_qzone_feed', { tid: 'own', user_id: 7 }), /"outcome":"failed"/);
+    assert.ok(!calls.some(item => item.action === 'send_private_msg'));
+    f.cfg.limits.actionsPerHour = 1;
+    await assert.rejects(run('share_qzone_feed', { tid: 'own', group_id: 100 }), /rate limit/);
+    assert.ok(!calls.some(item => item.action === 'send_group_msg'));
+  } finally { f.store.close(); }
+});
+
+test('pausing while a share card is prepared prevents its later send', async () => {
+  const ready = deferred(); const release = deferred();
+  const { f, calls, run } = qzone({ share: async () => { ready.resolve(); await release.promise; return { ark: card }; } });
+  try {
+    const sharing = run('share_qzone_feed', { tid: 'own', user_id: 7 });
+    await ready.promise; f.store.setSetting('paused', true); release.resolve();
+    await assert.rejects(sharing, /"outcome":"failed"/);
+    assert.ok(!calls.some(item => item.action.startsWith('send_')));
+    assert.equal(f.store.actions()[0]!.status, 'failed');
+  } finally { release.resolve(); f.store.close(); }
 });

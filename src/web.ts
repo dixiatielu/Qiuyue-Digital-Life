@@ -2,7 +2,6 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import type { Config } from './config.js';
 
 export function publicAddress(address: string): boolean {
   if (isIP(address) === 4) {
@@ -72,29 +71,4 @@ export async function fetchImage(url: string, signal?: AbortSignal) {
   const image = await publicFetch(preferJpeg(url), { timeoutMs: 10_000, maxBytes: 5_000_000, signal });
   if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(image.type)) throw new Error('Unsupported image format.');
   return image;
-}
-
-export class WebReader {
-  constructor(private config: Config['web']) {}
-  async read(url: string, signal?: AbortSignal) {
-    if (!this.config.enabled) throw new Error('The web tool is disabled.');
-    const result = await publicFetch(url, { ...this.config, signal });
-    if (!/^(text\/|application\/(json|xml|xhtml\+xml))/.test(result.type)) throw new Error('The resource is not readable text.');
-    const text = result.data.toString('utf8').replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
-    return { url: result.url, text: text.slice(0, 20_000), truncated: text.length > 20_000 };
-  }
-  async search(query: string, signal?: AbortSignal) {
-    if (!this.config.enabled) throw new Error('The web tool is disabled.');
-    if (typeof query !== 'string' || !query.trim() || [...query].length > 128) throw new Error('The search query must contain 1 to 128 Unicode characters and must not be entirely whitespace.');
-    const key = process.env[this.config.searchKeyEnv];
-    if (!key) throw new Error(`The search credential environment variable ${this.config.searchKeyEnv} is not configured; known webpages can still be read directly.`);
-    const result = await publicFetch(this.config.searchUrl, {
-      ...this.config, signal, method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ query, count: 5, need_content: false }),
-    });
-    const data = JSON.parse(result.data.toString('utf8'));
-    if (!data || !Array.isArray(data.results) || data.results.some((item: any) => !item || typeof item.title !== 'string' || typeof item.url !== 'string' || typeof item.summary !== 'string' || typeof item.snippet !== 'string')) throw new Error('The search interface returned an invalid results format.');
-    return data.results.slice(0, 5).map((item: { title: string; url: string; summary: string; snippet: string }) => ({ title: item.title, url: item.url, description: item.summary || item.snippet }));
-  }
 }

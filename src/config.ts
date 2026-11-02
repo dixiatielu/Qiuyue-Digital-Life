@@ -2,11 +2,14 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { findSnowLumaAction, type SnowLumaPermissions } from './snowluma-catalog.js';
 import { validateModelConfig, type ModelConfig } from './model.js';
+import { pluginIds } from './plugins/index.js';
 
 export interface Config {
   database: string;
   socket: string;
   persona: string;
+  /** Optional per-plugin switches; drawing.enabled and web.enabled still govern their capabilities. */
+  plugins: Partial<Record<typeof pluginIds[number], boolean>>;
   model: ModelConfig;
   snowluma: { url: string; tokenEnv: string; selfId: number; groups: number[]; tools: SnowLumaPermissions; maxStreamBytes: number };
   /** freeTime: a quiet stretch, drawn between quietMinMs and quietMaxMs each time, offers a life wake at least gapMs from any other, at most perDay a day (ADR-0015). */
@@ -31,6 +34,7 @@ export function loadConfig(path: string): Config {
     database: resolve(base, raw.database ?? 'data/life.sqlite'),
     socket: resolve(base, raw.socket ?? 'data/control.sock'),
     persona,
+    plugins: raw.plugins ?? {},
     model: { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...raw.model },
     snowluma: { url: 'ws://127.0.0.1:3001', tokenEnv: 'SNOWLUMA_TOKEN', selfId: 0, groups: [], maxStreamBytes: 32_000_000, ...raw.snowluma, tools: { allow: '*', deny: [], ...raw.snowluma?.tools } },
     life: { enabled: false, allowFiction: false, minWakeMs: 60_000, ...raw.life, freeTime: { enabled: true, quietMinMs: 600_000, quietMaxMs: 1_200_000, gapMs: 3_600_000, perDay: 8, ...raw.life?.freeTime } },
@@ -43,6 +47,11 @@ export function loadConfig(path: string): Config {
     drawing: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', timeoutMs: 300_000, ...raw.drawing, dir: resolve(base, raw.drawing?.dir ?? 'data/drawings') },
   };
   if (!config.persona.trim()) throw new Error('The persona content in personaFile must not be empty.');
+  if (raw.plugins !== undefined && (!raw.plugins || typeof raw.plugins !== 'object' || Array.isArray(raw.plugins))) throw new Error('plugins must be an object of plugin IDs and boolean switches.');
+  for (const [id, enabled] of Object.entries(config.plugins)) {
+    if (!(pluginIds as readonly string[]).includes(id)) throw new Error(`Unknown plugin: ${id}`);
+    if (typeof enabled !== 'boolean') throw new Error(`plugins.${id} must be boolean.`);
+  }
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
   validateModelConfig(config.model);
   for (const name of [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
@@ -69,7 +78,7 @@ export function loadConfig(path: string): Config {
   if (freeTime.quietMinMs > freeTime.quietMaxMs) throw new Error('life.freeTime.quietMinMs cannot exceed quietMaxMs.');
   const embedding = config.embedding;
   for (const [name, endpoint] of [['embedding', embedding], ['drawing', config.drawing]] as const) {
-    if (!endpoint.enabled) continue;
+    if (!endpoint.enabled || (name === 'drawing' && config.plugins.drawing === false)) continue;
     let url: URL | undefined;
     try { url = new URL(endpoint.baseUrl); } catch { /* reported below */ }
     if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error(`${name}.baseUrl must be an HTTP/HTTPS URL without credentials, query parameters, or a fragment, such as https://api.openai.com/v1.`);

@@ -5,6 +5,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config.js';
 
+test('plugin overrides are optional and validate names and independent boolean switches', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-plugin-config-'));
+  try {
+    const base = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
+    writeFileSync(join(dir, base.personaFile), 'Qiuyue');
+    const path = join(dir, 'config.json');
+    const load = (plugins?: unknown) => { writeFileSync(path, JSON.stringify({ ...base, plugins })); return loadConfig(path); };
+    assert.deepEqual(load().plugins, {});
+    assert.deepEqual(load({ 'web-search': false, 'web-reader': true, 'qzone-share': false, drawing: false }).plugins, { 'web-search': false, 'web-reader': true, 'qzone-share': false, drawing: false });
+    for (const plugins of [null, [], 'drawing', false]) assert.throws(() => load(plugins), /plugins must be an object/);
+    assert.throws(() => load({ 'web-serach': true }), /Unknown plugin/);
+    assert.throws(() => load({ drawing: 'yes' }), /must be boolean/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('context budgets use tokens with validated reserves and bounded compaction settings', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-context-config-'));
   try {

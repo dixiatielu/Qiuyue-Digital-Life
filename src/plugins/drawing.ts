@@ -1,8 +1,11 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Config } from './config.js';
-import { errorText } from './domain.js';
-import type { Store } from './store.js';
+import { Type } from 'typebox';
+import type { Config } from '../config.js';
+import { errorText } from '../domain.js';
+import { eventRef, type Store } from '../store.js';
+import type { LifePlugin } from '../plugins.js';
+import { ui } from '../ui-language.js';
 
 /** Paints one picture from a description. */
 export interface Painter { readonly model: string; paint(prompt: string, signal?: AbortSignal): Promise<Buffer> }
@@ -54,7 +57,7 @@ export class Drawings {
     if (this.stopping) throw new Error('The program is shutting down; drawing is unavailable.');
     const id = `drawing:${crypto.randomUUID()}`; const startedAt = Date.now();
     // Kept until it finishes, so a drawing a restart cut short is reported rather than awaited forever.
-    this.store.setSetting('drawingsUnderWay', { ...this.store.setting<UnderWay>('drawingsUnderWay'), [id]: { prompt, startedAt } });
+    this.store.setSetting('drawingsUnderWay', { ...this.store.setting<UnderWay>('drawingsUnderWay', {}), [id]: { prompt, startedAt } });
     const controller = new AbortController(); this.running.set(id, controller);
     const work = this.paint(id, prompt, startedAt, sources, controller.signal).finally(() => { this.running.delete(id); this.work.delete(work); });
     this.work.add(work);
@@ -74,7 +77,7 @@ export class Drawings {
       failure = errorText(error);
     }
     this.store.transaction(() => {
-      const { [id]: _done, ...rest } = this.store.setting<UnderWay>('drawingsUnderWay');
+      const { [id]: _done, ...rest } = this.store.setting<UnderWay>('drawingsUnderWay', {});
       this.store.setSetting('drawingsUnderWay', rest);
       this.finish(id, prompt, startedAt, sources, failure);
     });
@@ -83,11 +86,11 @@ export class Drawings {
     const text = failure === undefined
       ? `Your drawing ${id} is finished; it follows as an image. Its description was: ${prompt}\nTo send or use it, put ${id} where an image file goes: the file of an image segment in send_group_msg or send_private_msg, an entry of images in send_qzone_msg, or the file of add_custom_face.`
       : `Your drawing ${id} could not be finished: ${failure}\nIts description was: ${prompt}`;
-    this.store.receive({ key: id, kind: 'drawing', at: Date.now(), text, payload: { drawingId: id, prompt, startedAt, sources, ...(failure !== undefined ? { error: failure } : {}) } });
+    this.store.receive({ key: id, kind: 'drawing', at: Date.now(), text, payload: { origin: 'self', drawingId: id, prompt, startedAt, sources, ...(failure !== undefined ? { error: failure } : {}) } });
   }
   /** Report drawings a restart cut short, and remove files older than retention, whose events are gone. */
   recover() {
-    const underWay = this.store.setting<UnderWay>('drawingsUnderWay');
+    const underWay = this.store.setting<UnderWay>('drawingsUnderWay', {});
     this.store.transaction(() => {
       for (const [id, { prompt, startedAt }] of Object.entries(underWay)) this.finish(id, prompt, startedAt, [], 'The program restarted while it was being painted.');
       this.store.setSetting('drawingsUnderWay', {});
@@ -104,17 +107,31 @@ export class Drawings {
       try { return { data: readFileSync(join(this.dir, `${uuid}.${extension}`)), mimeType }; } catch {}
     }
   }
-  /** Arguments as sent: every drawing ID among them becomes its picture as base64:// data, which SnowLuma accepts wherever it takes an image file. */
-  resolve(value: unknown): unknown {
-    if (typeof value === 'string') {
-      if (!drawingId.test(value)) return value;
-      const picture = this.image(value);
+  async stop() { this.stopping = true; for (const controller of this.running.values()) controller.abort(); await Promise.allSettled(this.work); }
+}
+
+export function drawingEnabled(config: Config) { return config.drawing.enabled && config.plugins.drawing !== false; }
+export function drawingCredentialProblems(config: Config): string[] {
+  return drawingEnabled(config) && !process.env[config.drawing.apiKeyEnv]
+    ? [ui(`Missing ${config.drawing.apiKeyEnv} for drawing.`, `缺少画图所需的 ${config.drawing.apiKeyEnv}。`)] : [];
+}
+export function drawingPlugin(drawings: Drawings, enabled: () => boolean = () => true): LifePlugin {
+  return {
+    id: 'drawing', enabled,
+    tools: runtime => [runtime.jsonTool('draw', "Draw a picture from a description: something you feel like drawing, or what someone asked for if you want to. Painting takes half a minute or more, so this returns at once and the finished drawing comes to you later as a drawing observation with its picture; carry on meanwhile. The description is all the painter sees, so say what you mean in full: subject, composition, style, colors, and any words in the picture, without referring to messages or images. Once you have seen it, send or use it by putting its drawing ID where an image file goes.", Type.Object({ prompt: Type.String({ description: 'What to draw', minLength: 1, maxLength: 4000 }) }), args => drawings.start(args.prompt, [...runtime.context().triggers]))],
+    activities: [{ activity: 'Draw something', tools: ['draw'] }],
+    experienceKinds: { draw: 'drawing' },
+    images: event => {
+      if (event.kind !== 'drawing') return [];
+      const id = String(event.payload.drawingId); const ref = eventRef(event.id);
+      return [{ label: `The following is your drawing ${id} from ${ref}`, unavailable: `The drawing has no picture, or its file has been removed: ${id}.`, deferred: `Your drawing ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.`, autoView: event.payload.error === undefined, load: () => drawings.image(id) }];
+    },
+    resolveMedia: value => {
+      if (!drawingId.test(value)) return;
+      const picture = drawings.image(value);
       if (!picture) throw new Error(`Drawing ${value} does not exist or has been removed.`);
       return `base64://${picture.data.toString('base64')}`;
-    }
-    if (Array.isArray(value)) return value.map(item => this.resolve(item));
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.resolve(item)]));
-    return value;
-  }
-  async stop() { this.stopping = true; for (const controller of this.running.values()) controller.abort(); await Promise.allSettled(this.work); }
+    },
+    start: () => drawings.recover(), stop: () => drawings.stop(),
+  };
 }

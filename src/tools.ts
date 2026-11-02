@@ -1,28 +1,21 @@
 import { Type, type TSchema } from 'typebox';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
-import { Store, type RevisionReach } from './store.js';
+import { Store } from './store.js';
 import type { SocialAdapter } from './snowluma.js';
-import { definitelyFailed } from './snowluma.js';
-import { errorText, type Memory } from './domain.js';
-import { fetchImage, preferJpeg, WebReader } from './web.js';
-import { findFeed, ownFeed, qzoneCard } from './qzone.js';
+import { errorText } from './domain.js';
+import { fetchImage, preferJpeg } from './web.js';
 import { SnowLumaApiError } from '@snowluma/sdk';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLumaActionDefinition } from './snowluma-catalog.js';
 import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
 import { faceCaption, FaceCatalog } from './faces.js';
 import type { SemanticRecall } from './recall.js';
-import type { Drawings } from './drawing.js';
+import { PluginHost } from './plugins.js';
+import { createPlugins } from './plugins/index.js';
+import { ensureCurrent, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
+export { ensureCurrent, type ThoughtContext } from './tool-runtime.js';
 
-/** reviewing: this thought is a memory review, which runs apart from the conversations (ADR-0012); handedOn: the review's revisions that something under way cites, for the conversations to hear of when it ends. */
-export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
-export function ensureCurrent(store: Store, context: ThoughtContext, signal?: AbortSignal) {
-  signal?.throwIfAborted();
-  const settings = store.settings();
-  if (settings.paused || context.generation !== settings.generation) throw new Error('The run is paused or management state changed; a new reasoning run is required.');
-  if (context.lifeOnly && !settings.lifeEnabled) throw new Error('Autonomous life is disabled.');
-}
 const string = (description: string, maxLength = 6000) => Type.String({ description, minLength: 1, maxLength });
 // Normalize common ways of describing QQ actions before matching catalog text.
 const toolSearchAliases: [RegExp, string][] = [
@@ -71,29 +64,19 @@ function jpegImages(value: unknown): unknown {
   }
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jpegImages(item)]));
 }
-export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog; readonly drawings?: Drawings }
+export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog; readonly plugins: PluginHost }
 /** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
 const reviewTools = new Set(['read_chat_record', 'read_event', 'view_event_image', 'view_face', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity']);
 export function forReview(tools: ToolSet): ToolSet {
-  return { faces: tools.faces, drawings: tools.drawings, current: () => tools.current().filter(tool => reviewTools.has(tool.name)) };
+  return { faces: tools.faces, plugins: tools.plugins, current: () => tools.current().filter(tool => reviewTools.has(tool.name)) };
 }
 
-export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall, drawings?: Drawings): ToolSet {
-  const web = new WebReader(config.web);
+export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall, plugins = createPlugins(config, store)): ToolSet {
   const faces = new FaceCatalog(store, social);
-  function tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<unknown> | unknown): AgentTool {
-    return { name, label: name, description, parameters, executionMode: 'sequential', replay: 'never', execute: async (_callId, args, signal) => {
-      ensureCurrent(store, context(), signal);
-      const result = await execute(args, signal);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: {} };
-    } };
-  }
-  function recordToolExperience(kind: string, result: unknown) {
-    ensureCurrent(store, context());
-    const event = store.receive({ key: `tool:${crypto.randomUUID()}`, kind, at: Date.now(), text: JSON.stringify(result), payload: { result } }, true)!;
-    context().sources.add(event.id);
-    return { sourceId: event.id, result };
-  }
+  const runtime = new ToolRuntime(config, store, social, context);
+  const tool = runtime.jsonTool.bind(runtime);
+  const recordToolExperience = runtime.record.bind(runtime);
+  const withPlugins = plugins.bind(runtime);
   const result: AgentTool[] = [
     {
       name: 'view_event_image', label: 'view_event_image', description: 'View an image in an original event. Use index (starting at 0) for an image in a message, or index 0 for the picture of a drawing event; use url for an image URL in any other event, such as a Qzone post in a tool result. Specify exactly one. Only read an image URL actually present in that event.',
@@ -103,11 +86,13 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         if ((args.index === undefined) === (args.url === undefined)) throw new Error('Specify exactly one of index or url.');
         const event = store.event(store.resolve(args.id));
         if (!event) throw new Error('The experience does not exist or has been deleted.');
-        if (event.kind === 'drawing' && args.index === 0) {
-          const picture = drawings?.image(String(event.payload.drawingId));
-          if (!picture) throw new Error('The drawing has no picture, or its file has been removed.');
+        const provided = args.index !== undefined ? plugins.images(event)[args.index] : undefined;
+        if (provided) {
+          const picture = await provided.load(signal);
+          if (!picture) throw new Error(provided.unavailable);
+          ensureCurrent(store, context(), signal);
           context().sources.add(event.id);
-          return { content: [{ type: 'text', text: `Your drawing ${event.payload.drawingId} from event ${event.id}` }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType }], details: {} };
+          return { content: [{ type: 'text', text: provided.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType }], details: {} };
         }
         let url: unknown;
         if (args.url !== undefined) {
@@ -206,46 +191,6 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       return store.updatePursuit(args, [...context().sources], config.life.allowFiction);
     }),
     tool('finish_pursuit', 'End a pursuit: done when it is finished, dropped when you have given it up.', Type.Object({ id: string('Pursuit ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('dropped')]) }), args => { store.finishPursuit(args.id, args.status); return store.pursuits(); }),
-    {
-      name: 'share_qzone_feed', label: 'share_qzone_feed',
-      description: "Share a Qzone post into a private or group chat as the card QQ itself sends when sharing a post: Qzone signs the card, and the send returns a receipt. For a post listed in a Qzone result, such as a recommended (空友爱看) post from get_qzone_public_feeds or a post from get_qzone_home_feeds, pass its cell_common.feed_id as tid and the ID of that result as source. For one of your own posts, pass its tid alone. Specify exactly one of user_id or group_id. Qzone warns that anyone holding a shared card can open the post, even in a restricted space, and a recommended post's card carries its author's QQ number; share only what the post's original audience permits. A notice in the result is Qzone's warning for this post.",
-      parameters: Type.Object({ tid: string('feed_id of the post; for your own post, its tid', 100), source: Type.Optional(string('Event ID of the result listing the post; omit for your own post', 100)), user_id: Type.Optional(Type.Integer({ minimum: 1 })), group_id: Type.Optional(Type.Integer({ minimum: 1 })) }),
-      replay: 'never', executionMode: 'sequential',
-      execute: async (_callId, args: any, signal) => {
-        ensureCurrent(store, context(), signal);
-        if ((args.user_id === undefined) === (args.group_id === undefined)) throw new Error('Specify exactly one of user_id or group_id.');
-        let listed: Record<string, unknown> | undefined;
-        if (args.source !== undefined) {
-          const event = store.event(store.resolve(args.source));
-          if (!event) throw new Error('The experience does not exist or has been deleted.');
-          listed = findFeed(event.payload.result, args.tid);
-          if (!listed) throw new Error('That post does not appear in the event.');
-          context().sources.add(event.id);
-        }
-        const target = args.group_id !== undefined ? { group_id: args.group_id } : { user_id: args.user_id };
-        const attempt = store.beginAction(`qzone_share:${crypto.randomUUID()}`, 'share_qzone_feed', { ...target, tid: args.tid }, [...context().sources], [...context().triggers], config.limits.actionsPerHour);
-        const actionId = attempt.action.id;
-        if (attempt.fresh) {
-          // Nothing reaches the chat before the card is sent, so an earlier failure is a definite one.
-          let share: Awaited<ReturnType<typeof qzoneCard>> | undefined;
-          try { share = await qzoneCard(social, listed ?? await ownFeed(social, args.tid, signal), signal); }
-          catch (error) { store.finishAction(actionId, 'failed', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
-          if (share !== undefined) {
-            const { ark: card, notice } = share; const warned = notice ? { notice } : {};
-            try { store.finishAction(actionId, 'success', { receipt: await social.execute(args.group_id !== undefined ? 'send_group_msg' : 'send_private_msg', { ...target, message: [{ type: 'json', data: { data: card } }] }, signal), card, ...warned }); }
-            catch (error) { store.finishAction(actionId, definitelyFailed(error) ? 'failed' : 'unknown', { error: error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }, card, ...warned }); }
-          }
-        }
-        const outcome = store.actionById(actionId)!;
-        if (outcome.status !== 'success') throw new Error(JSON.stringify({ actionId, outcome: outcome.status, reused: !attempt.fresh, error: outcome.result, instruction: 'Use inspect_actions to check the action record.' }));
-        const experience = recordToolExperience('qzone_share', outcome.result);
-        const metadata = { sourceId: experience.sourceId, actionId, outcome: 'success', reused: !attempt.fresh };
-        return { content: [{ type: 'text', text: JSON.stringify(outcome.result) }, { type: 'text', text: `Local execution information: ${JSON.stringify(metadata)}` }], details: metadata };
-      },
-    },
-    tool('draw', "Draw a picture from a description: something you feel like drawing, or what someone asked for if you want to. Painting takes half a minute or more, so this returns at once and the finished drawing comes to you later as a drawing observation with its picture; carry on meanwhile. The description is all the painter sees, so say what you mean in full: subject, composition, style, colors, and any words in the picture, without referring to messages or images. Once you have seen it, send or use it by putting its drawing ID where an image file goes.", Type.Object({ prompt: string('What to draw', 4000) }), args => drawings!.start(args.prompt, [...context().triggers])),
-    tool('read_webpage', 'Read a public webpage.', Type.Object({ url: string('Public webpage URL', 2000) }), async (args, signal) => recordToolExperience('reading', await web.read(args.url, signal))),
-    tool('search_web', 'Search the web for public information.', Type.Object({ query: string('Search query, at most 128 Unicode characters', 128) }), async (args, signal) => recordToolExperience('search', await web.search(args.query, signal))),
   ];
   const allowed = (action: SnowLumaActionDefinition) => allowedSnowLumaAction(action, config.snowluma.tools);
   const common = new Set([
@@ -278,14 +223,8 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
   const describing = () => allowed(findSnowLumaAction('modify_custom_face'));
   /** One external action: recorded before it is sent and deduplicated, with an unconfirmed outcome kept as unknown (ADR-0008). */
   async function act(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
-    // The record keeps a drawing's ID; only what is sent carries its picture. A missing drawing fails before anything is recorded.
-    const sent = drawings ? drawings.resolve(args) as Record<string, unknown> : args;
-    const attempt = store.beginAction(`snowluma:${crypto.randomUUID()}`, name, args, [...context().sources], [...context().triggers], config.limits.actionsPerHour);
-    if (attempt.fresh) {
-      try { store.finishAction(attempt.action.id, 'success', await social.execute(name, sent, signal)); }
-      catch (error) { store.finishAction(attempt.action.id, definitelyFailed(error, name) ? 'failed' : 'unknown', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
-    }
-    return { outcome: store.actionById(attempt.action.id)!, reused: !attempt.fresh };
+    const sent = plugins.resolveMedia(args) as Record<string, unknown>;
+    return runtime.action(name, args, dispatch => dispatch(name, sent), signal);
   }
   /** Describe a sticker just saved; a failure here leaves the save itself standing. */
   async function describe(emojiId: string, desc: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -342,7 +281,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       },
     };
   }
-  result.push(
+  const discovery: AgentTool[] = [
     tool('search_snowluma_tools', 'Search SnowLuma interfaces by purpose, synonyms, or category; use an empty query to browse. Interfaces are directly available; use load_snowluma_tools for detailed usage.', Type.Object({ query: Type.Optional(Type.String({ maxLength: 200 })), category: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }), args => {
       const query = normalizeToolSearch(String(args.query ?? '').trim());
       const terms = query.split(/\s+/u).filter(Boolean);
@@ -361,9 +300,6 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       for (const action of actions) if (!allowed(action)) throw new Error(`The operator has not enabled this SnowLuma interface: ${action.name}`);
       return actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, inputSchema: toolFor(action).parameters, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }));
     }),
-  );
-  const base = result.filter(tool => (config.web.enabled || !['read_webpage', 'search_web'].includes(tool.name)) && (drawings || tool.name !== 'draw'));
-  // Sharing has SnowLuma sign a card and sends it as a message, so it follows the permissions of those interfaces.
-  const shareable = () => allowed(findSnowLumaAction('get_qzone_share_ark')) && ['send_private_msg', 'send_group_msg'].some(name => allowed(findSnowLumaAction(name)));
-  return { faces, drawings, current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(toolFor)] };
+  ];
+  return { faces, plugins, current: () => withPlugins(result, [...discovery, ...snowlumaCatalog.filter(allowed).map(toolFor)]) };
 }

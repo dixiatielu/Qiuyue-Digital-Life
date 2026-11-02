@@ -4,9 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fauxAssistantMessage as answer } from '@earendil-works/pi-ai';
-import { Drawings, ImageClient, imageType, type Painter } from '../src/drawing.js';
+import { drawingPlugin, Drawings, ImageClient, imageType, type Painter } from '../src/plugins/drawing.js';
 import { loadConfig } from '../src/config.js';
 import { Store, eventRef } from '../src/store.js';
+import { PluginHost } from '../src/plugins.js';
 import { deferred, fixture } from './helpers.js';
 
 const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('picture')]);
@@ -23,7 +24,7 @@ function painter() {
 function setup(social?: Parameters<typeof fixture>[0]) {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-drawings-'));
   const paint = painter(); let drawings!: Drawings;
-  const f = fixture(social, undefined, undefined, store => (drawings = new Drawings(store, paint.value, dir, 90)));
+  const f = fixture(social, undefined, undefined, store => [drawingPlugin(drawings = new Drawings(store, paint.value, dir, 90))]);
   f.brain.thought.lifeOnly = false;
   const run = (name: string, args: Record<string, unknown>) => f.tools.current().find(tool => tool.name === name)!.execute('call', args);
   const done = () => new Promise<void>(resolve => { const stop = f.store.subscribe(notice => { if (notice.kind === 'environment' && notice.event.kind === 'drawing') { stop(); resolve(); } }); });
@@ -117,8 +118,9 @@ test('a drawing a restart cut short is reported at the next start, and files pas
   try {
     const paint = painter();
     const first = new Drawings(store, paint.value, dir, 90);
+    const firstHost = new PluginHost([drawingPlugin(first)]); await firstHost.start();
     const { drawingId } = first.start('A long painting', []);
-    await first.stop();
+    await firstHost.stop();
     // Shutdown leaves it under way rather than calling it failed.
     assert.equal(store.pending(), 0);
     assert.deepEqual(Object.keys(store.setting('drawingsUnderWay')), [drawingId]);
@@ -126,12 +128,14 @@ test('a drawing a restart cut short is reported at the next start, and files pas
     const old = join(dir, '11111111-1111-4111-8111-111111111111.png'); const recent = join(dir, '22222222-2222-4222-8222-222222222222.png');
     writeFileSync(old, png); writeFileSync(recent, png);
     const longAgo = new Date(Date.now() - 91 * 86_400_000); utimesSync(old, longAgo, longAgo);
-    new Drawings(store, paint.value, dir, 90).recover();
+    const restarted = new PluginHost([drawingPlugin(new Drawings(store, paint.value, dir, 90))]);
+    await restarted.start();
     const event = store.claim(20)!.events[0]!;
     assert.deepEqual([event.kind, event.payload.drawingId], ['drawing', drawingId]);
     assert.match(String(event.payload.error), /restarted/);
     assert.deepEqual(store.setting('drawingsUnderWay'), {});
     assert.equal(existsSync(old), false); assert.deepEqual(readFileSync(recent), png);
+    await restarted.stop();
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

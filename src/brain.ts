@@ -14,14 +14,13 @@ import { ChatRecord, observationText, recordTime } from './record.js';
 import { faceCaption, faceIds } from './faces.js';
 import type { SemanticRecall } from './recall.js';
 
-/** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. A new platform joins the digital life's days by adding its tools here. */
+/** Built-in online activities; plugins contribute their own activities through the host. */
 const onlineActivities: { activity: string; tools: string[]; memoryKind?: MemoryKind }[] = [
   { activity: "Browse friends' Qzone feeds", tools: ['get_qzone_feeds'] },
   { activity: "Like or comment on someone's Qzone post", tools: ['like_qzone', 'comment_qzone'] },
   { activity: 'Check comments on your own Qzone posts', tools: ['get_qzone_msg_list', 'get_qzone_msg_detail'] },
   { activity: 'Post to your Qzone', tools: ['send_qzone_msg'] },
   { activity: 'Browse and like recommended Qzone posts', tools: ['get_qzone_public_feeds', 'get_qzone_public_feed_detail', 'get_qzone_public_comments', 'get_qzone_public_replies', 'set_qzone_public_like', 'set_qzone_public_comment_like'] },
-  { activity: 'Share a Qzone post with someone or a group', tools: ['share_qzone_feed'] },
   { activity: 'Browse, like, comment on, or add to group albums', tools: ['get_group_album_list', 'get_group_album_media_list', 'set_group_album_media_like', 'do_group_album_comment', 'upload_image_to_qun_album'] },
   { activity: 'Check in to a group', tools: ['set_group_sign', 'get_group_signed_list'] },
   { activity: "Like a friend's QQ profile", tools: ['send_like'] },
@@ -31,8 +30,6 @@ const onlineActivities: { activity: string; tools: string[]; memoryKind?: Memory
   { activity: 'Change your avatar, nickname, Qzone name or description, or group card', tools: ['set_qq_avatar', 'set_qq_profile', 'set_qzone_profile', 'set_group_card'] },
   { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'] },
   { activity: 'Write or reread your diary', tools: ['remember', 'recall'], memoryKind: 'note' },
-  { activity: 'Draw something', tools: ['draw'] },
-  { activity: 'Look things up or read online: what is new in something you follow, news, weather, whatever you are curious about', tools: ['search_web', 'read_webpage'] },
 ];
 /** The summarized text of a continuity summary, without its framing line and record references. */
 function summaryBody(message: AgentMessage) {
@@ -51,7 +48,6 @@ function localTime(at: number) {
 }
 /** A day of life runs from 05:00 local time, so staying up past midnight does not start the next one. */
 const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
-const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : tool === 'share_qzone_feed' ? 'qzone_share' : tool === 'draw' ? 'drawing' : `snowluma:${tool}`;
 // Self-presentation the agent sets and later sees as current state.
 const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
 /** Messages, stickers, reactions, and pokes (ADR-0002): their success receipts need no call of their own, and a newer message in their chat makes an unsent one stale. */
@@ -166,7 +162,7 @@ export class PiBrain implements Brain {
         store.log('observation_entered', { runId: this.runId, batchId: event.message.batchId });
       }
       if (event.type === 'message_end' && event.message.role === 'assistant') this.phase = 'acting';
-      if (event.type === 'tool_execution_start' && (socialActions.has(event.toolName) || event.toolName === 'share_qzone_feed')) {
+      if (event.type === 'tool_execution_start' && (socialActions.has(event.toolName) || this.tools.plugins.engagesChat(event.toolName))) {
         const chat = targetChat(event.args); if (chat) this.engaged.add(chat);
       }
       if (event.type === 'turn_end' && event.message.role === 'assistant' && !['error', 'aborted'].includes(event.message.stopReason)) {
@@ -377,13 +373,13 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     if (stickers.length) content.push({ type: 'text', text: `Saved stickers of yours whose descriptions fit what was just said, in case you want to send one with send_custom_face; sending none is fine too:\n${JSON.stringify(stickers.map(({ emojiId, desc }) => ({ emoji_id: emojiId, desc })))}` });
     let count = 0;
     const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.config.limits.contextTokens * 0.4;
-    // A finished drawing is seen as it comes back, ahead of the images people sent, since she has to see it before sending it (ADR-0018).
-    for (const event of observation.events.filter(event => event.kind === 'drawing' && event.payload.error === undefined)) {
-      const id = String(event.payload.drawingId); const ref = eventRef(event.id);
-      const picture = this.tools.drawings?.image(id);
-      if (!picture) { content.push({ type: 'text', text: `The picture of your drawing ${id} in ${ref} could not be read.` }); continue; }
-      if (!fits()) { content.push({ type: 'text', text: `Your drawing ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.` }); continue; }
-      content.push({ type: 'text', text: `The following is your drawing ${id} from ${ref}` }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
+    // Plugin-produced pictures are seen before incoming chat images, within the same context budget.
+    for (const event of observation.events) for (const image of this.tools.plugins.images(event).filter(image => image.autoView)) {
+      if (!fits()) { content.push({ type: 'text', text: image.deferred }); continue; }
+      let picture;
+      try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
+      if (!picture) { count--; content.push({ type: 'text', text: image.unavailable }); continue; }
+      content.push({ type: 'text', text: image.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
     }
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
       const ref = eventRef(event.id);
@@ -445,8 +441,9 @@ Your development is yours to keep alongside the operator's persona. Habits are y
   /** When each available online activity was last done, so a life wake knows what it can actually do. */
   private onlineLife() {
     const available = new Set(this.tools.current().map(tool => tool.name));
-    const activities = onlineActivities.map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
+    const activities = [...onlineActivities, ...this.tools.plugins.activities()].map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
     if (!activities.length) return;
+    const experienceKind = (tool: string) => this.tools.plugins.experienceKind(tool);
     const last = this.store.lastExperienced(activities.flatMap(item => item.tools.map(experienceKind)));
     const status = activities.map(({ activity, tools, memoryKind }) => {
       const at = memoryKind ? this.store.lastMemoryAt(memoryKind) ?? 0 : Math.max(0, ...tools.map(name => last[experienceKind(name)] ?? 0));

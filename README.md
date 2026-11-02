@@ -96,6 +96,18 @@ flowchart LR
 
 The TypeScript service keeps receiving events while the Agent thinks. Enabled SnowLuma APIs are exposed with their original names and parameters; `snowluma.tools` controls which are available. The Agent can search the catalog with `search_snowluma_tools` and retrieve details with `load_snowluma_tools`.
 
+Drawing, web search, webpage reading, and Qzone card sharing are plugins. Each supplies its tools, life activities, and any background work or pictures it needs. Existing `drawing` and `web` configuration continues to work; optional switches in `config.json` control each plugin independently:
+
+```json
+"plugins": {
+  "web-search": false,
+  "web-reader": true,
+  "qzone-share": true
+}
+```
+
+Omitted switches preserve existing behavior. The `drawing` plugin also requires `drawing.enabled`; search and reading require `web.enabled`. Sharing still follows `snowluma.tools` permissions. Restart the daemon after changing configuration. See [Plugin development](docs/plugins.md) for the extension interface.
+
 For the domain vocabulary and design decisions, see the [glossary](GLOSSARY.md) and [architecture decision records](docs/adr/).
 
 ## License

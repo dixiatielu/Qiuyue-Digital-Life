@@ -4,7 +4,8 @@ import http from 'node:http';
 import dns from 'node:dns/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { once } from 'node:events';
-import { preferJpeg, WebReader } from '../src/web.js';
+import { preferJpeg } from '../src/web.js';
+import { WebSearch } from '../src/plugins/web-search.js';
 import { config, fixture } from './helpers.js';
 
 test('Qzone image URLs drop the format selector and keep everything else as written', () => {
@@ -79,7 +80,7 @@ test('DeepSeek search sends authenticated JSON and handles results and failures'
   syncBuiltinESMExports();
   const cfg = { ...config().web, enabled: true, searchUrl: `http://search.example:${address.port}/v1/tools/search`, searchKeyEnv: 'TEST_DEEPSEEK_KEY' };
   const oldKey = process.env.TEST_DEEPSEEK_KEY; process.env.TEST_DEEPSEEK_KEY = 'test-key';
-  const reader = new WebReader(cfg);
+  const reader = new WebSearch(cfg);
   try {
     const result = { title: 'Reference', url: 'https://example.com', summary: 'Detailed summary', snippet: 'Short summary' };
     body = { results: [result, { ...result, summary: '' }, ...Array(5).fill(result)] };
@@ -108,9 +109,9 @@ test('DeepSeek search sends authenticated JSON and handles results and failures'
     delete process.env.TEST_DEEPSEEK_KEY;
     await assert.rejects(reader.search('Missing credential'), /search credential.*not configured/);
     assert.equal(requests.length, before);
-    await assert.rejects(new WebReader({ ...cfg, enabled: false }).search('Disabled'), /disabled/);
+    await assert.rejects(new WebSearch({ ...cfg, enabled: false }).search('Disabled'), /disabled/);
     process.env.TEST_DEEPSEEK_KEY = 'test-key';
-    await assert.rejects(new WebReader({ ...cfg, maxBytes: 1 }).search('Response too large'), /size limit/);
+    await assert.rejects(new WebSearch({ ...cfg, maxBytes: 1 }).search('Response too large'), /size limit/);
     await assert.rejects(reader.search('Cancel', AbortSignal.abort()), /abort/i);
   } finally {
     if (oldKey === undefined) delete process.env.TEST_DEEPSEEK_KEY; else process.env.TEST_DEEPSEEK_KEY = oldKey;

@@ -18,7 +18,7 @@ const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND group_id IS NOT 
 const claimable = `status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') AND (?=0 OR NOT (${restHolds}))`;
 /** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
 const recallable = `active=1 AND kind NOT IN (${developmentKinds.map(kind => `'${kind}'`).join(',')})`;
-/** Events the program writes about its own scheduling and bookkeeping, and the digital life's own finished drawings; they record nothing anyone else did. */
+/** Program events, including drawings from before plugins marked their own events with payload.origin=self. */
 const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap', 'rest_backlog', 'drawing']);
 /** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
 const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+)$/, practice: /^(global|group:\d+)$/, impression: /^person:\d+$/ };
@@ -85,7 +85,7 @@ export class Store {
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('wakes') WHERE name='rest'").get()) this.db.exec('ALTER TABLE wakes ADD COLUMN rest INTEGER NOT NULL DEFAULT 0');
     // Whether an event is addressed to the digital life is settled when it arrives, while the message it replies to is known to be its own.
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='addressed'").get()) this.db.exec('ALTER TABLE events ADD COLUMN addressed INTEGER NOT NULL DEFAULT 0');
-    for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null, drawingsUnderWay: {} })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
+    for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
     const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
     if (self) this.selfId = parse<number>(self.value);
   }
@@ -111,7 +111,13 @@ export class Store {
     // Observability must never turn a committed operation into a failed action.
     for (const listener of this.listeners) { try { listener(notice); } catch {} }
   }
-  setting<T>(key: string): T { return parse<T>(this.db.prepare('SELECT value FROM settings WHERE key=?').get(key)!.value); }
+  setting<T>(key: string): T;
+  setting<T>(key: string, fallback: T): T;
+  setting<T>(key: string, fallback?: T): T {
+    const row = this.db.prepare('SELECT value FROM settings WHERE key=?').get(key);
+    if (!row && arguments.length > 1) return fallback!;
+    return parse<T>(row!.value);
+  }
   setSetting(key: string, value: unknown) { this.db.prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, json(value)); this.notify({ kind: 'state' }); }
   acquireDaemon(): () => void {
     const owner = crypto.randomUUID();
@@ -369,7 +375,7 @@ export class Store {
   /** Whether the sources, or the memories they cite in turn, reach something it did not produce itself (ADR-0012): recalling its own judgment is not new evidence. */
   private restsOnOthers(sources: string[]): boolean {
     const reached = this.db.prepare('WITH RECURSIVE reach(id) AS (SELECT value FROM json_each(?) UNION SELECT source_id FROM sources JOIN reach ON owner_id=reach.id) SELECT id FROM reach').all(json(sources)).map(row => String(row.id));
-    return reached.some(source => { const event = this.event(source); return event !== undefined && !programEvents.has(event.kind) && !this.ownMessage(source); });
+    return reached.some(source => { const event = this.event(source); return event !== undefined && event.payload.origin !== 'self' && !programEvents.has(event.kind) && !this.ownMessage(source); });
   }
   /** Development that applies in any of the given scopes, oldest first. */
   development(scopes: string[]): Memory[] {

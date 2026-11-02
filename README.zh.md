@@ -96,6 +96,18 @@ flowchart LR
 
 TypeScript 服务在 Agent 思考期间持续接收事件。已开放的 SnowLuma 接口以原始名称和参数提供给 Agent，可用范围由 `snowluma.tools` 控制。Agent 可以使用 `search_snowluma_tools` 搜索接口，并通过 `load_snowluma_tools` 查看详细用法。
 
+画画、网页搜索、网页阅读和空间卡片分享通过插件接入。插件同时提供工具、自主生活中的活动，以及需要的后台任务和图片。现有 `drawing`、`web` 配置继续有效；可以在 `config.json` 中增加独立开关，例如：
+
+```json
+"plugins": {
+  "web-search": false,
+  "web-reader": true,
+  "qzone-share": true
+}
+```
+
+省略开关时保持原有行为。`drawing` 插件还需开启 `drawing.enabled`，搜索和阅读还需开启 `web.enabled`；空间分享仍受 `snowluma.tools` 的接口权限限制。修改配置后重启常驻进程。开发接入方式见[插件说明](docs/plugins.md)。
+
 领域术语和设计决定见[术语表](GLOSSARY.md)与[架构决策记录](docs/adr/)。
 
 ## 许可证
