@@ -219,12 +219,16 @@ export class Store {
   recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' AND kind!='memory_maintenance' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
   claim(limit: number, allowLife = true, resting = false): { batchId: string; events: EnvironmentEvent[] } | undefined {
     return this.transaction(() => {
-      const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, resting ? 1 : 0, limit);
-      if (!claimed.length) return;
+      const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} AND kind!='rest_backlog' ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, resting ? 1 : 0, limit);
+      const backlogs = this.db.prepare("SELECT * FROM events WHERE status='pending' AND kind='rest_backlog' ORDER BY at,rowid").all();
+      if (!claimed.length && !backlogs.length) return;
       // A life wake starts a thought of its own instead of riding along with chat (ADR-0015).
       const life = (row: Record<string, any>) => row.kind === 'wake' && parse<Record<string, unknown>>(row.payload).wakeKind === 'life';
       const cut = claimed.findIndex(row => life(row) !== life(claimed[0]!));
       const rows = cut < 0 ? claimed : claimed.slice(0, cut);
+      // Held chat is context for this observation, including a life wake, not a later thought.
+      // Attach every pending note even beyond the batch limit, also after a failed run or restart.
+      rows.push(...backlogs);
       const batchId = id('b');
       for (const row of rows) this.db.prepare("UPDATE events SET status='processing',batch_id=? WHERE id=?").run(batchId, String(row.id));
       this.notifyEvents(rows.map(row => String(row.id)));

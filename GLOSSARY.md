@@ -141,7 +141,7 @@ A life wake the program offers when the digital life's chats have been quiet for
 _Avoid_: a fixed-frequency timer, a reminder to do a particular activity
 
 **Rest**:
-A period the digital life marks for itself, until an activity it has scheduled, during which no free-time wake comes and group chat not addressed to it waits. When it ends, all of that group chat comes at once, read as a chat record.
+A period the digital life marks for itself, until an activity it has scheduled, during which no free-time wake comes and group chat not addressed to it waits. Whenever something wakes its thinking, or the rest ends, the group chat still waiting comes together as a chat record.
 _Avoid_: quiet hours fixed by the operator, Agent pause
 
 **Drawing**:

@@ -506,6 +506,34 @@ test('after maxPreemptions in a row the next decision is carried out as made', a
   } finally { release.resolve(); f.store.close(); }
 });
 
+test('a waking model call sees all held groups together with the message that woke her', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-01T14:30:00Z') });
+  const f = fixture(); f.store.bindAccount(900); f.store.setSetting('lifeEnabled', true);
+  f.cfg.life.freeTime.enabled = false; f.cfg.limits.batchSize = 1;
+  const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
+  let calls = 0;
+  try {
+    f.store.schedule('Get up', 'life', Date.now() + 8 * 3_600_000, [], true);
+    runtime.start(); await runtime.idle();
+    event(f.store, 'The topic before the mention'); event(f.store, 'News from the other group', 200);
+    await runtime.tick(); await runtime.idle();
+    assert.equal(f.store.dailyCalls(), 0);
+    t.mock.timers.tick(1000);
+    // A remote clock slightly ahead must not let the backlog displace the waking message.
+    f.store.receive({ key: 'waking', kind: 'message', at: Date.now() + 1000, groupId: 100, actorId: 7, text: 'Are you asleep?', payload: { message: [{ type: 'at', data: { qq: '900' } }, { type: 'text', data: { text: 'Are you asleep?' } }] } });
+    f.faux.setResponses([context => {
+      calls++;
+      const observed = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')));
+      assert.match(observed, /Are you asleep\?/);
+      assert.match(observed, /Chat record of group 100/); assert.match(observed, /The topic before the mention/);
+      assert.match(observed, /Chat record of group 200/); assert.match(observed, /News from the other group/);
+      return answer('I heard you');
+    }]);
+    await runtime.tick(); await runtime.idle();
+    assert.equal(calls, 1); assert.equal(f.store.pending(), 0);
+  } finally { await runtime.stop(); f.store.close(); }
+});
+
 test('when a rest ends, the group chat it held comes in one observation as a chat record, without its earliest lines beyond the budget', async () => {
   const f = fixture();
   try {

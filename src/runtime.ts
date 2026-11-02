@@ -53,7 +53,8 @@ export class LifeRuntime {
       // After due wakes are queued, so the wake a rest was for ends it.
       const resting = this.rest(now);
       if ((this.config.limits.modelCallsPerDay !== null && this.store.dailyCalls() >= this.config.limits.modelCallsPerDay) || now < this.retryAfter) return;
-      let pending = this.store.pendingTiming(settings.lifeEnabled, resting);
+      // A life wake may interrupt housekeeping, but waits out a thought already under way.
+      let pending = this.store.pendingTiming(settings.lifeEnabled && (!this.work || this.consolidating), resting);
       // Events received above (due wakes) are stamped after `now`; time them against a later clock.
       let checkedAt = Date.now();
       const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
@@ -66,6 +67,8 @@ export class LifeRuntime {
         if (idle && !this.consolidated && pending.first === undefined) this.consolidate();
         return;
       }
+      // Anything that wakes or steers a thought during rest brings the held chat with it.
+      if (resting) this.store.transaction(() => this.setAsideRest(this.store.setting<number>('restingSince'), checkedAt));
       // A life wake waits for the thought under way to end rather than steering it.
       const observation = this.store.claim(this.config.limits.batchSize, settings.lifeEnabled && !this.work, resting);
       if (!observation) return;
@@ -131,7 +134,7 @@ export class LifeRuntime {
     if (first === undefined) return !this.work && !resting && ambient !== undefined && now - ambient >= ambientDelayMs;
     return this.work !== undefined || now - (last ?? first) >= debounceMs || now - first >= maxDelayMs;
   }
-  /** Whether the digital life rests now. A rest holds back group chat not addressed to it; when the rest ends, all of it comes at once as one note, read as a chat record (ADR-0016). */
+  /** Whether the digital life rests now. Held group chat accompanies the next thought, or comes when the rest ends, as one chat-record note (ADR-0016). */
   private rest(now: number) {
     const resting = this.store.resting(now);
     const since = this.store.setting<number | null>('restingSince');
@@ -151,7 +154,7 @@ export class LifeRuntime {
     // One observation by events would be several times the size of the same chat as a record, and would come in batches.
     this.store.setAside(held.map(event => event.id));
     const lines = chats.map(chat => `${chat.conversation}: ${chat.messages} messages${chat.notices ? ` and ${chat.notices} notices such as reactions and pokes` : ''} from ${recordTime(chat.from)}`);
-    this.store.receive({ key: `rest:${since}`, kind: 'rest_backlog', at: now, text: `While you rested from ${recordTime(since)} to ${recordTime(now)}, group chat not addressed to you waited: ${lines.join('; ')}. Its record follows.`, payload: { since, until: now, chats } });
+    this.store.receive({ key: `rest:${held[0]!.id}`, kind: 'rest_backlog', at: now, text: `While you rested from ${recordTime(since)} to ${recordTime(now)}, group chat not addressed to you waited: ${lines.join('; ')}. Its record follows.`, payload: { since, until: now, chats } });
   }
   /** Compact an oversized working context once per idle period, so a later observation does not wait for it. */
   private consolidate() {
