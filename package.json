@@ -18,7 +18,7 @@
     "@earendil-works/pi-agent-core": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-tui": "1.4.0",
-    "@snowluma/sdk": "2.2.1",
+    "@snowluma/sdk": "2.3.4",
     "typebox": "1.3.27"
   },
   "devDependencies": {

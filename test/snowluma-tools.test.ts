@@ -14,7 +14,7 @@ test('generated native tools expose canonical SDK names and schemas directly', a
   const f = fixture();
   f.brain.thought.lifeOnly = false;
   try {
-    assert.equal(snowlumaCatalog.length, 209);
+    assert.equal(snowlumaCatalog.length, 212);
     assert.ok(snowlumaCatalog.every(action => (SNOWLUMA_ACTIONS as readonly string[]).includes(action.name)));
     assert.equal(new Set(snowlumaCatalog.map(action => action.name)).size, snowlumaCatalog.length);
     for (const action of snowlumaCatalog) {

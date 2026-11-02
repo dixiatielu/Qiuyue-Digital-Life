@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { SNOWLUMA_ACTIONS } from '@snowluma/sdk';
 
 // Pin the upstream source: catalog changes are reviewed together with SDK upgrades.
-const commit = process.argv[2] ?? '8ffd314260e9e2b6967eeca494d87aa5be046c34';
+const commit = process.argv[2] ?? 'e9faec0e28298c6837ecd41d6132900c7bf08343';
 if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Provide the full SnowLuma Git commit SHA.');
 const base = `https://raw.githubusercontent.com/SnowLuma/SnowLuma/${commit}/`;
 async function fetchSource(path) {
