@@ -98,7 +98,7 @@ TypeScript 服务在 Agent 思考期间持续接收事件。已开放的 SnowLum
 
 通用系统提示词放在 [`src/prompts/system.md`](src/prompts/system.md)，随运行时代码维护，与运营者的 `personaFile` 分开。提示词在启动时读取一次，`npm run build` 会将它复制到 `dist`。修改后重新构建并重启常驻进程；开发模式只需重启。
 
-画画、网页搜索、网页阅读、空间卡片分享、收藏表情增强和 QQ 系统表情通过插件接入。插件可以提供工具，也可以增强已有工具，并附加观察提示、后台任务和图片。现有 `drawing`、`web` 配置继续有效；可以在 `config.json` 中增加独立开关，例如：
+QQ 原生工具、画画、网页搜索、网页阅读、空间卡片分享、收藏表情增强和 QQ 系统表情通过插件接入。插件可以提供工具，也可以增强已有工具，并附加观察提示、后台任务和图片。现有 `drawing`、`web` 配置继续有效；可以在 `config.json` 中增加独立开关，例如：
 
 ```json
 "plugins": {
@@ -106,7 +106,8 @@ TypeScript 服务在 Agent 思考期间持续接收事件。已开放的 SnowLum
   "web-reader": true,
   "qzone-share": true,
   "qq-stickers": true,
-  "qq-faces": true
+  "qq-faces": true,
+  "snowluma-tools": true
 }
 ```
 
@@ -115,6 +116,8 @@ TypeScript 服务在 Agent 思考期间持续接收事件。已开放的 SnowLum
 `qq-stickers` 默认开启，负责收藏时附带描述、识别已收藏图片，以及根据聊天内容推荐表情。推荐复用 `embedding` 的消息向量，阈值和数量仍由 `embedding.stickerThreshold`、`embedding.stickerLimit` 控制；不开 embedding 也能使用其余增强。设为 `false` 会关闭这些增强和表情索引，原生收藏、描述、删除和发送接口继续按权限开放，已有收藏记录与向量保留。
 
 `qq-faces` 默认开启，提供 `view_face`、系统表情名称、图片缓存，以及观察中的自动补图。同一轮只自动展示每种表情一次，补图排在聊天图片之后，并遵守统一的图片与上下文限制。设为 `false` 会关闭名称增强、补图和 `view_face`；聊天记录继续显示原始编号，原生回应和发送接口仍按权限开放，已有目录缓存保留。
+
+`snowluma-tools` 默认开启，负责 QQ 原生工具注册、搜索与详细用法，以及空间、群相册、签到、资料修改等自主活动提示。可用原生工具继续由 `snowluma.tools.allow`、`deny` 控制。设为 `false` 会移除这组工具和提示；QQ 连接、持续感知、断线恢复和记忆仍照常运行，其他插件继续按各自的开关和接口权限工作。收藏表情的发送建议会随原生工具一起停止。
 
 领域术语和设计决定见[术语表](GLOSSARY.md)与[架构决策记录](docs/adr/)。
 

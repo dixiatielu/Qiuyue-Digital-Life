@@ -13,22 +13,10 @@ import { compactionSplit, contextRecordId, estimatedContextTokens, estimateToken
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import type { SemanticRecall } from './recall.js';
+import type { OnlineActivity } from './plugins.js';
 
 /** Built-in online activities; plugins contribute their own activities through the host. */
-const onlineActivities: { activity: string; tools: string[]; memoryKind?: MemoryKind }[] = [
-  { activity: "Browse friends' Qzone feeds", tools: ['get_qzone_feeds'] },
-  { activity: "Like or comment on someone's Qzone post", tools: ['like_qzone', 'comment_qzone'] },
-  { activity: 'Check comments on your own Qzone posts', tools: ['get_qzone_msg_list', 'get_qzone_msg_detail'] },
-  { activity: 'Post to your Qzone', tools: ['send_qzone_msg'] },
-  { activity: 'Browse and like recommended Qzone posts', tools: ['get_qzone_public_feeds', 'get_qzone_public_feed_detail', 'get_qzone_public_comments', 'get_qzone_public_replies', 'set_qzone_public_like', 'set_qzone_public_comment_like'] },
-  { activity: 'Browse, like, comment on, or add to group albums', tools: ['get_group_album_list', 'get_group_album_media_list', 'set_group_album_media_like', 'do_group_album_comment', 'upload_image_to_qun_album'] },
-  { activity: 'Check in to a group', tools: ['set_group_sign', 'get_group_signed_list'] },
-  { activity: "Like a friend's QQ profile", tools: ['send_like'] },
-  { activity: 'Start a private chat with or poke someone you know', tools: ['send_private_msg', 'friend_poke', 'send_poke'] },
-  { activity: 'Change your QQ signature', tools: ['set_self_longnick'] },
-  { activity: 'Set a custom online status', tools: ['set_diy_online_status'] },
-  { activity: 'Change your avatar, nickname, Qzone name or description, or group card', tools: ['set_qq_avatar', 'set_qq_profile', 'set_qzone_profile', 'set_group_card'] },
-  { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'] },
+const onlineActivities: OnlineActivity[] = [
   { activity: 'Write or reread your diary', tools: ['remember', 'recall'], memoryKind: 'note' },
 ];
 /** The summarized text of a continuity summary, without its framing line and record references. */
@@ -48,17 +36,6 @@ function localTime(at: number) {
 }
 /** A day of life runs from 05:00 local time, so staying up past midnight does not start the next one. */
 const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
-// Self-presentation the agent sets and later sees as current state.
-const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
-/** Messages, stickers, reactions, and pokes (ADR-0002): their success receipts need no call of their own, and a newer message in their chat makes an unsent one stale. */
-const socialActions = new Set(['send_private_msg', 'send_group_msg', 'send_msg', 'send_custom_face', 'send_group_ai_record', 'set_group_reaction', 'set_msg_emoji_like', 'send_poke', 'friend_poke', 'group_poke']);
-/** The chat an action is aimed at: group:<id> or private:<qq>. */
-function targetChat(args: unknown): string | undefined {
-  const { group_id: group, user_id: user, message_type: type } = (args ?? {}) as Record<string, unknown>;
-  if (group != null && type !== 'private') return `group:${Number(group)}`;
-  return user != null ? `private:${Number(user)}` : undefined;
-}
-
 interface ObservationMessage { role: 'observation'; batchId: string; content: (TextContent | ImageContent)[]; eventIds: string[]; lifeOnly: boolean; timestamp: number }
 declare module '@earendil-works/pi-agent-core' { interface CustomAgentMessages { observation: ObservationMessage } }
 export interface Brain {
@@ -112,7 +89,7 @@ export class PiBrain implements Brain {
       convertToLlm: toModelMessages,
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
       beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
-      afterToolCall: async ({ toolCall, isError, result }) => !isError && (socialActions.has(toolCall.name) || this.tools.plugins.endsThought(toolCall.name, result.details)) ? { terminate: true } : undefined,
+      afterToolCall: async ({ toolCall, isError, result }) => !isError && this.tools.plugins.endsThought(toolCall.name, result.details) ? { terminate: true } : undefined,
       prepareRequest: async ({ context, model: currentModel }, signal) => {
         const first = this.turns === 0;
         // Observations steered in for stale chats have entered by now.
@@ -156,8 +133,8 @@ export class PiBrain implements Brain {
         store.log('observation_entered', { runId: this.runId, batchId: event.message.batchId });
       }
       if (event.type === 'message_end' && event.message.role === 'assistant') this.phase = 'acting';
-      if (event.type === 'tool_execution_start' && (socialActions.has(event.toolName) || this.tools.plugins.engagesChat(event.toolName))) {
-        const chat = targetChat(event.args); if (chat) this.engaged.add(chat);
+      if (event.type === 'tool_execution_start') {
+        const chat = this.tools.plugins.chatTarget(event.toolName, event.args); if (chat) this.engaged.add(chat);
       }
       if (event.type === 'turn_end' && event.message.role === 'assistant' && !['error', 'aborted'].includes(event.message.stopReason)) {
         if (!this.skipped) this.preemptions = 0;
@@ -420,18 +397,19 @@ export class PiBrain implements Brain {
   /** When each available online activity was last done, so a life wake knows what it can actually do. */
   private onlineLife() {
     const available = new Set(this.tools.current().map(tool => tool.name));
-    const activities = [...onlineActivities, ...this.tools.plugins.activities()].map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
+    const activities = this.tools.plugins.activities(onlineActivities).map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
     if (!activities.length) return;
     const experienceKind = (tool: string) => this.tools.plugins.experienceKind(tool);
     const last = this.store.lastExperienced(activities.flatMap(item => item.tools.map(experienceKind)));
-    const status = activities.map(({ activity, tools, memoryKind }) => {
+    const status = activities.map(({ activity, tools, memoryKind, currentValue }) => {
       const at = memoryKind ? this.store.lastMemoryAt(memoryKind) ?? 0 : Math.max(0, ...tools.map(name => last[experienceKind(name)] ?? 0));
-      const setter = tools.find(name => currentValue[name]);
-      const args = setter && this.store.lastSuccessfulAction(setter)?.args;
-      const current = args ? currentValue[setter!]!(args) : undefined;
+      const setter = currentValue && tools.includes(currentValue.tool) ? currentValue : undefined;
+      const args = setter && this.store.lastSuccessfulAction(setter.tool)?.args;
+      const current = args ? setter!.read(args) : undefined;
       return { activity, tools, lastDone: at ? new Date(at).toISOString() : `not in the last ${this.config.memory.retentionDays} days`, ...(current !== undefined ? { lastSetTo: current } : {}) };
     });
-    return `Online activities available for your own life, with when you last did each. Life activities can be actual online activities like these, not only fictional daily life. What happens there, such as new posts or comments, never comes to you by itself; you see it only by checking. Use load_snowluma_tools for the parameters of unfamiliar tools.\n${JSON.stringify(status)}`;
+    const instructions = this.tools.plugins.activityInstructions();
+    return `Online activities available for your own life, with when you last did each. Life activities can be actual online activities like these, not only fictional daily life. What happens there, such as new posts or comments, never comes to you by itself; you see it only by checking.${instructions ? ` ${instructions}` : ''}\n${JSON.stringify(status)}`;
   }
   /** Load the persisted working context unless this process already holds it for the current management state. */
   private prepare(generation: number) {
@@ -515,7 +493,7 @@ export class PiBrain implements Brain {
   }
   /** A message, sticker, reaction, or poke not yet sent when an addressed message arrived in its chat is skipped, so the model decides again. */
   private async skipStale(tool: string, args: unknown): Promise<BeforeToolCallResult | undefined> {
-    const chat = socialActions.has(tool) ? targetChat(args) : undefined;
+    const chat = this.tools.plugins.chatTarget(tool, args, true);
     if (!chat || !this.stale.has(chat)) return;
     if (!this.skipped) {
       if (this.preemptions >= this.config.limits.maxPreemptions) return;

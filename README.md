@@ -98,7 +98,7 @@ The TypeScript service keeps receiving events while the Agent thinks. Enabled Sn
 
 Shared system instructions live in [`src/prompts/system.md`](src/prompts/system.md), maintained with the runtime and separate from the operator's `personaFile`. They are read once at startup; `npm run build` copies them into `dist`. After editing them, rebuild and restart the daemon (development runs only need a restart).
 
-Drawing, web search, webpage reading, Qzone card sharing, saved-sticker enhancement, and QQ system faces are plugins. Plugins can supply tools or enhance existing ones, with observation hints, background work, and pictures as needed. Existing `drawing` and `web` configuration continues to work; optional switches in `config.json` control each plugin independently:
+QQ native tools, drawing, web search, webpage reading, Qzone card sharing, saved-sticker enhancement, and QQ system faces are plugins. Plugins can supply tools or enhance existing ones, with observation hints, background work, and pictures as needed. Existing `drawing` and `web` configuration continues to work; optional switches in `config.json` control each plugin independently:
 
 ```json
 "plugins": {
@@ -106,7 +106,8 @@ Drawing, web search, webpage reading, Qzone card sharing, saved-sticker enhancem
   "web-reader": true,
   "qzone-share": true,
   "qq-stickers": true,
-  "qq-faces": true
+  "qq-faces": true,
+  "snowluma-tools": true
 }
 ```
 
@@ -115,6 +116,8 @@ Omitted switches preserve existing behavior. The `drawing` plugin also requires 
 `qq-stickers` defaults on. It adds descriptions during saves, recognizes already saved images, and suggests stickers that fit a conversation. Suggestions reuse `embedding` message vectors and retain the `embedding.stickerThreshold` and `embedding.stickerLimit` settings; other enhancements work without embedding. Setting it to `false` stops these enhancements and collection indexing. Native save, describe, delete, and send interfaces remain available according to permissions, and existing collection records and vectors are retained.
 
 `qq-faces` defaults on. It supplies `view_face`, system face names, picture caching, and automatic viewing once per face per thought. These pictures follow chat images and share the image and context limits. Setting it to `false` removes name enhancement, automatic pictures, and `view_face`; records still show native IDs, and native reaction and send interfaces remain available according to permissions. The stored directory is retained.
+
+`snowluma-tools` defaults on. It registers native QQ tools, their search and detailed instructions, and life activities such as Qzone, group albums, check-ins, and profile changes. Native availability still follows `snowluma.tools.allow` and `deny`. Setting it to `false` removes those tools and activity hints; the QQ connection, continuous perception, recovery, and memory keep running. Other plugins follow their own switches and native permissions. Saved-sticker send suggestions also stop while the native tools are off.
 
 For the domain vocabulary and design decisions, see the [glossary](GLOSSARY.md) and [architecture decision records](docs/adr/).
 

@@ -3,7 +3,7 @@ import type { SocialAdapter } from '../snowluma.js';
 import type { Config } from '../config.js';
 import type { LifePlugin } from '../plugins.js';
 import { errorResult } from '../tool-runtime.js';
-import { allowedSnowLumaAction, findSnowLumaAction } from '../snowluma-catalog.js';
+import { allowedSnowLumaAction, findSnowLumaAction, snowlumaChat } from '../snowluma-catalog.js';
 
 type Feed = Record<string, any>;
 
@@ -63,5 +63,6 @@ export function qzoneSharePlugin(config: Config): LifePlugin {
     activities: [{ activity: 'Share a Qzone post with someone or a group', tools: ['share_qzone_feed'] }],
     experienceKinds: { share_qzone_feed: 'qzone_share' },
     chatActions: ['share_qzone_feed'],
+    chatTarget: (_tool, args) => snowlumaChat(args),
   };
 }

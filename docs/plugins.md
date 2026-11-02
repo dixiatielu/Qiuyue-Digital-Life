@@ -1,12 +1,12 @@
 # Plugin development
 
-A plugin supplies one capability, including its tools and the hooks needed to participate in the digital life's experiences. Installed plugins are `drawing`, `web-search`, `web-reader`, `qzone-share`, `qq-stickers`, and `qq-faces`. They are local TypeScript modules registered at startup; configuration changes take effect after a restart.
+A plugin supplies one capability, including its tools and the hooks needed to participate in the digital life's experiences. Installed plugins are `drawing`, `web-search`, `web-reader`, `qzone-share`, `qq-stickers`, `qq-faces`, and `snowluma-tools`. They are local TypeScript modules registered at startup; configuration changes take effect after a restart.
 
-The interface and host live in `src/plugins.ts`. Implementations and their composition root live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and QQ native tool registration remain built in for now.
+The interface and host live in `src/plugins.ts`. Implementations and their composition root live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and shared execution rules remain built in. QQ native tool registration and platform-specific life hints live in `src/plugins/snowluma-tools.ts`; the SnowLuma connection and recovery adapter remains in `src/snowluma.ts`.
 
 ## Configuration
 
-`plugins` is an optional object of boolean switches, keyed by those IDs. Unknown names and non-boolean values are rejected. An omitted switch preserves existing behavior. A `false` switch removes the plugin's tools, enhancements, and activities and prevents an already held enhanced tool from executing. Original native tools remain available according to permissions.
+`plugins` is an optional object of boolean switches, keyed by those IDs. Unknown names and non-boolean values are rejected. An omitted switch preserves existing behavior. A `false` switch removes the plugin's tools, enhancements, and activities and prevents an already held tool from executing. Disabling an enhancement preserves the original native tools while `snowluma-tools` is on and permissions allow them.
 
 The existing endpoint configuration is retained:
 
@@ -18,12 +18,15 @@ The existing endpoint configuration is retained:
 | `qzone-share` | Allowed `get_qzone_share_ark` and at least one message send interface; each call also checks its actual target's send permission |
 | `qq-stickers` | Defaults on; describing within a save also requires `modify_custom_face`. Suggestions require the existing embedding source; other enhancements work without it |
 | `qq-faces` | Defaults on; reading an uncached directory uses `fetch_sys_faces` under its native permissions. Existing cached names and picture URLs can be reused |
+| `snowluma-tools` | Defaults on; each native tool follows `snowluma.tools.allow` and `deny`; discovery remains available while the plugin is on |
 
 The search tool remains visible without its credential, as before, and reports the missing credential when called. `validate` reports a warning; webpage reading remains usable. Explicitly disabling search suppresses that warning. The plugin switch does not grant native SnowLuma permissions.
 
 Sticker suggestions retain `embedding.stickerThreshold` and `embedding.stickerLimit`. Turning off `qq-stickers` stops sticker indexing and suggestions and removes the save's extra `desc` parameter and image/record annotations. It preserves the existing action receipts and `sticker_vectors` rows for later reuse. Native collection management still works.
 
 Turning off `qq-faces` removes `view_face`, face-name enhancement, and automatic pictures, without removing native reaction or message tools. The directory remains in the existing `faces` setting. Unknown faces continue to be rendered by ID; Unicode reactions still render as Unicode.
+
+Turning off `snowluma-tools` removes the native catalog's tools, `search_snowluma_tools`, `load_snowluma_tools`, and their platform-specific activity hints. It does not disconnect SnowLuma or stop incoming observations and recovery (ADR-0011). Other plugins can still use permitted native interfaces through the shared runtime, such as sharing a Qzone card. Sticker send suggestions are suppressed while the native send tool is absent.
 
 ## Tools and thought state
 
@@ -49,6 +52,8 @@ Add the factory and its configuration ID to `src/plugins/index.ts`. The host rej
 The daemon creates one host. The primary thinking process and memory review bind their own `ToolRuntime` to it. Resolve current thought state through `runtime.context()` at execution time; never capture a thought object during registration. Tool calls share pause, generation, life-mode, sequential-execution, and no-replay rules with built-in tools. Memory review retains its explicit tool allowlist; a new plugin tool is unavailable to review by default. Plugins can explicitly opt read-only tools into review with `reviewTools`, as `qq-faces` does for `view_face`.
 
 An enhancement can return no new tools and implement `decorateTool(tool, runtime)`. It must preserve the tool name and call the original tool's executor for the original operation. Additional external actions use `runtime.action`. Discovery reads the decorated schema too. The host rechecks the plugin switch when a held enhanced tool executes. `qq-stickers` demonstrates adding `desc` to `add_custom_face`, stripping it before the native save, and recording the subsequent description separately. Failed or unknown description outcomes leave the successful save standing.
+
+A tool can supply `available()` to narrow its availability within an enabled plugin. The host reevaluates it when constructing the tool set and before executing a held tool. Native tools use this for operator permissions. Register the complete catalog once per thinking process; queries for detailed usage call `runtime.decorate` so enhancements such as the save's `desc` appear without registering a second tool of the same name. `runtime.resolveMedia` expands media references only for outgoing parameters, while action receipts retain the stable references.
 
 `runtime.record(kind, result)` stores a tool result as an experience and adds its source ID to the current thought. This is how a webpage or search result remains available to `read_event` and `remember` after its tool output is truncated or leaves working context.
 
@@ -80,6 +85,8 @@ The sticker plugin owns its collection queries and vector table in `stickers-sto
 
 ## Life activities
 
-`activities` declares activities to offer at life wakes. They appear only while the plugin and corresponding tools are available. `experienceKinds` maps tool names to stored event kinds so the Agent sees when it last did each activity. `chatActions` identifies tools that engage a target chat, allowing new addressed messages there to influence the ongoing thought. These declarations do not create another Agent or an independent focus of attention.
+`activities` declares activities to offer at life wakes. They appear only while the plugin and corresponding tools are available. `experienceKinds` maps tool names to stored event kinds so the Agent sees when it last did each activity. An activity can provide `currentValue` with the setting tool and a function reading its last successful arguments, as QQ signatures and online status do. `insertBefore` can retain an activity's historical position relative to a built-in activity. `activityInstructions` adds tool-usage guidance only while the plugin is enabled.
+
+`chatActions` and `chatTarget(tool, args)` identify the chat engaged by a tool call, allowing new addressed messages there to influence the ongoing thought. `staleActions` selects calls that should be skipped if a newer addressed message arrived in their target chat before execution. `endsThought` identifies successful social actions that need no follow-up call. The QQ plugin supplies these rules for its native sends, reactions, and pokes; the brain performs the generic steering and interruption logic. These declarations do not create another Agent or an independent focus of attention.
 
 Use `test/plugins.test.ts` for examples of exercising a new plugin through its tools, observations, media references, and life wakes without adding capability-specific branches to the brain.

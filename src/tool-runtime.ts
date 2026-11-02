@@ -5,7 +5,8 @@ import type { Config } from './config.js';
 import { errorText, type Memory } from './domain.js';
 import { Store, type RevisionReach } from './store.js';
 import { definitelyFailed, type SocialAdapter } from './snowluma.js';
-import { allowedSnowLumaAction, findSnowLumaAction, type SnowLumaActionDefinition } from './snowluma-catalog.js';
+import { allowedSnowLumaAction, findSnowLumaAction } from './snowluma-catalog.js';
+import type { PluginHost } from './plugins.js';
 
 /** A review hands revisions affecting unfinished matters back to the conversations (ADR-0012). */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
@@ -17,13 +18,12 @@ export function ensureCurrent(store: Store, context: ThoughtContext, signal?: Ab
 }
 export const errorResult = (error: unknown): unknown => error instanceof SnowLumaApiError ? error.response : { message: errorText(error) };
 export const jsonResult = (result: unknown): AgentToolResult<any> => ({ content: [{ type: 'text', text: JSON.stringify(result) }], details: {} });
-export function nativeToolDescription(action: SnowLumaActionDefinition, usage?: string): string {
-  return [action.summary, `SnowLuma native interface ${action.name}; ${action.readOnly ? 'read-only query' : 'may have side effects and is subject to action budgets and deduplication'}.`, ...action.invariants, action.returns, action.stream ? 'Streaming results return an array of raw data frames in arrival order.' : '', usage].filter(Boolean).join('\n');
-}
 
 /** Shared execution rules for built-in and plugin tools. Plugins never create their own action receipts. */
 export class ToolRuntime {
-  constructor(readonly config: Config, readonly store: Store, private social: SocialAdapter, readonly context: () => ThoughtContext) {}
+  constructor(readonly config: Config, readonly store: Store, private social: SocialAdapter, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate'> = { resolveMedia: value => value, decorate: tool => tool }) {}
+  resolveMedia(value: unknown): unknown { return this.extensions.resolveMedia(value); }
+  decorate(tool: AgentTool): AgentTool { return this.extensions.decorate(tool, this); }
   check(signal?: AbortSignal) { ensureCurrent(this.store, this.context(), signal); }
   allowed(name: string) { return allowedSnowLumaAction(findSnowLumaAction(name), this.config.snowluma.tools); }
   tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<AgentToolResult<any>> | AgentToolResult<any>): AgentTool {

@@ -11,8 +11,9 @@ import { StickerRecall } from './stickers-recall.js';
 import { stickersPlugin } from './stickers.js';
 import type { SocialAdapter } from '../snowluma.js';
 import { FaceCatalog, qqFacesPlugin } from './faces.js';
+import { snowlumaToolsPlugin } from './snowluma-tools.js';
 
-export const pluginIds = ['drawing', 'web-search', 'web-reader', 'qzone-share', 'qq-stickers', 'qq-faces'] as const;
+export const pluginIds = ['drawing', 'web-search', 'web-reader', 'qzone-share', 'qq-stickers', 'qq-faces', 'snowluma-tools'] as const;
 /** The composition root is the only place that knows which capability implementations are installed. */
 export function createPlugins(config: Config, store: Store, social: SocialAdapter, semantics?: SemanticSource): PluginHost {
   const saved = new StickerStore(store);
@@ -22,6 +23,7 @@ export function createPlugins(config: Config, store: Store, social: SocialAdapte
     webReaderPlugin(config), webSearchPlugin(config),
     stickersPlugin(config, saved, semantics ? new StickerRecall(config.embedding, saved, semantics) : undefined),
     qqFacesPlugin(config, new FaceCatalog(store, social)),
+    snowlumaToolsPlugin(config),
   ]);
 }
 export function pluginCredentials(config: Config) {

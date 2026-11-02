@@ -28,7 +28,7 @@ test('plugin switches are independent, honor legacy switches, and block an alrea
     assert.ok(!names().includes('share_qzone_feed') && names().includes('send_group_msg'));
     f.cfg.web.enabled = false;
     assert.ok(!names().includes('read_webpage'));
-    assert.deepEqual(f.plugins.activities(), []);
+    assert.ok(f.plugins.activities().every(item => !item.tools.some(tool => ['search_web', 'read_webpage', 'share_qzone_feed'].includes(tool))));
     assert.ok(!f.reviewTools.current().some(tool => ['search_web', 'read_webpage', 'share_qzone_feed'].includes(tool.name)));
     f.cfg.drawing.enabled = true; f.cfg.plugins.drawing = false;
     const plugins = createPlugins(f.cfg, f.store, { execute: async () => ({}) });
@@ -56,6 +56,25 @@ test('new plugin tools bind to their own thought and share pause and generation 
     await assert.rejects(tool.execute('paused', {}), /paused/);
     f.store.setSetting('paused', false); f.store.bumpGeneration();
     await assert.rejects(tool.execute('old-generation', {}), /management state changed/);
+  } finally { f.store.close(); }
+});
+
+test('plugin action metadata can finish a thought without the brain knowing its tool name', async () => {
+  let sent = 0;
+  const f = fixture(undefined, undefined, undefined, () => [{
+    id: 'test-chat',
+    tools: runtime => [runtime.jsonTool('send_test_chat', 'Send in a test setting', Type.Object({}), () => { sent++; return { sent: true }; })],
+    chatActions: ['send_test_chat'], staleActions: ['send_test_chat'],
+    chatTarget: () => 'test:chat',
+    endsThought: tool => tool === 'send_test_chat',
+  }]);
+  try {
+    event(f.store, 'Hello');
+    f.faux.setResponses([answer(call('send_test_chat', {})), answer('Must not be called')]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(sent, 1); assert.equal(f.faux.state.callCount, 1);
+    assert.equal(f.plugins.chatTarget('send_test_chat', {}), 'test:chat');
+    assert.equal(f.plugins.chatTarget('send_test_chat', {}, true), 'test:chat');
   } finally { f.store.close(); }
 });
 

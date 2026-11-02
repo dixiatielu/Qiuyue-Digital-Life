@@ -31,6 +31,36 @@ test('generated native tools expose canonical SDK names and schemas directly', a
   } finally { f.store.close(); }
 });
 
+test('the native-tool plugin can be switched off while perception, memory, and other plugins continue', async () => {
+  const f = fixture(); f.brain.thought.lifeOnly = false;
+  try {
+    const held = f.tools.current().find(tool => tool.name === 'send_group_msg')!;
+    const discovery = f.tools.current().find(tool => tool.name === 'search_snowluma_tools')!;
+    f.cfg.plugins['snowluma-tools'] = false;
+    const offered = new Set(f.tools.current().map(tool => tool.name));
+    assert.ok(snowlumaCatalog.every(action => !offered.has(action.name)));
+    assert.ok(!offered.has('search_snowluma_tools') && !offered.has('load_snowluma_tools'));
+    assert.ok(offered.has('remember') && offered.has('recall') && offered.has('view_face') && offered.has('share_qzone_feed'));
+    await assert.rejects(held.execute('held', { group_id: 100, message: 'stale' }), /Plugin snowluma-tools is disabled/);
+    await assert.rejects(discovery.execute('held-discovery', { query: 'send' }), /Plugin snowluma-tools is disabled/);
+    assert.deepEqual(f.sent, []); assert.equal(f.store.actions().length, 0);
+    event(f.store, 'A message still arrives');
+    f.faux.setResponses([answer('Observed')]); await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.store.pending(), 0); assert.equal(f.faux.state.callCount, 1);
+    f.store.setSetting('lifeEnabled', true); f.store.schedule('Free time', 'life', Date.now()); f.store.enqueueDue();
+    f.faux.setResponses([context => {
+      const observation = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')));
+      assert.match(observation, /Write or reread your diary/);
+      assert.match(observation, /Share a Qzone post/);
+      assert.doesNotMatch(observation, /Browse friends' Qzone feeds|Change your QQ signature|Collect or organize saved stickers|Use load_snowluma_tools/);
+      return answer('Rest');
+    }]);
+    await f.brain.run(f.store.claim(10)!);
+    f.cfg.plugins['snowluma-tools'] = true;
+    assert.ok(f.tools.current().some(tool => tool.name === 'send_group_msg'));
+  } finally { f.store.close(); }
+});
+
 test('common social tools include guidance for real identifiers and space visibility', () => {
   const f = fixture();
   try {

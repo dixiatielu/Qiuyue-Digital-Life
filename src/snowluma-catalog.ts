@@ -15,6 +15,15 @@ export interface SnowLumaActionDefinition {
   examples?: { summary: string; params: Record<string, unknown>; notes?: string }[];
 }
 export interface SnowLumaPermissions { allow: '*' | string[]; deny: string[] }
+export function nativeToolDescription(action: SnowLumaActionDefinition, usage?: string): string {
+  return [action.summary, `SnowLuma native interface ${action.name}; ${action.readOnly ? 'read-only query' : 'may have side effects and is subject to action budgets and deduplication'}.`, ...action.invariants, action.returns, action.stream ? 'Streaming results return an array of raw data frames in arrival order.' : '', usage].filter(Boolean).join('\n');
+}
+/** The native target is also the chat an action engages. */
+export function snowlumaChat(args: unknown): string | undefined {
+  const { group_id: group, user_id: user, message_type: type } = (args ?? {}) as Record<string, unknown>;
+  if (group != null && type !== 'private') return `group:${Number(group)}`;
+  return user != null ? `private:${Number(user)}` : undefined;
+}
 export const snowlumaCatalog = generated.actions as unknown as SnowLumaActionDefinition[];
 export const snowlumaCatalogSource = generated.source;
 const definitions = new Map<string, SnowLumaActionDefinition>();

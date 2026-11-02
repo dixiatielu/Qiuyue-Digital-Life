@@ -274,6 +274,8 @@ test('sticker recommendations reuse message vectors, are shown once per thought,
     assert.equal(plugin.observation!([hungry], thought).length, 1);
     assert.equal(plugin.observation!([hungry], thought).length, 0);
     assert.equal(plugin.observation!([hungry], { ...thought }).length, 1);
+    cfg.plugins['snowluma-tools'] = false;
+    assert.deepEqual(plugin.observation!([hungry], { ...thought }), []);
     assert.equal(embedder.calls.flat().filter(text => text === hungry.text).length, 1);
   } finally { await Promise.all([plugin.stop?.(), semantics.stop()]); store.close(); }
 });

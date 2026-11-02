@@ -7,6 +7,7 @@ import type { SocialAdapter } from '../src/snowluma.js';
 import type { SemanticRecall } from '../src/recall.js';
 import { PluginHost, type LifePlugin } from '../src/plugins.js';
 import { createPlugins } from '../src/plugins/index.js';
+import { snowlumaToolsPlugin } from '../src/plugins/snowluma-tools.js';
 
 export function config() {
   const value = loadConfig(new URL('../config.example.json', import.meta.url).pathname);
@@ -31,7 +32,7 @@ export function fixture(social?: SocialAdapter, existingStore?: Store, recall?: 
   const reviewFaux = fauxProvider(); const reviewModels = createModels(); reviewModels.setProvider(reviewFaux.provider);
   let brain: PiBrain; let reviewer: PiBrain;
   let tools: ReturnType<typeof createTools>; let reviewTools: ReturnType<typeof createTools>;
-  const plugins = extensions ? new PluginHost(extensions(store, cfg)) : createPlugins(cfg, store, adapter, recall);
+  const plugins = extensions ? new PluginHost([...extensions(store, cfg), snowlumaToolsPlugin(cfg)]) : createPlugins(cfg, store, adapter, recall);
   const restart = () => {
     tools = createTools(cfg, store, adapter, () => brain.thought, recall, plugins);
     brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) }, undefined, recall);

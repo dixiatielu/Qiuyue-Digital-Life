@@ -3,8 +3,8 @@ import type { Config } from '../config.js';
 import { errorText } from '../domain.js';
 import type { LifePlugin } from '../plugins.js';
 import { clipRecordText } from '../record.js';
-import { nativeToolDescription, type ThoughtContext, type ToolRuntime } from '../tool-runtime.js';
-import { findSnowLumaAction } from '../snowluma-catalog.js';
+import type { ThoughtContext, ToolRuntime } from '../tool-runtime.js';
+import { findSnowLumaAction, nativeToolDescription } from '../snowluma-catalog.js';
 import type { StickerStore } from './stickers-store.js';
 import type { StickerRecall } from './stickers-recall.js';
 
@@ -52,7 +52,7 @@ export function stickersPlugin(config: Config, saved: StickerStore, recall?: Sti
       };
     },
     observation: (events, thought) => {
-      if (thought.reviewing || !recall) return [];
+      if (thought.reviewing || !recall || config.plugins['snowluma-tools'] === false) return [];
       const seen = shown.get(thought) ?? new Set<string>(); shown.set(thought, seen);
       const stickers = recall.suggestions(events, seen);
       for (const sticker of stickers) seen.add(sticker.emojiId);

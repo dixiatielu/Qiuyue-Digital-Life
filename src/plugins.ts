@@ -2,8 +2,14 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
 import type { ThoughtContext, ToolRuntime } from './tool-runtime.js';
 
-export interface OnlineActivity { activity: string; tools: string[]; memoryKind?: MemoryKind }
-export interface PluginTool extends AgentTool { insertBefore?: string }
+export interface OnlineActivity {
+  activity: string;
+  tools: string[];
+  memoryKind?: MemoryKind;
+  insertBefore?: string;
+  currentValue?: { tool: string; read(args: Record<string, unknown>): unknown };
+}
+export interface PluginTool extends AgentTool { insertBefore?: string; available?(): boolean }
 export interface PluginImage {
   label: string;
   unavailable: string;
@@ -29,8 +35,11 @@ export interface LifePlugin {
   actionCaption?(action: Action): string | undefined;
   endsThought?(tool: string, details: unknown): boolean;
   activities?: OnlineActivity[];
+  activityInstructions?: string;
   experienceKinds?: Record<string, string>;
   chatActions?: string[];
+  staleActions?: string[];
+  chatTarget?(tool: string, args: unknown): string | undefined;
   images?(event: EnvironmentEvent): PluginImage[];
   resolveMedia?(value: string): string | undefined;
   start?(): void | Promise<void>;
@@ -54,6 +63,7 @@ export class PluginHost {
       runtime.check(args[2]);
       if (this.stopping) throw new Error('The program is shutting down; plugin tools are unavailable.');
       if (!this.enabled(plugin)) throw new Error(`Plugin ${plugin.id} is disabled or its required interfaces are unavailable.`);
+      if (tool.available && !tool.available()) throw new Error('The operator has not enabled this tool.');
       return tool.execute(...args);
     } })) }));
     // Reject conflicts even when a plugin is disabled, before any tool can execute.
@@ -63,7 +73,7 @@ export class PluginHost {
         if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
         names.add(tool.name);
       }
-      const additions = registered.filter(item => this.enabled(item.plugin)).flatMap(item => item.tools);
+      const additions = registered.filter(item => this.enabled(item.plugin)).flatMap(item => item.tools).filter(tool => tool.available?.() ?? true);
       const ordered: AgentTool[] = [...builtins, ...additions, ...following];
       for (const tool of additions) if (tool.insertBefore && tool.insertBefore !== tool.name && ordered.some(item => item.name === tool.insertBefore)) {
         ordered.splice(ordered.findIndex(item => item === tool), 1);
@@ -101,9 +111,22 @@ export class PluginHost {
     for (const plugin of this.plugins) if (this.enabled(plugin)) { const caption = plugin.actionCaption?.(action); if (caption !== undefined) return caption; }
   }
   endsThought(tool: string, details: unknown): boolean { return this.plugins.some(plugin => this.enabled(plugin) && plugin.endsThought?.(tool, details)); }
-  activities(): OnlineActivity[] { return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.activities ?? []); }
-  experienceKind(tool: string): string { return this.plugins.find(plugin => plugin.experienceKinds?.[tool])?.experienceKinds?.[tool] ?? `snowluma:${tool}`; }
-  engagesChat(tool: string): boolean { return this.plugins.some(plugin => this.enabled(plugin) && plugin.chatActions?.includes(tool)); }
+  activities(builtins: OnlineActivity[] = []): OnlineActivity[] {
+    const additions = this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.activities ?? []);
+    const ordered = [...builtins, ...additions];
+    for (const activity of additions) if (activity.insertBefore && ordered.some(item => item.activity === activity.insertBefore)) {
+      ordered.splice(ordered.indexOf(activity), 1);
+      ordered.splice(ordered.findIndex(item => item.activity === activity.insertBefore), 0, activity);
+    }
+    return ordered;
+  }
+  activityInstructions(): string { return this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.activityInstructions).filter(Boolean).join(' '); }
+  experienceKind(tool: string): string { return this.plugins.find(plugin => plugin.experienceKinds?.[tool])?.experienceKinds?.[tool] ?? tool; }
+  chatTarget(tool: string, args: unknown, staleOnly = false): string | undefined {
+    for (const plugin of this.plugins) if (this.enabled(plugin) && (staleOnly ? plugin.staleActions : plugin.chatActions)?.includes(tool)) {
+      const chat = plugin.chatTarget?.(tool, args); if (chat) return chat;
+    }
+  }
   images(event: EnvironmentEvent): PluginImage[] { return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.images?.(event) ?? []); }
   /** Resolve references only in outgoing parameters; stored action arguments retain their small, stable IDs. */
   resolveMedia(value: unknown): unknown {
