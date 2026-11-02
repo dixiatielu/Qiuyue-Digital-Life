@@ -1,10 +1,10 @@
 import { Type, type TSchema } from 'typebox';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
-import { Store } from './store.js';
+import { Store, type RevisionReach } from './store.js';
 import type { SocialAdapter } from './snowluma.js';
 import { definitelyFailed } from './snowluma.js';
-import { errorText } from './domain.js';
+import { errorText, type Memory } from './domain.js';
 import { fetchImage, preferJpeg, WebReader } from './web.js';
 import { findFeed, ownFeed, qzoneCard } from './qzone.js';
 import { SnowLumaApiError } from '@snowluma/sdk';
@@ -15,8 +15,8 @@ import { faceCaption, FaceCatalog } from './faces.js';
 import type { SemanticRecall } from './recall.js';
 import type { Drawings } from './drawing.js';
 
-/** reviewing: this thought is a memory review, which runs apart from the conversations (ADR-0012). */
-export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean }
+/** reviewing: this thought is a memory review, which runs apart from the conversations (ADR-0012); handedOn: the review's revisions that something under way cites, for the conversations to hear of when it ends. */
+export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
 export function ensureCurrent(store: Store, context: ThoughtContext, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const settings = store.settings();
@@ -164,10 +164,10 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       // What it wrote is in the call; what the revision reached is all the result adds.
       const reach = args.supersedes ? store.revisionReach(args.supersedes) : undefined;
       const memory = store.writeMemory(args, config.life.allowFiction, config.development);
-      // A review cannot revise what is under way, so the conversations hear of what cites the old version.
+      // A review cannot revise what is under way, so the conversations hear of what cites the old version, all at once when the review ends.
       const handedOn = context().reviewing && reach?.cites.length;
-      if (handedOn) store.noticeRevision(memory, reach);
-      return { id: memory.id, kind: memory.kind, ...(memory.scope ? { scope: memory.scope } : {}), ...(memory.supersedes ? { supersedes: memory.supersedes } : {}), ...(memory.fictional ? { fictional: true } : {}), ...(reach?.withdrawn.length ? { withdrawn: reach.withdrawn } : {}), ...(reach?.cites.length ? { cites: reach.cites } : {}), ...(handedOn ? { citesHandedOn: 'Your conversations hear of these and revise or finish them; a review cannot.' } : {}) };
+      if (handedOn) (context().handedOn ??= []).push({ memory, reach });
+      return { id: memory.id, kind: memory.kind, ...(memory.scope ? { scope: memory.scope } : {}), ...(memory.supersedes ? { supersedes: memory.supersedes } : {}), ...(memory.fictional ? { fictional: true } : {}), ...(reach?.withdrawn.length ? { withdrawn: reach.withdrawn } : {}), ...(reach?.cites.length ? { cites: reach.cites } : {}), ...(handedOn ? { citesHandedOn: 'Your conversations hear of these when this review ends and revise or finish them; a review cannot.' } : {}) };
     }),
     tool('retire_memory', 'Retire a habit, practice, or impression that no longer holds. It leaves everyday use; its history remains.', Type.Object({ id: string('Memory ID', 100) }), args => store.retireMemory(args.id)),
     {

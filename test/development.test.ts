@@ -312,17 +312,19 @@ test('a review runs beside a conversation: new messages reach the thought, never
   } finally { release.resolve(); await runtime.stop(); f.store.close(); }
 });
 
-test('a review schedules only commitments, and hands on a revision that something under way cites', async () => {
-  const f = fixture();
+test('a review schedules only commitments, and hands on together, once it ends, the revisions that something under way cites', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
   try {
     f.store.bindAccount(900);
+    f.cfg.memory.reflectionEveryEvents = 1; f.cfg.compaction.idleAfterMs = 0;
     const said = say(f.store, 7, 'I moved to Wuhan', { groupId: undefined });
     f.store.acknowledge(f.store.claim(20)!.batchId);
     const where = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Lives in Beijing', importance: 5, scope: 'person:7', sources: [said.id] }, false);
     const style = f.store.writeMemory({ kind: 'habit', title: 'Short replies', content: 'Short replies', importance: 5, sources: [said.id] }, false);
-    f.store.schedule('Visit P7 in Beijing', 'commitment', Date.now() + 86_400_000, [where.id]);
+    const tone = f.store.writeMemory({ kind: 'practice', title: 'Tildes', content: 'Friends end lines with ~', importance: 4, sources: [said.id] }, false);
+    // A plan cites what was in view when it was set, so one plan can cite several memories a review revises.
+    f.store.schedule('Visit P7 in Beijing', 'commitment', Date.now() + 86_400_000, [where.id, style.id]);
     const at = new Date(Date.now() + 3_600_000).toISOString();
-    const review = f.store.receive({ key: 'review', kind: 'memory_maintenance', at: Date.now(), text: 'Review', payload: {} }, true)!;
     const results = (messages: Message[]) => messages.filter(message => message.role === 'toolResult');
     f.reviewFaux.setResponses([
       answer([call('schedule_activity', { title: 'Read in the evening', kind: 'life', at }), call('schedule_activity', { title: 'Nap', kind: 'commitment', at, rest: true }), call('schedule_activity', { title: 'Send P7 the photo I promised', kind: 'commitment', at })]),
@@ -333,22 +335,28 @@ test('a review schedules only commitments, and hands on a revision that somethin
         return answer([
           call('remember', { kind: 'impression', title: 'P7', content: 'Lives in Wuhan now', importance: 6, scope: 'person:7', sources: [said.id], supersedes: where.id }),
           call('remember', { kind: 'habit', title: 'Short replies', content: 'Short replies, longer in private', importance: 5, sources: [said.id], supersedes: style.id }),
+          call('remember', { kind: 'practice', title: 'Tildes', content: 'Friends end lines with ~ or ～', importance: 4, sources: [said.id], supersedes: tone.id }),
         ]);
       },
       context => {
-        const [impression, habit] = results(context.messages as Message[]).slice(-2);
-        assert.match(JSON.stringify(impression), /cites.*Visit P7 in Beijing.*citesHandedOn/);
-        assert.doesNotMatch(JSON.stringify(habit), /citesHandedOn/);
+        const [impression, habit, practice] = results(context.messages as Message[]).slice(-3);
+        assert.match(JSON.stringify(impression), /cites.*Visit P7 in Beijing.*citesHandedOn.*when this review ends/);
+        assert.match(JSON.stringify(habit), /citesHandedOn/);
+        assert.doesNotMatch(JSON.stringify(practice), /citesHandedOn/);
+        // Nothing reaches the conversations while the review goes on.
+        assert.equal(f.store.pending(), 0);
         return answer('Reviewed');
       },
     ]);
-    await f.reviewer.review({ batchId: 'review', events: [review] });
+    runtime.start(); await runtime.idle();
     assert.deepEqual(f.store.wakes().map(wake => wake.title).sort(), ['Send P7 the photo I promised', 'Visit P7 in Beijing']);
-    // Only the revision a plan cites comes to the conversations, as an event that starts a thought.
+    // The two revisions the plan cites come as one event that names the plan once; the third, cited by nothing, does not come at all.
     const handed = f.store.claim(20)!.events;
     assert.deepEqual(handed.map(item => item.kind), ['memory_revision']);
-    assert.match(handed[0]!.text, /Visit P7 in Beijing/);
-  } finally { f.store.close(); }
+    assert.match(handed[0]!.text, /^Understandings were revised outside your thoughts: m:\S+ replaces m:\S+; m:\S+ replaces m:\S+\. What is under way cites them: /);
+    assert.equal(handed[0]!.text.split('Visit P7 in Beijing').length - 1, 1);
+    assert.equal(f.faux.state.callCount, 0);
+  } finally { await runtime.stop(); f.store.close(); }
 });
 
 test('revising or citing a version that was already replaced names the version that holds now', () => {
@@ -363,6 +371,24 @@ test('revising or citing a version that was already replaced names the version t
     assert.throws(() => store.writeMemory({ kind: 'experience', title: 'Nickname', content: 'P7 has a nickname', importance: 4, sources: [first.id] }, false), new RegExp(`read its current version first: ${first.id}\\. Its current version is ${second.id}`));
     store.retireMemory(second.id);
     assert.throws(() => impression('Goes by Qi still', second.id), /^Error: The memory to revise does not exist or has already been revised\.$/);
+  } finally { store.close(); }
+});
+
+test('a reference resolves without its #, and a full ID made up from one resolves by its digits', () => {
+  const store = new Store(':memory:'); store.bindAccount(900);
+  try {
+    const said = say(store, 7, 'Hello');
+    const digits = said.id.slice(2, 10);
+    assert.equal(store.resolve(`#${digits}`), said.id);
+    assert.equal(store.resolve(digits), said.id);
+    const madeUp = `e:${digits}-0000-4000-8000-000000000000`;
+    assert.equal(store.resolve(madeUp), said.id);
+    // Cited by a made-up full ID, the event it meant becomes the source.
+    assert.deepEqual(store.writeMemory({ kind: 'experience', title: 'Greeting', content: 'P7 said hello', importance: 3, sources: [madeUp] }, false).sources, [said.id]);
+    // Digits that name no event leave a full ID as written for its caller to report, and a reference fails as before.
+    assert.equal(store.resolve('e:00000000-0000-4000-8000-000000000000'), 'e:00000000-0000-4000-8000-000000000000');
+    assert.throws(() => store.resolve('00000000'), /Reference 00000000 does not exist or has been deleted/);
+    assert.equal(store.resolve('m:00000000-0000-4000-8000-000000000000'), 'm:00000000-0000-4000-8000-000000000000');
   } finally { store.close(); }
 });
 

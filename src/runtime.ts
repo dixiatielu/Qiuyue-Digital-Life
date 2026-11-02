@@ -108,6 +108,8 @@ export class LifeRuntime {
     this.reviewing = reviewer.review({ batchId: `review:${event.id}`, events: [event] }).catch(error => { this.store.log('review_stopped', { message: errorText(error) }); }).finally(() => {
       if (timeout !== undefined) clearTimeout(timeout);
       this.reviewing = undefined;
+      // What it handed on comes to the conversations together, so revisions that one plan cites start one thought rather than one each.
+      try { this.store.noticeRevisions(reviewer.thought.handedOn ?? []); } catch (error) { this.store.log('runtime_error', { message: errorText(error) }); }
     });
   }
   /** Once a minute while idle, see whether the quiet stretch, its length drawn afresh each time one begins, offers a free-time life wake (ADR-0015). */

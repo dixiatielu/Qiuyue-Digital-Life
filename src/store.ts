@@ -194,13 +194,21 @@ export class Store {
     const event: EnvironmentEvent = { ...input, id: eventId, status: processed ? 'processed' : 'pending', receivedAt };
     this.notify({ kind: 'environment', event }); return event;
   }
-  /** Resolve a #xxxxxxxx reference from a chat record to its full event ID; other IDs pass through. */
+  /** Resolve a #xxxxxxxx reference from a chat record to its full event ID, also when written without # or lengthened into a full ID that does not exist (ADR-0019); other IDs pass through. */
   resolve(reference: string): string {
-    if (!/^#[0-9a-f]{8}$/.test(reference)) return reference;
-    const rows = this.db.prepare('SELECT id FROM events WHERE id>=? AND id<? LIMIT 2').all(`e:${reference.slice(1)}`, `e:${reference.slice(1)}~`);
-    if (rows.length !== 1) throw new Error(rows.length ? `Reference ${reference} is ambiguous; use the full event ID.` : `Reference ${reference} does not exist or has been deleted.`);
-    return String(rows[0]!.id);
+    const lengthened = /^e:([0-9a-f]{8})-/.exec(reference);
+    if (lengthened && !this.event(reference)) {
+      // A full ID made up from a reference is right only in the reference's digits, so those decide when they name one event.
+      const matches = this.eventsStarting(lengthened[1]!);
+      return matches.length === 1 ? matches[0]! : reference;
+    }
+    const digits = /^#?([0-9a-f]{8})$/.exec(reference)?.[1];
+    if (!digits) return reference;
+    const matches = this.eventsStarting(digits);
+    if (matches.length !== 1) throw new Error(matches.length ? `Reference #${digits} is ambiguous; use the full event ID.` : `Reference ${reference} does not exist or has been deleted.`);
+    return matches[0]!;
   }
+  private eventsStarting(digits: string): string[] { return this.db.prepare('SELECT id FROM events WHERE id>=? AND id<? LIMIT 2').all(`e:${digits}`, `e:${digits}~`).map(row => String(row.id)); }
   private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, groupId: row.group_id ?? undefined, actorId: row.actor_id ?? undefined, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined }; }
   event(eventId: string): EnvironmentEvent | undefined { const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(eventId); return row ? this.eventRow(row) : undefined; }
   /** A review's prompt is perceived by the review alone, which has it as its observation (ADR-0012). */
@@ -338,12 +346,19 @@ export class Store {
     ];
     return { withdrawn, cites };
   }
-  /** A revision the digital life did not make in a thought of its own, such as an operator correction, comes to it as an event, with what it reached. Its own revisions report this in their result. */
-  noticeRevision(memory: Memory, reach: RevisionReach) {
+  /** Revisions the digital life did not make in a thought of its own, such as an operator correction or what a review handed on, come to it as one event, with what they reached. Its own revisions report this in their result. */
+  noticeRevisions(revisions: { memory: Memory; reach: RevisionReach }[]) {
+    // One forgotten meanwhile leaves nothing to notice.
+    const held = revisions.filter(({ memory }) => this.memory(memory.id));
+    if (!held.length) return;
     const list = (items: { id: string; title: string }[]) => items.map(item => `${item.id} (${item.title})`).join('; ');
+    const once = <T extends { id: string }>(items: T[]) => [...new Map(items.map(item => [item.id, item])).values()];
+    const withdrawn = once(held.flatMap(({ reach }) => reach.withdrawn)); const cites = once(held.flatMap(({ reach }) => reach.cites));
+    const one = held.length === 1;
+    const replaced = held.map(({ memory }) => `${memory.id} replaces ${memory.supersedes}`).join('; ');
     this.transaction(() => {
-      const revision = this.receive({ key: `revision:${memory.id}`, kind: 'memory_revision', at: Date.now(), text: `An understanding was revised outside your thoughts: ${memory.id} replaces ${memory.supersedes}.${reach.withdrawn.length ? ` Memories resting on the old version have left everyday recall: ${list(reach.withdrawn)}.` : ''}${reach.cites.length ? ` What is under way cites it: ${list(reach.cites)}; check whether it still holds.` : ''}`, payload: { memoryId: memory.id, supersedes: memory.supersedes ?? null, ...reach } });
-      if (revision) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(revision.id, memory.id);
+      const revision = this.receive({ key: `revision:${held.map(({ memory }) => memory.id).join(',')}`, kind: 'memory_revision', at: Date.now(), text: `${one ? 'An understanding was' : 'Understandings were'} revised outside your thoughts: ${replaced}.${withdrawn.length ? ` Memories resting on the old ${one ? 'version' : 'versions'} have left everyday recall: ${list(withdrawn)}.` : ''}${cites.length ? ` What is under way cites ${one ? 'it' : 'them'}: ${list(cites)}; check whether it still holds.` : ''}`, payload: { revisions: held.map(({ memory }) => ({ memoryId: memory.id, supersedes: memory.supersedes ?? null })), withdrawn, cites } });
+      if (revision) for (const { memory } of held) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(revision.id, memory.id);
     });
   }
   private ownMessage(source: string): boolean {

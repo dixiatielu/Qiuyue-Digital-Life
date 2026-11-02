@@ -35,7 +35,7 @@ export function handleControl(store: Store, request: ControlRequest, runtime?: L
       const source = store.receive({ key: `correction:${crypto.randomUUID()}`, kind: 'operator_correction', at: Date.now(), text: content, payload: { supersedes: memory.id } }, true)!;
       const reach = store.revisionReach(memory.id);
       const corrected = store.writeMemory({ ...memory, content, sources: [source.id], supersedes: memory.id }, true);
-      store.noticeRevision(corrected, reach);
+      store.noticeRevisions([{ memory: corrected, reach }]);
       store.bumpGeneration(); return corrected;
     }
   }
