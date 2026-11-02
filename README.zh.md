@@ -96,6 +96,8 @@ flowchart LR
 
 TypeScript 服务在 Agent 思考期间持续接收事件。已开放的 SnowLuma 接口以原始名称和参数提供给 Agent，可用范围由 `snowluma.tools` 控制。Agent 可以使用 `search_snowluma_tools` 搜索接口，并通过 `load_snowluma_tools` 查看详细用法。
 
+通用系统提示词放在 [`src/prompts/system.md`](src/prompts/system.md)，随运行时代码维护，与运营者的 `personaFile` 分开。提示词在启动时读取一次，`npm run build` 会将它复制到 `dist`。修改后重新构建并重启常驻进程；开发模式只需重启。
+
 画画、网页搜索、网页阅读和空间卡片分享通过插件接入。插件同时提供工具、自主生活中的活动，以及需要的后台任务和图片。现有 `drawing`、`web` 配置继续有效；可以在 `config.json` 中增加独立开关，例如：
 
 ```json

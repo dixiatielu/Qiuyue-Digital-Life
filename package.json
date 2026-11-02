@@ -7,7 +7,7 @@
     "node": "^24.22.1 || >=26.12.1"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-prompts.mjs",
     "check": "tsc --noEmit",
     "sync:snowluma": "node scripts/sync-snowluma-catalog.mjs",
     "test": "tsx --test test/*.test.ts",

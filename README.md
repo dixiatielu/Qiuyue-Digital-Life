@@ -96,6 +96,8 @@ flowchart LR
 
 The TypeScript service keeps receiving events while the Agent thinks. Enabled SnowLuma APIs are exposed with their original names and parameters; `snowluma.tools` controls which are available. The Agent can search the catalog with `search_snowluma_tools` and retrieve details with `load_snowluma_tools`.
 
+Shared system instructions live in [`src/prompts/system.md`](src/prompts/system.md), maintained with the runtime and separate from the operator's `personaFile`. They are read once at startup; `npm run build` copies them into `dist`. After editing them, rebuild and restart the daemon (development runs only need a restart).
+
 Drawing, web search, webpage reading, and Qzone card sharing are plugins. Each supplies its tools, life activities, and any background work or pictures it needs. Existing `drawing` and `web` configuration continues to work; optional switches in `config.json` control each plugin independently:
 
 ```json
