@@ -173,7 +173,7 @@ test('the recall tool searches by meaning when embedding is on, and records what
   const store = new Store(':memory:'); store.bindAccount(900);
   const song = remember(store, '日记', '练夜曲的副歌又破音了，有点烦');
   const recall = new SemanticRecall(embeddingConfig(), store, topics());
-  const f = fixture(undefined, store, undefined, recall);
+  const f = fixture(undefined, store, recall);
   try {
     recall.start(); await recall.idle();
     const tool = f.tools.current().find(item => item.name === 'recall')!;
@@ -211,7 +211,7 @@ test('a thought sees the memories its messages call up, with the matching line, 
   const song = remember(store, '日记', '晚上的小记：\n1. 练夜曲的副歌又破音了，有点烦\n2. 群友们一直在聊新番');
   remember(store, '午饭', '地铁请大家吃小笼包，说下次还请');
   const recall = new SemanticRecall(embeddingConfig(), store, topics());
-  const f = fixture(undefined, store, undefined, recall);
+  const f = fixture(undefined, store, recall);
   try {
     recall.start(); await recall.idle();
     event(store, '那首夜曲你练得怎么样了');
@@ -277,7 +277,7 @@ test('an observation brings the saved stickers that fit what was said, and none 
   const store = new Store(':memory:'); store.bindAccount(900);
   saveSticker(store, '900_0_0_0_F00D_0_0', '少女捧着包子流口水，适合表达想吃小笼包');
   const recall = new SemanticRecall(embeddingConfig(), store, topics());
-  const f = fixture(undefined, store, undefined, recall);
+  const f = fixture(undefined, store, recall);
   const prompts: string[] = [];
   const observe = () => f.faux.setResponses([context => { prompts.push(JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')))); return answer(''); }]);
   try {

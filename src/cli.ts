@@ -76,7 +76,7 @@ async function main() {
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   try {
     store.bindAccount(config.snowluma.selfId);
-    brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought, undefined, recall), undefined, monitor, recall);
+    brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought, recall), undefined, monitor, recall);
     runtime = new LifeRuntime(config, store, brain);
     server = await serveControl(config.socket, request => handleControl(store, request, runtime), monitor);
     // Recovery must precede live collection; perception keeps running even if paused.

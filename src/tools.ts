@@ -6,7 +6,7 @@ import type { SocialAdapter } from './snowluma.js';
 import { definitelyFailed } from './snowluma.js';
 import { errorText } from './domain.js';
 import { fetchImage, preferJpeg, WebReader } from './web.js';
-import { findFeed, QzoneShare, type QzonePost } from './qzone.js';
+import { findFeed, ownFeed, qzoneCard } from './qzone.js';
 import { SnowLumaApiError } from '@snowluma/sdk';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog, type SnowLumaActionDefinition } from './snowluma-catalog.js';
 import { actionSummary } from './runtime-context.js';
@@ -72,9 +72,8 @@ function jpegImages(value: unknown): unknown {
 }
 export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog }
 
-export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, qzonePost?: QzonePost, recall?: SemanticRecall): ToolSet {
+export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall): ToolSet {
   const web = new WebReader(config.web);
-  const qzone = new QzoneShare(social, config.snowluma.selfId, qzonePost);
   const faces = new FaceCatalog(store, social);
   function tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<unknown> | unknown): AgentTool {
     return { name, label: name, description, parameters, executionMode: 'sequential', replay: 'never', execute: async (_callId, args, signal) => {
@@ -191,8 +190,8 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     tool('finish_pursuit', 'End a pursuit: done when it is finished, dropped when you have given it up.', Type.Object({ id: string('Pursuit ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('dropped')]) }), args => { store.finishPursuit(args.id, args.status); return store.pursuits(); }),
     {
       name: 'share_qzone_feed', label: 'share_qzone_feed',
-      description: "Share a Qzone post into a private or group chat as the card QQ itself sends when sharing a post: Qzone signs the card, and the send returns a receipt. For a recommended (空友爱看) post, pass its cell_common.feed_id as tid and the ID of the get_qzone_public_feeds or get_qzone_public_feed_detail result it appears in as source. For one of your own posts, pass its tid alone. Specify exactly one of user_id or group_id. Qzone warns that anyone holding a shared card can open the post, even in a restricted space, and a recommended post's card carries its author's QQ number; share only what the post's original audience permits.",
-      parameters: Type.Object({ tid: string('feed_id of the post; for your own post, its tid', 100), source: Type.Optional(string('Event ID of the result listing a recommended post; omit for your own post', 100)), user_id: Type.Optional(Type.Integer({ minimum: 1 })), group_id: Type.Optional(Type.Integer({ minimum: 1 })) }),
+      description: "Share a Qzone post into a private or group chat as the card QQ itself sends when sharing a post: Qzone signs the card, and the send returns a receipt. For a post listed in a Qzone result, such as a recommended (空友爱看) post from get_qzone_public_feeds or a post from get_qzone_home_feeds, pass its cell_common.feed_id as tid and the ID of that result as source. For one of your own posts, pass its tid alone. Specify exactly one of user_id or group_id. Qzone warns that anyone holding a shared card can open the post, even in a restricted space, and a recommended post's card carries its author's QQ number; share only what the post's original audience permits. A notice in the result is Qzone's warning for this post.",
+      parameters: Type.Object({ tid: string('feed_id of the post; for your own post, its tid', 100), source: Type.Optional(string('Event ID of the result listing the post; omit for your own post', 100)), user_id: Type.Optional(Type.Integer({ minimum: 1 })), group_id: Type.Optional(Type.Integer({ minimum: 1 })) }),
       replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
@@ -210,14 +209,13 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         const actionId = attempt.action.id;
         if (attempt.fresh) {
           // Nothing reaches the chat before the card is sent, so an earlier failure is a definite one.
-          let card: string | undefined;
-          try {
-            const cookies = await qzone.cookies(signal);
-            card = await qzone.card(cookies, listed ?? await qzone.ownFeed(cookies, args.tid, signal), signal);
-          } catch (error) { store.finishAction(actionId, 'failed', { message: errorText(error) }); }
-          if (card !== undefined) {
-            try { store.finishAction(actionId, 'success', { receipt: await social.execute(args.group_id !== undefined ? 'send_group_msg' : 'send_private_msg', { ...target, message: [{ type: 'json', data: { data: card } }] }, signal), card }); }
-            catch (error) { store.finishAction(actionId, definitelyFailed(error) ? 'failed' : 'unknown', { error: error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }, card }); }
+          let share: Awaited<ReturnType<typeof qzoneCard>> | undefined;
+          try { share = await qzoneCard(social, listed ?? await ownFeed(social, args.tid, signal), signal); }
+          catch (error) { store.finishAction(actionId, 'failed', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
+          if (share !== undefined) {
+            const { ark: card, notice } = share; const warned = notice ? { notice } : {};
+            try { store.finishAction(actionId, 'success', { receipt: await social.execute(args.group_id !== undefined ? 'send_group_msg' : 'send_private_msg', { ...target, message: [{ type: 'json', data: { data: card } }] }, signal), card, ...warned }); }
+            catch (error) { store.finishAction(actionId, definitelyFailed(error) ? 'failed' : 'unknown', { error: error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }, card, ...warned }); }
           }
         }
         const outcome = store.actionById(actionId)!;
@@ -342,7 +340,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     }),
   );
   const base = result.filter(tool => config.web.enabled || !['read_webpage', 'search_web'].includes(tool.name));
-  // Sharing reads the account's Qzone cookies and sends a message, so it follows the permissions of those interfaces.
-  const shareable = () => allowed(findSnowLumaAction('get_cookies')) && ['send_private_msg', 'send_group_msg'].some(name => allowed(findSnowLumaAction(name)));
+  // Sharing has SnowLuma sign a card and sends it as a message, so it follows the permissions of those interfaces.
+  const shareable = () => allowed(findSnowLumaAction('get_qzone_share_ark')) && ['send_private_msg', 'send_group_msg'].some(name => allowed(findSnowLumaAction(name)));
   return { faces, current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(toolFor)] };
 }
