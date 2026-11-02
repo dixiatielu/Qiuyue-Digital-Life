@@ -9,6 +9,7 @@ import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemP
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog } from '../src/snowluma-catalog.js';
 import { loadConfig } from '../src/config.js';
 import { event, fixture } from './helpers.js';
+import { eventRef } from '../src/store.js';
 
 test('generated native tools expose canonical SDK names and schemas directly', async () => {
   const f = fixture();
@@ -210,9 +211,11 @@ test('a received image already saved as a sticker is seen as one, and saving it 
     ] } })!;
     f.faux.setResponses([context => { prompts.push(JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')))); return answer('Nice'); }]);
     await f.brain.run(f.store.claim(10)!);
-    assert.ok(prompts[0]!.includes(`Image 0 in event ${image.id} (already your saved sticker ${saved}: Two dolls bopping, for silly joy) has no readable URL`));
-    assert.ok(prompts[0]!.includes(`Image 1 in event ${image.id} (already your saved sticker ${marketSaved}) has no readable URL`));
-    assert.ok(prompts[0]!.includes(`Image 2 in event ${image.id} has no readable URL`));
+    const ref = eventRef(image.id);
+    assert.ok(prompts[0]!.includes(`${ref} 7: [image 0 [动画表情]][image 1 [嘿嘿]][image 2]`));
+    assert.ok(prompts[0]!.includes(`Image 0 in ${ref} (already your saved sticker ${saved}: Two dolls bopping, for silly joy) has no readable URL`));
+    assert.ok(prompts[0]!.includes(`Image 1 in ${ref} (already your saved sticker ${marketSaved}) has no readable URL`));
+    assert.ok(prompts[0]!.includes(`Image 2 in ${ref} has no readable URL`));
     const deleted = f.store.beginAction(crypto.randomUUID(), 'delete_custom_face', { emoji_id: saved }, []).action;
     f.store.finishAction(deleted.id, 'success', null);
     assert.equal(f.store.savedSticker({ file: `${md5}.jpg` }), undefined);

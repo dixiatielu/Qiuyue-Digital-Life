@@ -24,15 +24,6 @@ export function faceIds(event: EnvironmentEvent): string[] {
   const likes = Array.isArray(event.payload.likes) ? event.payload.likes as { emoji_id?: unknown }[] : [];
   return [...segments.filter(segment => segment.type === 'face').map(segment => segment.data?.id), ...likes.map(like => like.emoji_id)].map(String).filter(id => /^\d+$/.test(id));
 }
-/** A copy of an event payload whose faces and reactions carry their names. */
-export function nameFaces(payload: Record<string, any>, names: Record<string, string>): Record<string, any> {
-  const named = (id: unknown) => names[String(id)];
-  return {
-    ...payload,
-    ...(Array.isArray(payload.message) ? { message: payload.message.map((segment: any) => segment?.type === 'face' && named(segment.data?.id) ? { ...segment, data: { ...segment.data, name: named(segment.data.id) } } : segment) } : {}),
-    ...(Array.isArray(payload.likes) ? { likes: payload.likes.map((like: any) => named(like?.emoji_id) ? { ...like, name: named(like.emoji_id) } : like) } : {}),
-  };
-}
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 /** One stored or deflated file from a zip archive. */

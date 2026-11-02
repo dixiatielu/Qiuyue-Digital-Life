@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fauxAssistantMessage as answer } from '@earendil-works/pi-ai';
 import { Drawings, ImageClient, imageType, type Painter } from '../src/drawing.js';
 import { loadConfig } from '../src/config.js';
-import { Store } from '../src/store.js';
+import { Store, eventRef } from '../src/store.js';
 import { deferred, fixture } from './helpers.js';
 
 const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('picture')]);
@@ -66,7 +66,7 @@ test('a drawing is painted apart from the thought and comes back as an observati
     assert.deepEqual(f.store.setting('drawingsUnderWay'), {});
     f.faux.setResponses([context => {
       const content = JSON.stringify(context.messages);
-      assert.ok(content.includes(`The following is your drawing ${started.drawingId} from event ${event.id}`));
+      assert.ok(content.includes(`The following is your drawing ${started.drawingId} from ${eventRef(event.id)}`));
       assert.ok(content.includes(png.toString('base64')));
       return answer('I like how it came out.');
     }]);

@@ -55,6 +55,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, group_id INTEGER, actor_id INTEGER, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT, received_at INTEGER);
       CREATE INDEX IF NOT EXISTS events_pending ON events(status, at);
+      CREATE INDEX IF NOT EXISTS events_group ON events(group_id, at);
+      CREATE INDEX IF NOT EXISTS events_actor ON events(actor_id, at);
       CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, importance INTEGER NOT NULL, subjects TEXT NOT NULL, groups_json TEXT NOT NULL, fictional INTEGER NOT NULL, supersedes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sources(owner_id TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(owner_id,source_id));
       CREATE INDEX IF NOT EXISTS source_dependents ON sources(source_id);
@@ -586,7 +588,7 @@ export class Store {
   /** The message a reply or reaction points at, when it is still retained. */
   messageById(conversation: string, messageId: number): EnvironmentEvent | undefined {
     const filter = this.recordFilter(conversation);
-    const row = this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND json_extract(payload,'$.message_id')=? LIMIT 1`).get(filter.target, messageId);
+    const row = this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND json_extract(payload,'$.message_id')=? ORDER BY at DESC LIMIT 1`).get(filter.target, messageId);
     return row ? this.eventRow(row) : undefined;
   }
   /** QQ system face names by ID, as last read from SnowLuma; empty until then. */

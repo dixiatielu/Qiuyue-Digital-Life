@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
-import { Store } from '../src/store.js';
+import { Store, eventRef } from '../src/store.js';
 import { normalizeEvent, SnowLumaAdapter } from '../src/snowluma.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
 import { publicAddress, publicFetch } from '../src/web.js';
@@ -211,16 +211,16 @@ test('SDK pushes reach observation after pause while heartbeats remain stored ou
       const user = context.messages.find(message => message.role === 'user')!;
       assert.equal(typeof user.content, 'object');
       const content = user.content as { type: string; text: string }[];
-      const observations = JSON.parse(content[0]!.text.split('\n').slice(1).join('\n'));
-      assert.equal(observations.length, pushes.length);
-      assert.ok(observations.some((e: any) => e.messageType === 'private' && e.text === 'Private chat observation' && e.groupId === undefined));
-      assert.ok(observations.some((e: any) => e.postType === 'message_sent'));
-      assert.ok(observations.some((e: any) => e.groupId === 999));
-      assert.ok(observations.some((e: any) => e.notice?.notice_type === 'friend_recall'));
-      assert.ok(observations.some((e: any) => e.details?.flag === 'friend-flag' && e.details.comment === 'Add me as a friend'));
-      assert.ok(!observations.some((e: any) => e.details?.meta_event_type === 'heartbeat'));
-      assert.ok(observations.some((e: any) => e.details?.meta_event_type === 'lifecycle'));
-      assert.ok(observations.some((e: any) => e.details?.custom?.content === 'Extended event'));
+      const observations = content[0]!.text;
+      assert.equal(observations.match(/^(\d{4}-\d\d-\d\d )?\d\d:\d\d:\d\d #[0-9a-f]{8} /gm)?.length, pushes.length);
+      assert.match(observations, /^Private chat with 7:\n(.+\n)*.+ \[message_id 21\] 7: Private chat observation$/m);
+      assert.match(observations, / \[message_id 22\] me: Own output$/m);
+      assert.match(observations, /^Group 999:\n(.+\n)*.+ \[message_id 23\] 8: Observation from an unconfigured group$/m);
+      assert.match(observations, / 7 recalled their message #[0-9a-f]{8} \(7\)$/m);
+      assert.match(observations, / \[request:friend:\] 8 \{"user_id":8,"flag":"friend-flag","comment":"Add me as a friend"\}$/m);
+      assert.doesNotMatch(observations, /heartbeat/);
+      assert.match(observations, / \[meta_event:lifecycle:connect\]$/m);
+      assert.match(observations, / \[future_push:\] \{"custom":\{"content":"Extended event"\}\}$/m);
       return fauxAssistantMessage('Perceived; staying quiet for now');
     }]);
     runtime.control('resume'); await runtime.tick(); await runtime.idle();
@@ -268,7 +268,8 @@ test('large observations can be consumed without losing their source IDs or over
     const sources = Array.from({ length: 20 }, (_, index) => event(f.store, `Event ${index}: ` + 'long message'.repeat(4000)));
     f.faux.setResponses([context => {
       const serialized = JSON.stringify(context);
-      for (const source of sources) assert.ok(serialized.includes(source.id));
+      // Each event keeps its ref, and its text is cut short with where to read the rest.
+      for (const source of sources) assert.ok(serialized.includes(`${eventRef(source.id)} `) && serialized.includes(`chars; read_event ${eventRef(source.id)}]`));
       assert.ok(estimatedContextTokens(context.messages) < f.cfg.limits.contextTokens - f.cfg.limits.outputReserveTokens - f.cfg.limits.contextSafetyTokens);
       return fauxAssistantMessage('Observe first; read the original source later if needed');
     }]);

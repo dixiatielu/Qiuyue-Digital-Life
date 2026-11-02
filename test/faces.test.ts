@@ -52,8 +52,8 @@ test('observations name faces and reactions and show each face once a thought, a
       answer('Seen'),
     ]);
     await f.brain.run(f.store.claim(10)!);
-    assert.match(observed, /\\"type\\":\\"face\\",\\"data\\":\{\\"id\\":\\"424\\",\\"name\\":\\"续标识\\"\}/);
-    assert.match(observed, /\\"emoji_id\\":\\"277\\",\\"count\\":1,\\"name\\":\\"汪汪\\"\}.*\\"emoji_id\\":\\"128077\\",\\"count\\":1\}/);
+    // The reaction joins the line of the message it reacts to.
+    assert.match(observed, /\[message_id 31\] 7: \[face 424 续标识\]this one\?\\n  ↳ 7 reacted \[emoji 424 续标识\]\[emoji 277 汪汪\]\[emoji 128077 👍\]/);
     // Seen once each, though 424 is both sent and reacted with.
     assert.equal(observed.split('QQ system face 424 续标识, as it looks:').length, 2);
     assert.equal(observed.split('QQ system face 277 汪汪, as it looks:').length, 2);

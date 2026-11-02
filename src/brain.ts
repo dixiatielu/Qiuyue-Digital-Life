@@ -5,13 +5,13 @@ import type { Config } from './config.js';
 import type { Monitor } from './monitor.js';
 import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
 import { addressedTo, errorText, eventChat, isAmbient } from './domain.js';
-import { Store, conversationOf, digest } from './store.js';
+import { Store, conversationOf, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
-import { ChatRecord, recordTime } from './record.js';
-import { faceCaption, faceIds, nameFaces } from './faces.js';
+import { ChatRecord, observationText, recordTime } from './record.js';
+import { faceCaption, faceIds } from './faces.js';
 import type { SemanticRecall } from './recall.js';
 
 /** Actual online activities offered at life wakes; nothing pushes them, so they only happen when chosen. A new platform joins the digital life's days by adding its tools here. */
@@ -75,13 +75,6 @@ export interface Brain {
   steer(observation: Observation): Promise<boolean>;
   consolidate(): Promise<void>;
   abort(): void;
-}
-
-/** faces names system faces by ID, so faces and reactions read as what they are. */
-export function displayEvent(event: EnvironmentEvent, preview = 2000, faces: Record<string, string> = {}) {
-  const compact = (value: unknown) => { const text = JSON.stringify(value); return text && text.length > preview ? { preview: text.slice(0, preview), truncated: true } : value; };
-  const payload = nameFaces(event.payload, faces);
-  return { id: event.id, kind: event.kind, at: new Date(event.at).toISOString(), groupId: event.groupId, actorId: event.actorId, postType: event.payload.post_type, messageType: event.payload.message_type, subType: event.payload.sub_type, targetId: event.payload.target_id, sender: compact(event.payload.sender), text: event.text.slice(0, preview), truncated: event.text.length > preview, messageId: event.payload.message_id, segments: event.kind === 'message' ? compact(payload.message) : undefined, notice: event.kind.startsWith('notice:') ? compact(payload) : undefined, details: event.payload.post_type && event.kind !== 'message' && !event.kind.startsWith('notice:') ? compact(event.payload) : undefined, wake: event.kind === 'wake' ? event.payload : undefined };
 }
 
 export class PiBrain implements Brain {
@@ -371,7 +364,8 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const ids = [...new Set(observation.events.flatMap(faceIds))];
     const rests = observation.events.filter(event => event.kind === 'rest_backlog');
     const faces = ids.length || rests.length ? await this.tools.faces.names(this.controller.signal) : {};
-    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (use read_event to read truncated content):\n${JSON.stringify(observation.events.map(event => displayEvent(event, preview, faces)))}` }];
+    // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
+    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, this.config.snowluma.selfId, observation.events, faces, preview)}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
     // Saved stickers that fit what was said come with it, each once a thought, so sending one needs no call to look them up (ADR-0009).
@@ -382,25 +376,28 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.config.limits.contextTokens * 0.4;
     // A finished drawing is seen as it comes back, ahead of the images people sent, since she has to see it before sending it (ADR-0018).
     for (const event of observation.events.filter(event => event.kind === 'drawing' && event.payload.error === undefined)) {
-      const id = String(event.payload.drawingId);
+      const id = String(event.payload.drawingId); const ref = eventRef(event.id);
       const picture = this.tools.drawings?.image(id);
-      if (!picture) { content.push({ type: 'text', text: `The picture of your drawing ${id} in event ${event.id} could not be read.` }); continue; }
-      if (!fits()) { content.push({ type: 'text', text: `Your drawing ${id} from event ${event.id} was not loaded due to the context limit; use view_event_image with index 0 to view it.` }); continue; }
-      content.push({ type: 'text', text: `The following is your drawing ${id} from event ${event.id}` }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
+      if (!picture) { content.push({ type: 'text', text: `The picture of your drawing ${id} in ${ref} could not be read.` }); continue; }
+      if (!fits()) { content.push({ type: 'text', text: `Your drawing ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.` }); continue; }
+      content.push({ type: 'text', text: `The following is your drawing ${id} from ${ref}` }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
     }
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
+      const ref = eventRef(event.id);
       const sticker = this.store.savedSticker(segment.data ?? {});
       const saved = sticker ? ` (already your saved sticker ${sticker.emojiId}${sticker.desc ? `: ${sticker.desc}` : ''})` : '';
-      if (!fits()) {
-        content.push({ type: 'text', text: `Image ${index} from event ${event.id}${saved} was not loaded due to the context limit; use view_event_image to view it.` }); continue;
-      }
       const url = segment.data?.url;
-      if (typeof url !== 'string') { content.push({ type: 'text', text: `Image ${index} in event ${event.id}${saved} has no readable URL; the original event is retained.` }); continue; }
+      // A line leaves the URL out, so saving the image as a sticker or sending it on takes it from its label.
+      const from = typeof url === 'string' ? `; url: ${url}` : '';
+      if (!fits()) {
+        content.push({ type: 'text', text: `Image ${index} from ${ref}${saved} was not loaded due to the context limit; use view_event_image to view it${from}` }); continue;
+      }
+      if (typeof url !== 'string') { content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} has no readable URL; the original event is retained.` }); continue; }
       try {
         const image = await fetchImage(url, this.controller.signal);
         // The label outlives the image, which is folded when the thought ends.
-        content.push({ type: 'text', text: `The following is image ${index} from event ${event.id}${saved}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
-      } catch { content.push({ type: 'text', text: `Image ${index} in event ${event.id}${saved} could not be read` }); }
+        content.push({ type: 'text', text: `The following is image ${index} from ${ref}${saved}${from}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
+      } catch { content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} could not be read${from}` }); }
     }
     // A face's name rarely says what it shows, so each face is seen once a thought, after the images people sent.
     const unseen = ids.filter(id => faces[id] && !this.facesSeen.has(id)).slice(0, Math.max(0, this.config.limits.maxImages - count));

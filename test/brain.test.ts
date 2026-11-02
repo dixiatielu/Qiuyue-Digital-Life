@@ -4,7 +4,7 @@ import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-
 import { deferred, event, fixture } from './helpers.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { ActionNotDispatchedError } from '../src/snowluma.js';
-import type { Store } from '../src/store.js';
+import { eventRef, type Store } from '../src/store.js';
 import { ChatRecord } from '../src/record.js';
 
 /** A private message from person 7. */
@@ -397,6 +397,33 @@ test('a cancelled thought leaves its images in view for the next thought, which 
     assert.deepEqual(f.sent.map(item => item.args.message), ['A cute cat']);
     assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /aGVsbG8=/);
     assert.equal((f.store.logs().find(log => log.kind === 'context_folded')?.data as { images?: number }).images, 1);
+  } finally { f.store.close(); }
+});
+
+test('an observation shows its events as chat-record lines, with the QQ numbers, message IDs, and image URLs a thought acts on', async () => {
+  const f = fixture();
+  f.tools.faces.names = async () => ({ 424: '续标识' }); f.tools.faces.image = async () => { throw new Error('no picture'); };
+  const receive = (kind: string, actorId: number, payload: Record<string, unknown>, groupId?: number) => f.store.receive({ key: crypto.randomUUID(), kind, at: Date.now(), text: '', groupId, actorId, payload })!;
+  try {
+    const tea = receive('message', 8, { message_type: 'group', message_id: 40, sender: { nickname: '寒火', card: '' }, message: [{ type: 'text', data: { text: 'Tea at five' } }] }, 100);
+    f.store.acknowledge(f.store.claim(10)!.batchId);
+    const typing = receive('notice:notify:input_status', 7, { status_text: '对方正在输入...' });
+    const image = receive('message', 7, { message_type: 'group', message_id: 41, sender: { nickname: 'nick', card: '地铁' }, message: [{ type: 'reply', data: { id: '40' } }, { type: 'image', data: { url: 'http://127.0.0.1/sticker.png', summary: '[动画表情]' } }] }, 100);
+    receive('notice:group_msg_emoji_like:add', 7, { message_id: 40, likes: [{ emoji_id: '424', count: 1 }] }, 100);
+    const card = receive('notice:group_card:', 7, { group_id: 100, user_id: 7, card_new: '地铁', card_old: '地下铁' }, 100);
+    let observed = '';
+    f.faux.setResponses([context => { observed = (context.messages.findLast(message => JSON.stringify(message).includes('New environment observations'))!.content as { text: string }[]).map(block => block.text).join('\n'); return answer('Quiet'); }]);
+    await f.brain.run(f.store.claim(10)!);
+    const time = '\\d\\d:\\d\\d:\\d\\d';
+    // Chats come in the order they first appear, and today's events need no date line.
+    assert.match(observed, new RegExp(`^Private chat with 地铁\\(7\\):\\n${time} ${eventRef(typing.id)} 地铁\\(7\\) is typing\\nGroup 100:\\n`, 'm'));
+    assert.match(observed, new RegExp(`^${time} ${eventRef(image.id)} \\[message_id 41\\] 地铁\\(7\\): \\[reply to ${eventRef(tea.id)} \\(寒火\\(8\\)\\)\\] \\[image 0 \\[动画表情\\]\\]$`, 'm'));
+    // A reaction to a message the observation does not show says which message, with its message_id.
+    assert.match(observed, new RegExp(`^${time} 地铁\\(7\\) reacted \\[emoji 424 续标识\\] to ${eventRef(tea.id)} \\(寒火\\(8\\): Tea at five\\) \\[message_id 40\\]$`, 'm'));
+    assert.match(observed, new RegExp(`^${time} ${eventRef(card.id)} \\[notice:group_card:\\] 地铁\\(7\\) \\{"card_new":"地铁","card_old":"地下铁"\\}$`, 'm'));
+    assert.doesNotMatch(observed, /— \d{4}-\d\d-\d\d —|"segments"|"sender"/);
+    // A line leaves an image's URL out; its label carries it.
+    assert.ok(observed.includes(`Image 0 in ${eventRef(image.id)} could not be read; url: http://127.0.0.1/sticker.png`));
   } finally { f.store.close(); }
 });
 
