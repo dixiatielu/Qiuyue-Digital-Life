@@ -31,6 +31,7 @@ const onlineActivities: { activity: string; tools: string[]; memoryKind?: Memory
   { activity: 'Change your avatar, nickname, Qzone name or description, or group card', tools: ['set_qq_avatar', 'set_qq_profile', 'set_qzone_profile', 'set_group_card'] },
   { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'] },
   { activity: 'Write or reread your diary', tools: ['remember', 'recall'], memoryKind: 'note' },
+  { activity: 'Draw something', tools: ['draw'] },
   { activity: 'Look things up or read online: what is new in something you follow, news, weather, whatever you are curious about', tools: ['search_web', 'read_webpage'] },
 ];
 /** The summarized text of a continuity summary, without its framing line and record references. */
@@ -51,7 +52,7 @@ function localTime(at: number) {
 }
 /** A day of life runs from 05:00 local time, so staying up past midnight does not start the next one. */
 const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
-const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : tool === 'share_qzone_feed' ? 'qzone_share' : `snowluma:${tool}`;
+const experienceKind = (tool: string) => tool === 'search_web' ? 'search' : tool === 'read_webpage' ? 'reading' : tool === 'share_qzone_feed' ? 'qzone_share' : tool === 'draw' ? 'drawing' : `snowluma:${tool}`;
 // Self-presentation the agent sets and later sees as current state.
 const currentValue: Record<string, (args: Record<string, unknown>) => unknown> = { set_self_longnick: args => args.longNick ?? args.long_nick, set_diy_online_status: args => args.wording };
 /** Messages, stickers, reactions, and pokes (ADR-0002): their success receipts need no call of their own, and a newer message in their chat makes an unsent one stale. */
@@ -378,10 +379,19 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     for (const sticker of stickers) this.stickersShown.add(sticker.emojiId);
     if (stickers.length) content.push({ type: 'text', text: `Saved stickers of yours whose descriptions fit what was just said, in case you want to send one with send_custom_face; sending none is fine too:\n${JSON.stringify(stickers.map(({ emojiId, desc }) => ({ emoji_id: emojiId, desc })))}` });
     let count = 0;
+    const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.config.limits.contextTokens * 0.4;
+    // A finished drawing is seen as it comes back, ahead of the images people sent, since she has to see it before sending it (ADR-0018).
+    for (const event of observation.events.filter(event => event.kind === 'drawing' && event.payload.error === undefined)) {
+      const id = String(event.payload.drawingId);
+      const picture = this.tools.drawings?.image(id);
+      if (!picture) { content.push({ type: 'text', text: `The picture of your drawing ${id} in event ${event.id} could not be read.` }); continue; }
+      if (!fits()) { content.push({ type: 'text', text: `Your drawing ${id} from event ${event.id} was not loaded due to the context limit; use view_event_image with index 0 to view it.` }); continue; }
+      content.push({ type: 'text', text: `The following is your drawing ${id} from event ${event.id}` }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
+    }
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
       const sticker = this.store.savedSticker(segment.data ?? {});
       const saved = sticker ? ` (already your saved sticker ${sticker.emojiId}${sticker.desc ? `: ${sticker.desc}` : ''})` : '';
-      if (count++ >= this.config.limits.maxImages || estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS > this.config.limits.contextTokens * 0.4) {
+      if (!fits()) {
         content.push({ type: 'text', text: `Image ${index} from event ${event.id}${saved} was not loaded due to the context limit; use view_event_image to view it.` }); continue;
       }
       const url = segment.data?.url;

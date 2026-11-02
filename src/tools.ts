@@ -13,6 +13,7 @@ import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
 import { faceCaption, FaceCatalog } from './faces.js';
 import type { SemanticRecall } from './recall.js';
+import type { Drawings } from './drawing.js';
 
 /** reviewing: a memory_maintenance event is part of this thought. */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean }
@@ -70,9 +71,9 @@ function jpegImages(value: unknown): unknown {
   }
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, jpegImages(item)]));
 }
-export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog }
+export interface ToolSet { current(): AgentTool[]; readonly faces: FaceCatalog; readonly drawings?: Drawings }
 
-export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall): ToolSet {
+export function createTools(config: Config, store: Store, social: SocialAdapter, context: () => ThoughtContext, recall?: SemanticRecall, drawings?: Drawings): ToolSet {
   const web = new WebReader(config.web);
   const faces = new FaceCatalog(store, social);
   function tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<unknown> | unknown): AgentTool {
@@ -90,13 +91,19 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
   }
   const result: AgentTool[] = [
     {
-      name: 'view_event_image', label: 'view_event_image', description: 'View an image in an original event. Use index (starting at 0) for an image in a message; use url for an image URL in any other event, such as a Qzone post in a tool result. Specify exactly one. Only read an image URL actually present in that event.',
+      name: 'view_event_image', label: 'view_event_image', description: 'View an image in an original event. Use index (starting at 0) for an image in a message, or index 0 for the picture of a drawing event; use url for an image URL in any other event, such as a Qzone post in a tool result. Specify exactly one. Only read an image URL actually present in that event.',
       parameters: Type.Object({ id: string('Event ID', 100), index: Type.Optional(Type.Integer({ minimum: 0 })), url: Type.Optional(string('Image URL as it appears in the event', 2000)) }), replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
         if ((args.index === undefined) === (args.url === undefined)) throw new Error('Specify exactly one of index or url.');
         const event = store.event(store.resolve(args.id));
         if (!event) throw new Error('The experience does not exist or has been deleted.');
+        if (event.kind === 'drawing' && args.index === 0) {
+          const picture = drawings?.image(String(event.payload.drawingId));
+          if (!picture) throw new Error('The drawing has no picture, or its file has been removed.');
+          context().sources.add(event.id);
+          return { content: [{ type: 'text', text: `Your drawing ${event.payload.drawingId} from event ${event.id}` }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType }], details: {} };
+        }
         let url: unknown;
         if (args.url !== undefined) {
           url = String(args.url).replaceAll('&amp;', '&');
@@ -225,6 +232,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         return { content: [{ type: 'text', text: JSON.stringify(outcome.result) }, { type: 'text', text: `Local execution information: ${JSON.stringify(metadata)}` }], details: metadata };
       },
     },
+    tool('draw', "Draw a picture from a description: something you feel like drawing, or what someone asked for if you want to. Painting takes half a minute or more, so this returns at once and the finished drawing comes to you later as a drawing observation with its picture; carry on meanwhile. The description is all the painter sees, so say what you mean in full: subject, composition, style, colors, and any words in the picture, without referring to messages or images. Once you have seen it, send or use it by putting its drawing ID where an image file goes.", Type.Object({ prompt: string('What to draw', 4000) }), args => drawings!.start(args.prompt, [...context().triggers])),
     tool('read_webpage', 'Read a public webpage.', Type.Object({ url: string('Public webpage URL', 2000) }), async (args, signal) => recordToolExperience('reading', await web.read(args.url, signal))),
     tool('search_web', 'Search the web for public information.', Type.Object({ query: string('Search query, at most 128 Unicode characters', 128) }), async (args, signal) => recordToolExperience('search', await web.search(args.query, signal))),
   ];
@@ -257,9 +265,11 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
   const describing = () => allowed(findSnowLumaAction('modify_custom_face'));
   /** One external action: recorded before it is sent and deduplicated, with an unconfirmed outcome kept as unknown (ADR-0008). */
   async function act(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
+    // The record keeps a drawing's ID; only what is sent carries its picture. A missing drawing fails before anything is recorded.
+    const sent = drawings ? drawings.resolve(args) as Record<string, unknown> : args;
     const attempt = store.beginAction(`snowluma:${crypto.randomUUID()}`, name, args, [...context().sources], [...context().triggers], config.limits.actionsPerHour);
     if (attempt.fresh) {
-      try { store.finishAction(attempt.action.id, 'success', await social.execute(name, args, signal)); }
+      try { store.finishAction(attempt.action.id, 'success', await social.execute(name, sent, signal)); }
       catch (error) { store.finishAction(attempt.action.id, definitelyFailed(error) ? 'failed' : 'unknown', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
     }
     return { outcome: store.actionById(attempt.action.id)!, reused: !attempt.fresh };
@@ -339,8 +349,8 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       return actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, inputSchema: toolFor(action).parameters, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }));
     }),
   );
-  const base = result.filter(tool => config.web.enabled || !['read_webpage', 'search_web'].includes(tool.name));
+  const base = result.filter(tool => (config.web.enabled || !['read_webpage', 'search_web'].includes(tool.name)) && (drawings || tool.name !== 'draw'));
   // Sharing has SnowLuma sign a card and sends it as a message, so it follows the permissions of those interfaces.
   const shareable = () => allowed(findSnowLumaAction('get_qzone_share_ark')) && ['send_private_msg', 'send_group_msg'].some(name => allowed(findSnowLumaAction(name)));
-  return { faces, current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(toolFor)] };
+  return { faces, drawings, current: () => [...base.filter(tool => tool.name !== 'share_qzone_feed' || shareable()), ...snowlumaCatalog.filter(allowed).map(toolFor)] };
 }

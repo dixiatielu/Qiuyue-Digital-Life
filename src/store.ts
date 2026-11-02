@@ -18,8 +18,8 @@ const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND group_id IS NOT 
 const claimable = `status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') AND (?=0 OR NOT (${restHolds}))`;
 /** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
 const recallable = `active=1 AND kind NOT IN (${developmentKinds.map(kind => `'${kind}'`).join(',')})`;
-/** Events the program writes about its own scheduling and bookkeeping; they record nothing anyone else did. */
-const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap', 'rest_backlog']);
+/** Events the program writes about its own scheduling and bookkeeping, and the digital life's own finished drawings; they record nothing anyone else did. */
+const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap', 'rest_backlog', 'drawing']);
 /** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
 const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+)$/, practice: /^(global|group:\d+)$/, impression: /^person:\d+$/ };
 /** A conversation is group:<id> or private:<qq>; its record is what happened there. */
@@ -83,7 +83,7 @@ export class Store {
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('wakes') WHERE name='rest'").get()) this.db.exec('ALTER TABLE wakes ADD COLUMN rest INTEGER NOT NULL DEFAULT 0');
     // Whether an event is addressed to the digital life is settled when it arrives, while the message it replies to is known to be its own.
     if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='addressed'").get()) this.db.exec('ALTER TABLE events ADD COLUMN addressed INTEGER NOT NULL DEFAULT 0');
-    for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
+    for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null, drawingsUnderWay: {} })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
     const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
     if (self) this.selfId = parse<number>(self.value);
   }

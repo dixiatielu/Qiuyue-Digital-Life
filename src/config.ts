@@ -18,6 +18,8 @@ export interface Config {
   web: { enabled: boolean; searchUrl: string; searchKeyEnv: string; timeoutMs: number; maxBytes: number };
   /** Recall by meaning, through an OpenAI-compatible /embeddings endpoint. Every threshold depends on the model: threshold for what messages call to mind, searchThreshold for the few words of a deliberate search, which score lower, and stickerThreshold for saved stickers whose descriptions fit what was said. */
   embedding: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; threshold: number; searchThreshold: number; limit: number; stickerThreshold: number; stickerLimit: number; timeoutMs: number; selfNames: string[] };
+  /** Drawing through an OpenAI-compatible /images/generations endpoint (ADR-0018); finished drawings are kept in dir. */
+  drawing: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; timeoutMs: number; dir: string };
 }
 
 export function loadConfig(path: string): Config {
@@ -38,11 +40,12 @@ export function loadConfig(path: string): Config {
     development: { scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
     web: { enabled: true, searchUrl: 'https://api.deepseek.com/v1/tools/search', searchKeyEnv: 'DEEPSEEK_API_KEY', timeoutMs: 15_000, maxBytes: 2_000_000, ...raw.web },
     embedding: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [], ...raw.embedding },
+    drawing: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', timeoutMs: 300_000, ...raw.drawing, dir: resolve(base, raw.drawing?.dir ?? 'data/drawings') },
   };
   if (!config.persona.trim()) throw new Error('The persona content in personaFile must not be empty.');
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
   validateModelConfig(config.model);
-  for (const name of [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
+  for (const name of [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
   if (!Number.isSafeInteger(config.snowluma.selfId) || config.snowluma.selfId <= 0) throw new Error('snowluma.selfId must be an actual QQ account ID.');
   if (!Array.isArray(config.snowluma.groups) || config.snowluma.groups.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('snowluma.groups must be an array of group IDs for history recovery; it may be empty.');
   const url = new URL(config.snowluma.url);
@@ -62,15 +65,17 @@ export function loadConfig(path: string): Config {
   if (!Number.isSafeInteger(config.compaction.retries) || config.compaction.retries < 0 || config.compaction.retries > 3) throw new Error('compaction.retries must be between 0 and 3.');
   if (typeof config.compaction.idleRatio !== 'number' || !(config.compaction.idleRatio > 0 && config.compaction.idleRatio <= 1)) throw new Error('compaction.idleRatio must be greater than 0 and at most 1.');
   if (config.compaction.summaryMaxTokens > config.limits.outputReserveTokens) throw new Error('summaryMaxTokens cannot exceed outputReserveTokens.');
-  for (const value of [config.life.enabled, config.life.allowFiction, config.life.freeTime.enabled, config.web.enabled, config.embedding.enabled]) if (typeof value !== 'boolean') throw new Error('Switches must be boolean values.');
+  for (const value of [config.life.enabled, config.life.allowFiction, config.life.freeTime.enabled, config.web.enabled, config.embedding.enabled, config.drawing.enabled]) if (typeof value !== 'boolean') throw new Error('Switches must be boolean values.');
   if (freeTime.quietMinMs > freeTime.quietMaxMs) throw new Error('life.freeTime.quietMinMs cannot exceed quietMaxMs.');
   const embedding = config.embedding;
-  if (embedding.enabled) {
+  for (const [name, endpoint] of [['embedding', embedding], ['drawing', config.drawing]] as const) {
+    if (!endpoint.enabled) continue;
     let url: URL | undefined;
-    try { url = new URL(embedding.baseUrl); } catch { /* reported below */ }
-    if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('embedding.baseUrl must be an HTTP/HTTPS URL without credentials, query parameters, or a fragment, such as https://api.openai.com/v1.');
-    if (typeof embedding.model !== 'string' || !embedding.model.trim()) throw new Error('embedding.model must not be empty.');
+    try { url = new URL(endpoint.baseUrl); } catch { /* reported below */ }
+    if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error(`${name}.baseUrl must be an HTTP/HTTPS URL without credentials, query parameters, or a fragment, such as https://api.openai.com/v1.`);
+    if (typeof endpoint.model !== 'string' || !endpoint.model.trim()) throw new Error(`${name}.model must not be empty.`);
   }
+  if (!Number.isSafeInteger(config.drawing.timeoutMs) || config.drawing.timeoutMs <= 0) throw new Error('drawing.timeoutMs must be a positive integer.');
   for (const key of ['threshold', 'searchThreshold', 'stickerThreshold'] as const) if (typeof embedding[key] !== 'number' || !(embedding[key] > 0 && embedding[key] < 1)) throw new Error(`embedding.${key} must be between 0 and 1; calibrate it for the embedding model.`);
   for (const key of ['limit', 'stickerLimit'] as const) if (!Number.isSafeInteger(embedding[key]) || embedding[key] <= 0 || embedding[key] > 20) throw new Error(`embedding.${key} must be an integer from 1 to 20.`);
   if (!Number.isSafeInteger(embedding.timeoutMs) || embedding.timeoutMs <= 0) throw new Error('embedding.timeoutMs must be a positive integer.');

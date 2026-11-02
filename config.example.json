@@ -80,6 +80,13 @@
     "timeoutMs": 15000,
     "selfNames": []
   },
+  "drawing": {
+    "enabled": false,
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "REPLACE_WITH_AN_IMAGE_MODEL",
+    "apiKeyEnv": "MODEL_API_KEY",
+    "timeoutMs": 300000
+  },
   "compaction": {
     "keepRecentTokens": 12000,
     "summaryMaxTokens": 2048,
