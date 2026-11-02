@@ -163,6 +163,27 @@ test('reading on from the review point moves it forward, while lookups and jumps
   } finally { f.store.close(); }
 });
 
+test('a conversation that reads a chat record to its end hears that new messages come by themselves', async () => {
+  const f = fixture();
+  try {
+    f.store.bindAccount(900);
+    const t = Date.now() - 60_000;
+    for (let index = 0; index < 3; index++) say(f.store, 7, `line ${index}`, { at: t + index * 1000 });
+    f.faux.setResponses([
+      answer(call('read_chat_record', { conversation: 'group:100', from: new Date(t).toISOString(), limit: 1 })),
+      context => {
+        const result = JSON.stringify(context.messages.at(-1));
+        assert.match(result, /More follows/); assert.doesNotMatch(result, /by themselves/);
+        return answer(call('read_chat_record', { conversation: 'group:100', from: new Date(t + 1000).toISOString() }));
+      },
+      context => { assert.match(JSON.stringify(context.messages.at(-1)), /line 2.*This is the end of the record so far\.\\nNewer messages come to you by themselves.*潜水.*reply empty/); return answer(''); },
+    ]);
+    event(f.store, 'A new message', 100);
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(f.faux.state.callCount, 3);
+  } finally { f.store.close(); }
+});
+
 test('development reaches each thought by scope and people present, and chat records are folded when the thought ends', async () => {
   const f = fixture();
   try {

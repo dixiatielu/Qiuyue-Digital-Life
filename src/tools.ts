@@ -178,7 +178,9 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
         const page = record.page(from, limit);
         // Reading on from the review point moves it. A jump ahead skips what lies between, which only a review means to do.
         if (page.through !== undefined && (from <= mark || context().reviewing)) store.markReviewed(args.conversation, page.through);
-        return { content: [{ type: 'text', text: page.text }], details: {} };
+        // Reading on past the end would only wait for what comes anyway, which is how a conversation falls into polling.
+        const caughtUp = page.next === undefined && !context().reviewing;
+        return { content: [{ type: 'text', text: caughtUp ? `${page.text}\nNewer messages come to you by themselves; you need not read again to wait for them. If you just want to read along, as people lurk (潜水) in a group, reply empty.` : page.text }], details: {} };
       },
     },
     tool('set_activity', 'Record or clear the current activity.', Type.Object({ activity: Type.String({ maxLength: 2000 }) }), args => { store.setActivity(args.activity, [...context().sources]); return store.settings(); }),
