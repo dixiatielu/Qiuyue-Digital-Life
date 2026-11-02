@@ -104,7 +104,8 @@ test('compact runs keep triggers, queued observations, tool details and uncertai
   } finally { release.resolve(); await running.catch(() => {}); monitor.close(); store.close(); }
 });
 
-test('activity line distinguishes request time, output silence and tool time, and clears when idle', () => {
+test('activity line distinguishes request time, output silence and tool time, and clears when idle', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 100_000 });
   const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
   try {
     const model = new DisplayModel(); model.connected = true;
@@ -112,9 +113,10 @@ test('activity line distinguishes request time, output silence and tool time, an
     const activity = new ActivityLine(model, () => now);
     model.apply(monitor.snapshot()); assert.deepEqual(activity.render(80), []);
     monitor.startRun('run:test', { batchId: 'batch:test', events: [] });
+    t.mock.timers.tick(1);
     monitor.requestStarted();
     model.apply(monitor.snapshot());
-    now = model.status!.busy!.since + 75_000;
+    now = model.status!.busy!.requestStartedAt! + 75_000;
     const first = activity.render(80);
     assert.equal(first.length, 2);
     assert.match(plainText(first[0]!), /Waiting for model… · Request 1: 1m 15s/);
