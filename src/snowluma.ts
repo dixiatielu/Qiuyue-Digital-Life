@@ -103,4 +103,11 @@ export class SnowLumaAdapter implements SocialAdapter {
     return this.client.raw(action.name as SnowLumaAction, args as never, { signal });
   }
 }
-export const definitelyFailed = (error: unknown): boolean => error instanceof ActionNotDispatchedError || (error instanceof SnowLumaApiError && [400, 401, 403, 1400, 1401, 1403].includes(error.retcode));
+export function definitelyFailed(error: unknown, action?: string): boolean {
+  if (error instanceof ActionNotDispatchedError) return true;
+  if (!(error instanceof SnowLumaApiError)) return false;
+  // This exact SetStatus message is a QQ rejection; generic retcode 100 also covers transport errors.
+  // https://github.com/SnowLuma/SnowLuma/blob/e9faec0e28298c6837ecd41d6132900c7bf08343/packages/core/src/bridge/apis/profile.ts#L84-L96
+  return [400, 401, 403, 1400, 1401, 1403].includes(error.retcode)
+    || (action === 'set_diy_online_status' && error.retcode === 100 && error.wording === 'set status fail');
+}

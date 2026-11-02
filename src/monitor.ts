@@ -3,14 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
 import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
-import type { Action, EnvironmentEvent, Observation } from './domain.js';
+import { isAmbient, type Action, type EnvironmentEvent, type Observation } from './domain.js';
 import { Store, type StoreNotice } from './store.js';
 
 export interface DisplayItem {
   id: string; at: number;
-  type: 'environment' | 'observation' | 'assistant' | 'tool' | 'action' | 'system';
+  type: 'environment' | 'observation' | 'assistant' | 'tool' | 'action' | 'system' | 'run';
   title: string; text: string; state?: string; details?: string; source?: string;
   quiet?: boolean; runId?: string;
+  eventKind?: string; eventIds?: string[]; observationId?: string; receivedAt?: number;
+  startedAt?: number; durationMs?: number; summary?: string;
 }
 export interface DisplayStatus {
   model: string; connection: string; phase: string; paused: boolean; lifeEnabled: boolean;
@@ -18,12 +20,16 @@ export interface DisplayStatus {
   contextTokens?: number; inputBudget?: number; contextLimit: number;
   busy?: DisplayBusy;
 }
-export type BusyStage = 'preparing' | 'thinking' | 'writing' | 'calling' | 'tool';
+export type BusyStage = 'preparing' | 'compacting' | 'waiting' | 'thinking' | 'writing' | 'calling' | 'tool';
 /** What the current thinking run is doing; `since` is when the run started. */
-export interface DisplayBusy { stage: BusyStage; since: number; tool?: string }
+export interface DisplayBusy {
+  stage: BusyStage; since: number; tool?: string; runId?: string; stageSince?: number;
+  requestCount?: number; requestStartedAt?: number; lastOutputAt?: number; outputChunks?: number;
+  completedTools?: number; lastCompletedTool?: string;
+}
 export function busyLabel(busy: DisplayBusy) {
   const tool = busy.tool ?? ui('tool', '工具');
-  return { preparing: ui('Preparing observation', '准备观察'), thinking: ui('Thinking', '思考中'), writing: ui('Writing', '输出文字'), calling: ui(`Preparing ${tool}`, `准备调用 ${tool}`), tool: ui(`Running ${tool}`, `执行 ${tool}`) }[busy.stage];
+  return { preparing: ui('Preparing context', '准备上下文'), compacting: ui('Compacting context', '整理上下文'), waiting: ui('Waiting for model', '等待模型返回'), thinking: ui('Model generating', '模型正在生成'), writing: ui('Writing', '输出文字'), calling: ui(`Preparing ${tool}`, `准备调用 ${tool}`), tool: ui(`Running ${tool}`, `执行 ${tool}`) }[busy.stage];
 }
 export interface DisplayCursor { instanceId: string; seq: number }
 export type DisplayChange = { type: 'item'; item: DisplayItem } | { type: 'status'; status: DisplayStatus };
@@ -59,6 +65,7 @@ export class Monitor {
   private busy?: DisplayBusy;
   private runningTools = new Map<string, string>();
   private runId?: string;
+  private runActions = new Map<string, Action['status']>();
   private generation = 0;
   private assistantId?: string;
   private contextTokens?: number;
@@ -131,7 +138,8 @@ export class Monitor {
     this.totalItemBytes += bytes - (this.itemBytes.get(item.id) ?? 0); this.itemBytes.set(item.id, bytes);
     this.items.set(item.id, item);
     while (this.items.size > 200 || this.totalItemBytes > 500_000) {
-      const id = this.items.keys().next().value!;
+      // Keep the active run's trigger available even when incoming traffic fills the buffer.
+      const id = [...this.items.keys()].find(id => id !== `run:${this.runId}`)!;
       this.totalItemBytes -= this.itemBytes.get(id) ?? 0; this.itemBytes.delete(id); this.items.delete(id);
     }
     if (live) this.send({ type: 'item', item });
@@ -148,15 +156,22 @@ export class Monitor {
   }
   private refresh() { this.statusDirty = true; this.queue(); }
   private environment(event: EnvironmentEvent, live = true) {
+    const previous = this.items.get(event.id);
     const sender = (event.payload.sender as { card?: string; nickname?: string } | undefined);
     const source = event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private chat ${event.actorId}`, `私聊 ${event.actorId}`) : ui('Environment', '环境');
     this.put({ id: event.id, at: event.at, type: 'environment', source,
       title: `${event.status === 'processed' ? ui('Recorded', '已记录') : ui('Received', '收到')} · ${source}${sender?.card || sender?.nickname ? ` · ${sender.card || sender.nickname}` : event.actorId ? ` · ${event.actorId}` : ''}`,
-      text: event.text, state: event.status, quiet: event.kind.includes('heartbeat'), details: this.describe({ id: event.id, kind: event.kind, status: event.status }),
+      text: event.text, state: event.status === 'processing' && previous?.state === 'accepted' ? 'accepted' : event.status,
+      runId: event.status === 'pending' ? undefined : previous?.runId,
+      eventKind: event.kind, receivedAt: event.receivedAt ?? event.at,
+      quiet: event.kind.includes('heartbeat'), details: this.describe({ id: event.id, kind: event.kind, status: event.status }),
     }, live);
   }
   private action(action: Action, live = true) {
+    const runId = this.items.get(action.id)?.runId ?? (this.runningTools.size ? this.runId : undefined);
+    if (runId && runId === this.runId) this.runActions.set(action.id, action.status);
     this.put({ id: action.id, at: action.createdAt, type: 'action', title: ui(`Action · ${action.kind}`, `行动 · ${action.kind}`), state: action.status,
+      runId,
       text: this.describe(action.args), details: this.describe({ id: action.id, status: action.status, result: action.result }),
       source: action.args.group_id ? ui(`Group ${action.args.group_id}`, `群 ${action.args.group_id}`) : action.args.user_id ? ui(`Private chat ${action.args.user_id}`, `私聊 ${action.args.user_id}`) : undefined,
     }, live);
@@ -191,7 +206,7 @@ export class Monitor {
         // Old deltas must not resurrect explicitly forgotten content after a reconnect.
         if (this.timer) clearTimeout(this.timer); this.timer = undefined;
         this.pending.clear(); this.items.clear(); this.itemBytes.clear(); this.totalItemBytes = 0; this.ring = []; this.ringBytes = 0;
-        this.replayFloor = ++this.seq; this.assistantId = undefined; this.busy = undefined; this.runningTools.clear();
+        this.replayFloor = ++this.seq; this.assistantId = undefined; this.busy = undefined; this.runId = undefined; this.runningTools.clear(); this.runActions.clear();
         this.loadHistory(); this.broadcast(this.snapshot(ui('Memory forgotten; display cache cleared.', '记忆已遗忘，展示缓存已清除。'))); return;
       }
       this.trace(notice.id, notice.at, notice.name, notice.data);
@@ -200,28 +215,61 @@ export class Monitor {
   }
   startRun(runId: string, observation: Observation) {
     this.runId = runId; this.generation = this.store.settings().generation; this.assistantId = undefined;
-    this.busy = { stage: 'preparing', since: Date.now() }; this.runningTools.clear();
+    const now = Date.now();
+    this.busy = { stage: 'preparing', since: now, stageSince: now, runId, requestCount: 0, completedTools: 0 };
+    this.runningTools.clear(); this.runActions.clear();
+    this.put({ id: `run:${runId}`, at: now, type: 'run', title: ui('Thinking run', '本轮思考'), text: this.observationText(observation),
+      state: 'running', runId, observationId: observation.batchId, eventIds: observation.events.map(event => event.id),
+      details: this.describe(observation.events.map(event => ({ id: event.id, kind: event.kind, source: event.groupId ?? event.actorId, text: event.text }))),
+    });
     this.observation(observation); this.refresh();
   }
+  private observationText(observation: Observation) {
+    // Ambient signals accompany the events that wake a thought; lead with those waking events.
+    const ambient = (event: EnvironmentEvent) => isAmbient(event.kind, event.actorId, this.config.snowluma.selfId);
+    return [...observation.events.filter(event => !ambient(event)), ...observation.events.filter(ambient)].map(event => {
+      const source = event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private ${event.actorId}`, `私聊 ${event.actorId}`) : event.kind;
+      const sender = event.payload.sender as { card?: string; nickname?: string } | undefined;
+      const name = sender?.card || sender?.nickname || (event.kind === 'message' ? event.actorId : undefined);
+      const text = event.kind === 'perception_gap' ? ui('Perception gap notification', '感知缺口通知') : event.kind.startsWith('meta_event:lifecycle') ? ui('Connection state notification', '连接状态通知') : event.text;
+      return `${source}${name ? ` / ${name}` : ''}: ${text.replace(/\s+/g, ' ').slice(0, 180)}`;
+    }).join('\n') || ui('No environment events', '无环境事件');
+  }
   observation(observation: Observation) {
-    this.put({ id: observation.batchId, at: Date.now(), type: 'observation', title: ui(`Observation · ${observation.events.length} events`, `观察 · ${observation.events.length} 条事件`), text: ui('Waiting to enter the current reasoning run', '等待纳入当前思考'), state: 'queued', details: this.describe(observation.events.map(event => ({ id: event.id, kind: event.kind, groupId: event.groupId }))), runId: this.runId });
+    this.put({ id: observation.batchId, at: Date.now(), type: 'observation', title: ui(`Observation · ${observation.events.length} events`, `观察 · ${observation.events.length} 条事件`), text: this.observationText(observation), state: 'queued', eventIds: observation.events.map(event => event.id), details: this.describe(observation.events.map(event => ({ id: event.id, kind: event.kind, groupId: event.groupId }))), runId: this.runId });
+    for (const event of observation.events) {
+      const received = this.items.get(event.id);
+      if (received) this.put({ ...received, state: 'processing', runId: undefined });
+    }
     this.refresh();
   }
   private stage(stage: BusyStage, tool?: string) {
     if (!this.busy || (this.busy.stage === stage && this.busy.tool === tool)) return;
-    this.busy = { stage, since: this.busy.since, ...(tool ? { tool } : {}) }; this.refresh();
+    this.busy = { ...this.busy, stage, stageSince: Date.now(), tool }; this.refresh();
+  }
+  preparingRequest() { this.stage('preparing'); }
+  requestStarted(stage: 'waiting' | 'compacting' = 'waiting') {
+    if (!this.busy) return;
+    const now = Date.now();
+    this.busy = { ...this.busy, stage, stageSince: now, tool: undefined, requestCount: (this.busy.requestCount ?? 0) + 1,
+      requestStartedAt: now, lastOutputAt: undefined, outputChunks: stage === 'waiting' ? 0 : undefined };
+    this.refresh();
   }
   agentEvent(event: AgentEvent) {
     if (this.generation !== this.store.settings().generation) return;
     if (event.type === 'message_start' && event.message.role === 'observation') {
       const message = event.message as AgentMessage & { batchId: string; eventIds: string[] };
       const item = this.items.get(message.batchId);
-      if (item) this.put({ ...item, state: 'accepted', text: ui('Included in observation', '已纳入观察') });
-      for (const id of message.eventIds) { const received = this.items.get(id); if (received) this.put({ ...received, state: 'accepted' }); }
+      if (item) this.put({ ...item, state: 'accepted' });
+      for (const id of message.eventIds) { const received = this.items.get(id); if (received) this.put({ ...received, state: 'accepted', runId: this.runId }); }
     }
-    if (event.type === 'turn_start') this.stage('thinking');
+    if (event.type === 'turn_start') this.preparingRequest();
     if (event.type === 'message_update' && event.message.role === 'assistant') {
       const update = event.assistantMessageEvent;
+      // Only timing and counts enter the display; reasoning text and signatures do not.
+      if (this.busy && 'delta' in update && typeof update.delta === 'string' && update.delta.length) {
+        this.busy = { ...this.busy, lastOutputAt: Date.now(), outputChunks: (this.busy.outputChunks ?? 0) + 1 }; this.refresh();
+      }
       if (update.type.startsWith('thinking')) this.stage('thinking');
       if (update.type.startsWith('text')) this.stage('writing');
       if (update.type === 'toolcall_start' || update.type === 'toolcall_delta' || update.type === 'toolcall_end') { const block = update.partial.content[update.contentIndex]; this.stage('calling', block?.type === 'toolCall' && block.name ? block.name : undefined); }
@@ -240,19 +288,35 @@ export class Monitor {
       this.flush();
       if (event.type === 'tool_execution_end') this.runningTools.delete(event.toolCallId); else this.runningTools.set(event.toolCallId, event.toolName);
       const running = [...this.runningTools.values()].at(-1);
-      if (running) this.stage('tool', running); else this.stage('thinking');
+      if (running) this.stage('tool', running); else this.stage('preparing');
       const id = `tool:${event.toolCallId}`; const old = this.items.get(id);
+      const now = Date.now();
+      const startedAt = event.type === 'tool_execution_start' ? now : old?.startedAt;
+      if (event.type === 'tool_execution_end' && this.busy && !['done', 'error'].includes(old?.state ?? '')) {
+        this.busy = { ...this.busy, completedTools: (this.busy.completedTools ?? 0) + 1, lastCompletedTool: event.toolName };
+      }
       this.put({ id, at: old?.at ?? Date.now(), type: 'tool', title: event.toolName, runId: this.runId,
+        startedAt, durationMs: event.type === 'tool_execution_end' ? event.durationMs ?? (startedAt === undefined ? undefined : Math.max(0, now - startedAt)) : undefined,
         text: event.type === 'tool_execution_end' ? old?.text ?? '' : this.describe(event.args),
         state: event.type === 'tool_execution_end' ? event.isError ? 'error' : 'done' : 'running',
         details: event.type === 'tool_execution_end' ? this.describe({ result: event.result.content, durationMs: event.durationMs }) : event.type === 'tool_execution_update' ? this.describe(event.partialResult?.content ?? []) : undefined,
       }); this.refresh();
     }
   }
-  endRun() {
+  endRun(outcome: 'done' | 'error' | 'interrupted' = 'done') {
     this.flush();
     for (const item of this.items.values()) if (item.runId === this.runId && ['running', 'preparing', 'streaming'].includes(item.state ?? '')) this.put({ ...item, state: 'interrupted' });
-    this.busy = undefined; this.runningTools.clear(); this.runId = undefined; this.refresh();
+    const run = this.items.get(`run:${this.runId}`);
+    if (run && this.busy) {
+      const actions = [...this.runActions.values()];
+      const unknown = actions.filter(state => state === 'unknown' || state === 'pending').length;
+      const failed = actions.filter(state => state === 'failed').length;
+      const success = actions.filter(state => state === 'success').length;
+      const result = actions.length ? ui(`${success} actions succeeded${failed ? ` · ${failed} failed` : ''}${unknown ? ` · ${unknown} unknown` : ''}`, `${success} 次行动成功${failed ? ` · ${failed} 次失败` : ''}${unknown ? ` · ${unknown} 次结果未知` : ''}`) : ui('No external action', '未采取对外行动');
+      this.put({ ...run, state: outcome === 'done' ? unknown ? 'unknown' : failed ? 'failed' : 'done' : outcome,
+        durationMs: Math.max(0, Date.now() - this.busy.since), summary: `${result} · ${ui(`${this.busy.requestCount ?? 0} model requests · ${this.busy.completedTools ?? 0} tools`, `${this.busy.requestCount ?? 0} 次模型请求 · ${this.busy.completedTools ?? 0} 次工具`)}` });
+    }
+    this.busy = undefined; this.runningTools.clear(); this.runActions.clear(); this.runId = undefined; this.refresh();
   }
   close() { this.flush(); this.disconnect(); this.listeners.clear(); if (this.timer) clearTimeout(this.timer); }
 }

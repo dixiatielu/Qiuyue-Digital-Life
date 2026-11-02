@@ -26,7 +26,7 @@ test('generated native tools expose canonical SDK names and schemas directly', a
       // add_custom_face also takes the description it is saved with.
       if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...tool.parameters.properties, desc: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, desc: undefined } });
       else assert.deepEqual(tool.parameters, action.inputSchema);
-      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record'].includes(action.name)) assert.equal(tool.description, action.summary ?? action.name);
+      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name)) assert.equal(tool.description, action.summary ?? action.name);
       assert.equal(findSnowLumaAction(action.name), action);
     }
   } finally { f.store.close(); }
@@ -322,6 +322,29 @@ test('native failures retain SnowLuma error envelopes and definite failure outco
     await f.brain.run(f.store.claim(10)!);
     assert.equal(f.store.actions()[0]?.status, 'failed'); assert.deepEqual(f.store.actions()[0]?.result, response);
   } finally { f.store.close(); }
+});
+
+test('QQ status rejection is a failure while uncertain status and message errors stay unknown', async () => {
+  const rejected = { status: 'failed' as const, retcode: 100, data: null, wording: 'set status fail' };
+  for (const { name, args, error, outcome } of [
+    { name: 'set_diy_online_status', args: { face_id: 21, face_type: 1, wording: '微调《夜航星》混音中🎧' }, error: new SnowLumaApiError(rejected), outcome: 'failed' },
+    { name: 'set_diy_online_status', args: { face_id: 21, wording: '听歌中' }, error: new Error('receipt lost'), outcome: 'unknown' },
+    { name: 'set_diy_online_status', args: { face_id: 21, wording: '听歌中' }, error: new SnowLumaApiError({ ...rejected, wording: 'set online status failed (network/timeout)' }), outcome: 'unknown' },
+    { name: 'send_group_msg', args: { group_id: 100, message: 'Hello' }, error: new SnowLumaApiError(rejected), outcome: 'unknown' },
+  ]) {
+    const f = fixture({ execute: async () => { throw error; } });
+    f.brain.thought.lifeOnly = false;
+    try {
+      const tool = f.tools.current().find(tool => tool.name === name)!;
+      await assert.rejects(tool.execute('call', args), failure => {
+        const result = JSON.parse((failure as Error).message);
+        assert.equal(result.outcome, outcome, `${name}: ${error.message}`);
+        assert.deepEqual(result.error, error instanceof SnowLumaApiError ? error.response : { message: error.message });
+        return true;
+      });
+      assert.equal(f.store.actions()[0]?.status, outcome);
+    } finally { f.store.close(); }
+  }
 });
 
 test('large native results are retained with provenance and can be read in chunks', async () => {

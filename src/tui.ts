@@ -18,6 +18,24 @@ const accent = (text: string) => styleText(text, { fg: indexedColor(6), bold: tr
 const spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const spinnerMs = 80;
 const elapsed = (ms: number) => { const s = Math.max(0, Math.floor(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; };
+const oneLine = (text: string) => plainText(text).replace(/\s+/g, ' ').trim();
+const problem = (item: DisplayItem) => ['error', 'failed', 'unknown'].includes(item.state ?? '');
+const toolLabel = (name: string) => ({
+  read_event: ui('Read event', '读取消息'), view_event_image: ui('View image', '查看消息图片'), recall: ui('Recall memories', '检索记忆'),
+  remember: ui('Save memory', '保存记忆'), read_context: ui('Read earlier context', '读取历史上下文'),
+  send_group_msg: ui('Send group message', '发送群消息'), send_private_msg: ui('Send private message', '发送私聊消息'),
+  send_custom_face: ui('Send sticker', '发送表情'), add_custom_face: ui('Save sticker', '收藏表情'),
+  set_group_reaction: ui('React to message', '回应消息'), search_snowluma_tools: ui('Find tools', '查找工具'),
+  load_snowluma_tools: ui('Read tool instructions', '读取工具用法'),
+} as Record<string, string>)[name] ?? name;
+const symbol = (item: DisplayItem) => problem(item) ? '!' : ['done', 'success', 'processed', 'stop'].includes(item.state ?? '') ? '✓' : item.state === 'interrupted' || item.state === 'aborted' ? '−' : '·';
+function argumentSummary(item: DisplayItem) {
+  try {
+    const args = JSON.parse(item.text);
+    return oneLine([args.group_id ? ui(`Group ${args.group_id}`, `群 ${args.group_id}`) : args.user_id ? ui(`Private ${args.user_id}`, `私聊 ${args.user_id}`) : '',
+      ...['query', 'message', 'title', 'url'].map(key => typeof args[key] === 'string' ? args[key] : '')].filter(Boolean).join(' · ')).slice(0, 160);
+  } catch { return ''; }
+}
 const theme: MarkdownTheme = {
   heading: bold, link: text => text, linkUrl: dim, code: text => text, codeBlock: text => text,
   codeBlockBorder: dim, quote: text => text, quoteBorder: dim, hr: dim, listBullet: text => text,
@@ -35,6 +53,8 @@ export class DisplayModel {
   expanded = new Set<string>();
   selected?: string;
   unseen = 0;
+  showDetails = false;
+  selectionOrder: string[] = [];
   apply(packet: DisplayPacket, following = true) {
     if (packet.type === 'ready') return;
     if (following) this.unseen = 0;
@@ -46,21 +66,22 @@ export class DisplayModel {
     else {
       if (!following && !this.items.has(packet.change.item.id)) this.unseen++;
       this.items.set(packet.change.item.id, packet.change.item);
-      while (this.items.size > 200) { const id = this.items.keys().next().value!; this.items.delete(id); this.expanded.delete(id); }
+      const activeRun = [...this.items.values()].find(item => item.type === 'run' && item.state === 'running')?.id;
+      while (this.items.size > 200) { const id = [...this.items.keys()].find(id => id !== activeRun)!; this.items.delete(id); this.expanded.delete(id); }
     }
   }
   visible() {
     const filter = this.filter.toLocaleLowerCase();
     return [...this.items.values()].filter(item => filter === 'errors'
       ? ['error', 'failed', 'unknown'].includes(item.state ?? '') || item.title.includes('error')
-      : filter ? `${item.title} ${item.text} ${item.source ?? ''} ${item.state ?? ''}`.toLocaleLowerCase().includes(filter) : !item.quiet);
+      : filter ? `${item.title} ${item.text} ${item.source ?? ''} ${item.state ?? ''} ${item.summary ?? ''}`.toLocaleLowerCase().includes(filter) : this.showDetails || !item.quiet);
   }
   select(direction: number) {
-    const items = this.visible(); if (!items.length) return;
-    const current = items.findIndex(item => item.id === this.selected);
-    this.selected = items[Math.max(0, Math.min(items.length - 1, current < 0 ? items.length - 1 : current + direction))]!.id;
+    const ids = this.selectionOrder.length ? this.selectionOrder : this.visible().map(item => item.id); if (!ids.length) return;
+    const current = ids.indexOf(this.selected ?? '');
+    this.selected = ids[Math.max(0, Math.min(ids.length - 1, current < 0 ? ids.length - 1 : current + direction))];
   }
-  toggle(id = this.selected ?? this.visible().at(-1)?.id) {
+  toggle(id = this.selected ?? this.selectionOrder.at(-1) ?? this.visible().at(-1)?.id) {
     if (!id) return;
     this.selected = id;
     if (this.expanded.has(id)) this.expanded.delete(id); else this.expanded.add(id);
@@ -78,6 +99,16 @@ export class Timeline implements Component {
     const lines: string[] = [];
     const stateLabel = item.type === 'environment' ? ({ pending: ui('Waiting for observation', '等待观察'), processing: ui('Waiting to be included', '等待纳入'), accepted: ui('Included in observation', '已纳入观察'), processed: ui('Recorded', '已记录') } as Record<string, string>)[item.state ?? ''] : labels()[item.state ?? ''];
     const state = item.state ? `[${stateLabel ?? item.state}] ` : '';
+    if (!expanded && item.type !== 'assistant') {
+      const name = item.type === 'tool' ? `${toolLabel(item.title)}${toolLabel(item.title) === item.title ? '' : ` · ${item.title}`}` : item.title;
+      const summary = item.type === 'tool' || item.type === 'action' ? argumentSummary(item) : oneLine(item.text);
+      const duration = item.durationMs === undefined ? '' : ` · ${item.durationMs < 10_000 ? `${(item.durationMs / 1000).toFixed(1)}s` : elapsed(item.durationMs)}`;
+      const line = `${selected ? '›' : symbol(item)} ${problem(item) ? state : ''}${time(item.at)} ${name}${duration}${summary ? ` · ${summary}` : ''}${item.details || item.text ? ' ▸' : ''}`;
+      // Put the outcome on its own line in very narrow terminals.
+      if (problem(item) && width < 40) lines.push(...new Text(state.trim(), 0, 0).render(Math.max(1, width)));
+      lines.push(truncateToWidth(selected ? bold(line) : line, width));
+      return lines;
+    }
     if (state && width < 40) lines.push(...new Text(state.trim(), 0, 0).render(Math.max(1, width)));
     const title = `${selected ? '›' : ' '}${width < 40 ? '' : state}${time(item.at)}  ${plainText(item.title)}`;
     lines.push(truncateToWidth(selected ? bold(title) : title, width));
@@ -92,19 +123,22 @@ export class Timeline implements Component {
       } else lines.push(...new Text(body, width > 4 ? 2 : 0, 0).render(Math.max(1, width)));
     }
     if (expanded && item.details) lines.push(...new Text(plainText(item.details), width > 4 ? 2 : 0, 0).render(Math.max(1, width)));
-    if (item.details) lines.push(truncateToWidth(dim(`  [${expanded ? ui('Expanded', '已展开') : ui('Click or press Tab to expand details', '点击或 Tab 展开详情')}]`), width));
     lines.push('');
     return lines.map(line => truncateToWidth(line, width));
   }
   render(width: number) {
     this.rows.clear();
-    const items = this.model.visible(); const lines: string[] = [];
+    const items = this.model.filter || this.model.showDetails ? this.model.visible() : [...this.model.items.values()]; const lines: string[] = [];
     const active = new Set(items.map(item => item.id));
     for (const id of this.markdown.keys()) if (!active.has(id)) this.markdown.delete(id);
     for (const id of this.cache.keys()) if (!active.has(id)) this.cache.delete(id);
-    for (const item of items) {
+    const append = (id: string, rendered: string[]) => {
+      const start = lines.length; lines.push(...rendered.map(line => truncateToWidth(line, width)));
+      for (let row = start; row < lines.length; row++) this.rows.set(row, id);
+    };
+    const render = (item: DisplayItem) => {
       const start = lines.length;
-      const selected = this.model.selected === item.id; const expanded = this.model.expanded.has(item.id);
+      const selected = this.model.selected === item.id; const expanded = this.model.showDetails || this.model.expanded.has(item.id);
       // Packets replace an item object whenever it changes, so identity is a sufficient cache key;
       // this keeps spinner frames from re-wrapping the whole timeline.
       let cached = this.cache.get(item.id);
@@ -114,12 +148,55 @@ export class Timeline implements Component {
       }
       lines.push(...cached.lines);
       for (let row = start; row < lines.length; row++) this.rows.set(row, item.id);
+    };
+    if (this.model.filter || this.model.showDetails) {
+      for (const item of items) render(item);
+    } else {
+      const runs = new Map(items.filter(item => item.type === 'run').map(item => [item.runId, item]));
+      const waiting = items.filter(item => item.type === 'environment' && !item.quiet && ['pending', 'processing'].includes(item.state ?? ''));
+      const waitingIds = new Set(waiting.map(item => item.id));
+      const system = items.filter(item => !waitingIds.has(item.id) && (item.quiet || item.type === 'system' && !problem(item) || item.type === 'environment' && (item.eventKind === 'perception_gap' || item.eventKind?.startsWith('meta_event:'))));
+      const hidden = new Set([...waiting, ...system].map(item => item.id));
+      const renderRun = (run: DisplayItem) => {
+        const expanded = this.model.expanded.has(run.id);
+        const running = run.state === 'running';
+        const outcome = running ? ui('Started thinking', '开始思考') : run.state === 'error' ? ui('Run failed', '本轮失败') : run.state === 'interrupted' ? ui('Run interrupted', '本轮中断') : ui('Run ended', '本轮结束');
+        const duration = run.durationMs === undefined ? '' : ` · ${elapsed(run.durationMs)}`;
+        append(run.id, ['', `${this.model.selected === run.id ? '›' : symbol(run)} ${time(run.at)} ${outcome}${duration}${!running && run.summary ? ` · ${run.summary}` : ''} ${expanded ? '▾' : '▸'}`].map(line => line ? bold(line) : line));
+        if (!running && !expanded) return;
+        append(run.id, [`  ${ui('Trigger', '触发')} · ${ui(`${run.eventIds?.length ?? 0} events`, `${run.eventIds?.length ?? 0} 条事件`)} · ${oneLine(run.text.split('\n')[0] ?? '')}`]);
+        if (expanded && run.details) append(run.id, new Text(run.details, 2, 0).render(Math.max(1, width)));
+        for (const child of items) {
+          if (child.runId !== run.runId || child.id === run.id || child.type === 'environment' || child.type === 'system' || child.id === run.observationId) continue;
+          if (child.type === 'observation' && child.state !== 'accepted' || child.type === 'action' && !problem(child)) continue;
+          if (child.type === 'observation') append(child.id, [`  ↳ ${ui('Included', '已纳入')} ${child.title} · ${oneLine(child.text)} ${this.model.expanded.has(child.id) ? '▾' : '▸'}`]);
+          else render(child);
+          if (child.type === 'observation' && this.model.expanded.has(child.id)) append(child.id, new Text(child.text, 2, 0).render(Math.max(1, width)));
+        }
+      };
+      for (const item of items) {
+        if (item.type === 'run') renderRun(item);
+        else if (!hidden.has(item.id) && !runs.has(item.runId) && item.type !== 'observation') render(item);
+      }
+      if (waiting.length) {
+        const id = 'display:waiting';
+        const age = elapsed(Date.now() - Math.min(...waiting.map(item => item.receivedAt ?? item.at)));
+        append(id, ['', `${this.model.expanded.has(id) ? '▾' : '▸'} ${ui(`${waiting.length} received · not yet included in the model`, `新收到 ${waiting.length} 条 · 尚未纳入模型`)} · ${ui('Oldest waiting', '最早等待')} ${age}`]);
+        const preview = this.model.expanded.has(id) ? waiting : waiting.slice(-1);
+        for (const item of preview) {
+          const state = item.state === 'processing' ? ui('Waiting to be included', '等待纳入') : ui('Waiting for observation', '等待观察');
+          append(item.id, [truncateToWidth(`  ${time(item.at)} ${state} · ${item.source ?? ''} · ${oneLine(item.text)}`, width)]);
+          if (this.model.expanded.has(item.id)) render(item);
+        }
+      }
+      if (system.length) {
+        const id = 'display:system';
+        append(id, ['', dim(`${this.model.expanded.has(id) ? '▾' : '▸'} ${ui(`${system.length} system / heartbeat records`, `${system.length} 条系统／心跳记录`)} · /details`)]);
+        if (this.model.expanded.has(id)) for (const item of system) render(item);
+      }
     }
     if (!items.length) lines.push(...new Text(this.model.filter ? ui('No matching records; use /filter all to clear the filter.', '没有匹配的记录；/filter all 清除筛选。') : ui('Waiting for environment events and model activity…', '等待环境事件和模型活动……'), 0, 0).render(Math.max(1, width)));
-    if (!this.model.filter) {
-      const quiet = [...this.model.items.values()].filter(item => item.quiet).length;
-      if (quiet) lines.push(truncateToWidth(dim(ui(`${quiet} heartbeat records collapsed; use /filter heartbeat to view`, `已折叠 ${quiet} 条心跳记录；/filter heartbeat 查看`)), width));
-    }
+    this.model.selectionOrder = [...new Set(this.rows.values())];
     return lines;
   }
   handleMouse(event: TuiMouseEvent) {
@@ -138,7 +215,18 @@ export class ActivityLine implements Component {
     const busy = this.model.connected ? this.model.status?.busy : undefined;
     if (!busy) return [];
     const now = this.now();
-    return [truncateToWidth(`${accent(spinner[Math.floor(now / spinnerMs) % spinner.length]!)} ${accent(`${plainText(busyLabel(busy))}…`)} ${dim(`(${elapsed(now - busy.since)})`)}`, width)];
+    const modelStage = ['waiting', 'thinking', 'writing', 'calling', 'compacting'].includes(busy.stage);
+    const startedAt = modelStage ? busy.requestStartedAt ?? busy.stageSince ?? busy.since : busy.stageSince ?? busy.since;
+    const stalled = modelStage && now - (busy.lastOutputAt ?? startedAt) >= 120_000;
+    const phase = `${busyLabel(busy)}${stalled ? ui(' · Waiting longer than usual', ' · 等待较久') : ''}`;
+    const timing = modelStage && busy.requestStartedAt !== undefined ? ui(`Request ${busy.requestCount ?? 1}: ${elapsed(now - startedAt)}`, `第 ${busy.requestCount ?? 1} 次请求 ${elapsed(now - startedAt)}`) : ui(`Stage ${elapsed(now - startedAt)}`, `当前阶段 ${elapsed(now - startedAt)}`);
+    const lines = [`${accent(spinner[Math.floor(now / spinnerMs) % spinner.length]!)} ${accent(`${plainText(phase)}…`)} · ${timing}`];
+    if (modelStage) {
+      const progress = busy.outputChunks === undefined ? ui('Streaming progress unavailable', '流式进度未知') : busy.lastOutputAt === undefined ? ui('First output has not arrived', '首个响应片段尚未收到') : ui(`${busy.outputChunks} chunks · Last output ${elapsed(now - busy.lastOutputAt)} ago`, `已收到 ${busy.outputChunks} 个片段 · 距上次输出 ${elapsed(now - busy.lastOutputAt)}`);
+      lines.push(dim(`  ${progress}${stalled ? ui(' · No recent output; a stall is not confirmed', ' · 暂无新输出，尚不能确认卡住') : ''}`));
+    }
+    if (busy.lastCompletedTool) lines.push(dim(`  ${ui('Last completed', '最近完成')} · ${toolLabel(busy.lastCompletedTool)}`));
+    return lines.map(line => truncateToWidth(line, width));
   }
 }
 
@@ -157,9 +245,10 @@ export function createTui(path: string, terminal: Terminal = new ProcessTerminal
   } };
   const footer: Component = { invalidate() {}, render(width) {
     const s = model.status;
-    const stats = s ? `${ui('Context', '上下文')} ${humanTokens(s.contextTokens)} / ${humanTokens(s.contextLimit)} · ${ui('Calls today', '今日调用')} ${s.modelCallsToday} · ${ui('Actions this hour', '本小时行动')} ${s.actionsThisHour}` : ui('If the daemon is not running, use npm start -- run in another terminal', '常驻进程未运行时，请另开终端执行 npm start -- run');
+    const run = s?.busy ? `${ui('Run', '本轮')} ${elapsed(Date.now() - s.busy.since)} · ${ui('Tools', '工具')} ${s.busy.completedTools ?? '—'} · ` : '';
+    const stats = s ? `${run}${ui('Context', '上下文')} ${humanTokens(s.contextTokens)} / ${humanTokens(s.contextLimit)} · ${ui('Calls today', '今日调用')} ${s.modelCallsToday} · ${ui('Actions this hour', '本小时行动')} ${s.actionsThisHour}` : ui('If the daemon is not running, use npm start -- run in another terminal', '常驻进程未运行时，请另开终端执行 npm start -- run');
     const filter = model.filter ? ui(` · Filter ${model.filter}`, ` · 筛选 ${model.filter}`) : '';
-    return ['─'.repeat(Math.max(0, width)), truncateToWidth(stats + filter, width), truncateToWidth(plainText(model.note), width), truncateToWidth(dim(ui('Alt↑↓ Select · Tab Expand · PgUp/PgDn Page · Ctrl+End Follow · Ctrl+C Exit', 'Alt↑↓ 选择 · Tab 展开 · PgUp/PgDn 翻页 · Ctrl+End 跟随 · Ctrl+C 退出')), width)];
+    return ['─'.repeat(Math.max(0, width)), truncateToWidth(stats + filter, width), truncateToWidth(plainText(model.note), width), truncateToWidth(dim(ui('Alt↑↓ Select · Tab Expand · /details Full records · Ctrl+End Follow · Ctrl+C Exit', 'Alt↑↓ 选择 · Tab 展开 · /details 完整记录 · Ctrl+End 跟随 · Ctrl+C 退出')), width)];
   } };
   const input = new Input({ prompt: '> ', placeholder: '/pause  /resume  /life on|off  /filter  /help' });
   tui.setLayoutRoot(new VStack([
@@ -183,7 +272,8 @@ export function createTui(path: string, terminal: Terminal = new ProcessTerminal
   const localCommands = (value: string) => {
     const [command, ...rest] = value.trim().split(/\s+/u);
     if (command === '/quit' || command === '/exit') { close(); return; }
-    if (command === '/help') { model.note = ui('/pause /resume /life on|off /status /filter keyword|errors|all /expand /collapse /quit', '/pause /resume /life on|off /status /filter 关键词|errors|all /expand /collapse /quit'); }
+    if (command === '/help') { model.note = ui('/pause /resume /life on|off /status /details /filter keyword|errors|all /expand /collapse /quit', '/pause /resume /life on|off /status /details /filter 关键词|errors|all /expand /collapse /quit'); }
+    else if (command === '/details') { model.showDetails = !model.showDetails; timeline.invalidate(); model.note = model.showDetails ? ui('Full records · /details returns to the compact timeline', '完整记录 · /details 返回紧凑时间线') : ui('Compact timeline · Tab expands the selected item', '紧凑时间线 · Tab 展开所选项'); }
     else if (command === '/filter') { model.filter = rest.join(' ') === 'all' ? '' : rest.join(' '); model.selected = undefined; model.note = ui('Filtering affects only the display; event reception and reasoning continue.', '筛选只影响展示；事件接收和思考保持运行。'); }
     else if (command === '/expand') model.toggle();
     else if (command === '/collapse') model.expanded.clear();

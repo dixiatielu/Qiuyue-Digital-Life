@@ -200,7 +200,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
       if (dueAt < Date.now() + config.life.minWakeMs) throw new Error('The wake interval is too short; adjust the plan.');
       return store.schedule(args.title, args.kind, dueAt, [...context().sources], args.rest);
     }),
-    tool('finish_activity', 'Mark a commitment or life plan as completed or cancelled.', Type.Object({ id: string('Activity ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('cancelled')]) }), args => { store.finishWake(args.id, args.status); return store.wakes(); }),
+    tool('finish_activity', 'End a commitment or life plan: use status="done" when finished or "cancelled" when cancelled. "completed" is accepted as an alias of "done".', Type.Object({ id: string('Activity ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('cancelled'), Type.Literal('completed')]) }), args => { store.finishWake(args.id, args.status === 'completed' ? 'done' : args.status); return store.wakes(); }),
     tool('update_pursuit', "Start something you pursue over days, such as a song you are learning, a series you follow, or a hobby project, or record where one stands now. Without id it starts a pursuit; with id it replaces that pursuit's progress. Setbacks and stalls are progress too.", Type.Object({ id: Type.Optional(string('ID of the pursuit to update', 100)), title: string('What you are pursuing', 200), progress: string('Where it stands now', 1000), fictional: Type.Boolean({ description: 'It belongs to fictional daily life' }) }), args => {
       if (!store.settings().lifeEnabled) throw new Error('Life mode is disabled; pursuits cannot be started or advanced.');
       return store.updatePursuit(args, [...context().sources], config.life.allowFiction);
@@ -253,9 +253,11 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg',
     'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone',
     'get_ai_characters', 'send_group_ai_record',
+    'set_diy_online_status',
   ]);
   const quote = 'To quote a message, make the first segment {"type":"reply","data":{"id":"<messageId>"}} using the messageId of an actual message event or send receipt (negative values are valid), followed by text segments, for example [{"type":"reply","data":{"id":"-12"}},{"type":"text","data":{"text":"..."}}]. A plain string sends without a quote.';
   const usage: Record<string, string> = {
+    set_diy_online_status: 'Keep wording brief, for example 听歌中. If QQ returns "set status fail", it rejected the status; choose shorter, simpler wording before another attempt. QQ does not report the specific reason for this rejection.',
     send_group_msg: quote,
     send_private_msg: quote,
     set_group_reaction: 'code is a QQ system face ID, or the code point of a Unicode emoji. Use view_face to see what a system face looks like before choosing one you do not know.',
@@ -281,7 +283,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
     const attempt = store.beginAction(`snowluma:${crypto.randomUUID()}`, name, args, [...context().sources], [...context().triggers], config.limits.actionsPerHour);
     if (attempt.fresh) {
       try { store.finishAction(attempt.action.id, 'success', await social.execute(name, sent, signal)); }
-      catch (error) { store.finishAction(attempt.action.id, definitelyFailed(error) ? 'failed' : 'unknown', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
+      catch (error) { store.finishAction(attempt.action.id, definitelyFailed(error, name) ? 'failed' : 'unknown', error instanceof SnowLumaApiError ? error.response : { message: errorText(error) }); }
     }
     return { outcome: store.actionById(attempt.action.id)!, reused: !attempt.fresh };
   }

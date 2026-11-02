@@ -219,6 +219,26 @@ test('life mode can plan and wake without new group messages, then complete the 
   } finally { await runtime.stop(); f.store.close(); }
 });
 
+test('a model completing an activity with completed records the canonical done state', async () => {
+  const f = fixture();
+  try {
+    const wake = f.store.schedule('Finish mixing the song', 'life', Date.now() + 86400000);
+    event(f.store);
+    f.faux.setResponses([
+      answer(call('finish_activity', { id: wake.id, status: 'completed' })),
+      context => {
+        const result = context.messages.findLast(message => message.role === 'toolResult');
+        assert.equal(result?.role, 'toolResult');
+        if (result?.role === 'toolResult') assert.equal(result.isError, false);
+        return answer('Done');
+      },
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.store.wakes().length, 0);
+    assert.equal(f.store.pastLifePlans(1)[0]?.status, 'done');
+  } finally { f.store.close(); }
+});
+
 test('life wakes show when available online activities were last done, other observations do not', async () => {
   const f = fixture();
   try {

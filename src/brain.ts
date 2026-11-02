@@ -127,6 +127,7 @@ export class PiBrain implements Brain {
         const first = this.turns === 0;
         // Observations steered in for stale chats have entered by now.
         this.phase = 'preparing'; this.stale.clear(); this.skipped = false;
+        this.display(monitor => monitor.preparingRequest());
         ensureCurrent(store, this.thought, signal);
         const runtime = this.runtimeContext();
         let messages = [...context.messages];
@@ -150,6 +151,7 @@ export class PiBrain implements Brain {
         this.pendingRequest = messages.slice(); this.pendingRoute = route;
         this.agent.state.messages = messages.slice();
         this.phase = 'calling'; this.callStartedAt = Date.now();
+        if (!this.preempted) this.display(monitor => monitor.requestStarted());
         return { context: { ...context, messages } };
       },
       finishTurn: () => config.limits.maxTurnsPerRun !== null && this.turns >= config.limits.maxTurnsPerRun ? { action: 'end' } : undefined,
@@ -279,6 +281,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     for (let attempt = 0; sized && !result && attempt <= this.config.compaction.retries; attempt++) {
       ensureCurrent(this.store, this.thought, signal);
       this.chargeCall();
+      this.display(monitor => monitor.requestStarted('compacting'));
       const response = await (await stream(model, normalizeContext({ messages: toModelMessages(request) }), { apiKey: process.env[this.config.model.apiKeyEnv], signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result();
       ensureCurrent(this.store, this.thought, signal);
       this.store.log('context_summary_completed', { runId: this.runId, attempt, usage: response.usage, stopReason: response.stopReason });
@@ -479,6 +482,7 @@ Your development is yours to keep alongside the operator's persona. Habits are y
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true };
     this.display(monitor => monitor.startRun(this.runId, observation));
+    let outcome: 'done' | 'error' | 'interrupted' = 'done';
     try {
       const message = await this.message(observation);
       this.controller.signal.throwIfAborted();
@@ -493,8 +497,8 @@ Your development is yours to keep alongside the operator's persona. Habits are y
       this.store.saveContext(this.checkpoint(), [...this.seen], this.compactions);
       this.seen.clear();
     }
-    catch (error) { this.revert(rollback, generation); throw error; }
-    finally { this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; this.display(monitor => monitor.endRun()); }
+    catch (error) { outcome = this.controller.signal.aborted ? 'interrupted' : 'error'; this.revert(rollback, generation); throw error; }
+    finally { this.display(monitor => monitor.endRun(this.preempted ? 'interrupted' : outcome)); this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; }
   }
   /** A memory review runs apart from the conversations, in a working context of its own that starts from runtime state and ends with it; nothing steers into it (ADR-0012). */
   async review(observation: Observation) {

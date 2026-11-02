@@ -4,11 +4,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { visibleWidth, type Terminal, type ProgramStatus } from '@earendil-works/pi-tui';
+import { createModels, fauxProvider, fauxAssistantMessage as answer, fauxToolCall } from '@earendil-works/pi-ai';
+import { PiBrain } from '../src/brain.js';
+import { createTools } from '../src/tools.js';
 import { Store } from '../src/store.js';
 import { Monitor, plainText } from '../src/monitor.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
 import { ActivityLine, createTui, DisplayModel, Timeline } from '../src/tui.js';
-import { config, event } from './helpers.js';
+import { config, deferred, event } from './helpers.js';
 
 async function waitFor(predicate: () => boolean, message: string) {
   const deadline = Date.now() + 2500;
@@ -57,7 +60,51 @@ test('timeline renders Chinese, emoji and markdown at narrow widths, and filters
   } finally { monitor.close(); store.close(); }
 });
 
-test('activity line animates while thinking and disappears when idle or disconnected', () => {
+test('compact runs keep triggers, queued observations, tool details and uncertain actions distinct', async () => {
+  const cfg = config(); const store = new Store(':memory:'); const monitor = new Monitor(cfg, store);
+  const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
+  const entered = deferred(); const release = deferred(); let brain: PiBrain;
+  const tools = createTools(cfg, store, { execute: async () => { entered.resolve(); await release.promise; throw new Error('receipt-unknown'); } }, () => brain.thought);
+  brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) }, monitor);
+  event(store, 'TRIGGER_CONTENT 中文 🌙');
+  faux.setResponses([answer([fauxToolCall('send_group_msg', { group_id: 100, message: 'MESSAGE_BODY_ONLY_IN_DETAILS' })]), answer('Quiet now')]);
+  const running = brain.run(store.claim(10)!);
+  try {
+    await entered.promise;
+    event(store, 'WAITING_CONTENT', 200);
+    await brain.steer(store.claim(10)!);
+    store.log('connection_opened', { marker: 'SYSTEM_DETAILS_ONLY' });
+    const model = new DisplayModel(); model.connected = true; model.apply(monitor.snapshot());
+    const timeline = new Timeline(model);
+    const text = () => timeline.render(160).map(plainText).join('\n');
+    let rendered = text();
+    assert.match(rendered, /Trigger.*TRIGGER_CONTENT/);
+    assert.match(rendered, /1 received · not yet included in the model/);
+    assert.match(rendered, /Waiting to be included.*WAITING_CONTENT/);
+    assert.match(rendered, /Send group message/);
+    assert.ok(!rendered.includes('"group_id"'));
+    assert.ok(!rendered.includes('SYSTEM_DETAILS_ONLY'));
+    const tool = [...model.items.values()].find(item => item.type === 'tool')!;
+    model.toggle(tool.id); assert.match(text(), /"group_id"/);
+    model.toggle(tool.id);
+    for (const width of [1, 12, 30, 80, 160]) assert.ok(timeline.render(width).every(line => visibleWidth(line) <= width));
+    release.resolve(); await running; model.apply(monitor.snapshot());
+    rendered = text();
+    assert.match(rendered, /Run ended.*1 unknown/);
+    assert.ok(!rendered.includes('"group_id"'));
+    const run = [...model.items.values()].find(item => item.type === 'run')!;
+    model.toggle(run.id); rendered = text();
+    assert.match(rendered, /Included.*WAITING_CONTENT/);
+    assert.match(rendered, /Unknown/); assert.ok(!rendered.includes('not yet included in the model'));
+    model.showDetails = true; rendered = text();
+    assert.match(rendered, /SYSTEM_DETAILS_ONLY/); assert.match(rendered, /"group_id"/);
+    model.showDetails = false; model.filter = 'errors';
+    model.toggle(tool.id);
+    assert.match(text(), /receipt-unknown/);
+  } finally { release.resolve(); await running.catch(() => {}); monitor.close(); store.close(); }
+});
+
+test('activity line distinguishes request time, output silence and tool time, and clears when idle', () => {
   const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
   try {
     const model = new DisplayModel(); model.connected = true;
@@ -65,17 +112,21 @@ test('activity line animates while thinking and disappears when idle or disconne
     const activity = new ActivityLine(model, () => now);
     model.apply(monitor.snapshot()); assert.deepEqual(activity.render(80), []);
     monitor.startRun('run:test', { batchId: 'batch:test', events: [] });
-    monitor.agentEvent({ type: 'turn_start' });
+    monitor.requestStarted();
     model.apply(monitor.snapshot());
     now = model.status!.busy!.since + 75_000;
     const first = activity.render(80);
-    assert.equal(first.length, 1);
-    assert.match(plainText(first[0]!), /^\S Thinking… \(1m 15s\)$/);
+    assert.equal(first.length, 2);
+    assert.match(plainText(first[0]!), /Waiting for model… · Request 1: 1m 15s/);
+    assert.match(plainText(first[1]!), /First output has not arrived/);
     now += 80; assert.notEqual(activity.render(80)[0], first[0]);
+    now += 60_000;
+    assert.match(activity.render(160).map(plainText).join('\n'), /Waiting longer than usual/);
     for (const width of [1, 5, 12]) assert.ok(activity.render(width).every(line => visibleWidth(line) <= width), `width ${width}`);
     monitor.agentEvent({ type: 'tool_execution_start', toolCallId: 't:1', toolName: 'recall', args: {} });
     model.apply(monitor.snapshot());
     assert.match(plainText(activity.render(80)[0]!), /Running recall…/);
+    assert.ok(!activity.render(160).map(plainText).join('\n').includes('Last output'));
     model.connected = false; assert.deepEqual(activity.render(80), []);
     model.connected = true; monitor.endRun(); model.apply(monitor.snapshot());
     assert.deepEqual(activity.render(80), []);
@@ -91,7 +142,7 @@ test('interactive TUI scrolls, follows output, confirms controls and detaches wi
   try {
     await waitFor(() => session.model.connected, 'TUI connection');
     store.log('connection_opened', {});
-    for (let index = 0; index < 35; index++) event(store, `Message ${index}`, 100);
+    for (let index = 0; index < 35; index++) { event(store, `Message ${index}`, 100); store.acknowledge(store.claim(1)!.batchId); }
     monitor.flush();
     await waitFor(() => session.tui.getScreenLines().some(line => plainText(line).includes('Message 34')), 'latest message rendered');
     session.tui.scrollToTop(); session.tui.requestRender();
@@ -102,10 +153,12 @@ test('interactive TUI scrolls, follows output, confirms controls and detaches wi
     assert.equal(session.tui.viewportTop, top);
     terminal.key('\x1b[1;5F');
     await waitFor(() => session.tui.isFollowingOutput, 'Ctrl+End resumes following');
-    monitor.startRun('run:tui', { batchId: 'batch:tui', events: [] }); monitor.agentEvent({ type: 'turn_start' }); monitor.flush();
-    await waitFor(() => session.tui.getScreenLines().some(line => plainText(line).includes('Thinking…')) && terminal.progress.at(-1) === true, 'thinking indicator');
+    monitor.startRun('run:tui', { batchId: 'batch:tui', events: [] }); monitor.requestStarted(); monitor.flush();
+    await waitFor(() => session.tui.getScreenLines().some(line => plainText(line).includes('Waiting for model…')) && terminal.progress.at(-1) === true, 'thinking indicator');
     monitor.endRun(); monitor.flush();
-    await waitFor(() => !session.tui.getScreenLines().some(line => plainText(line).includes('Thinking…')) && terminal.progress.at(-1) === false, 'indicator cleared');
+    await waitFor(() => !session.tui.getScreenLines().some(line => plainText(line).includes('Waiting for model…')) && terminal.progress.at(-1) === false, 'indicator cleared');
+    terminal.type('/details\r'); assert.equal(session.model.showDetails, true);
+    terminal.type('/details\r'); assert.equal(session.model.showDetails, false);
     terminal.type('/pause\r');
     await waitFor(() => store.settings().paused && session.model.note.includes('confirmed'), 'pause acknowledgement');
     terminal.type('/resume\r');

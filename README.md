@@ -62,6 +62,10 @@ npm start -- tui --config config.json
 
 Exiting the live view does not stop the daemon.
 
+The live view uses a compact timeline: each run shows its triggering observation, tools appear as single-line summaries, and completed runs, system notices, and heartbeats collapse by default. The activity area shows the current request or tool-stage duration, plus output chunk counts and time since the last output when streaming progress is available. Received events waiting to enter the model appear separately. Two minutes without output produces a “Waiting longer than usual” hint, not a confirmed-stall diagnosis.
+
+Use `Alt↑↓` to select records, `Tab` to expand details, and `/details` to toggle full records. `/filter errors` shows failures and unknown outcomes; `/filter all` clears the filter. Restart both the daemon and live view after upgrading to receive the new request-progress fields.
+
 ## Management
 
 Use these commands with `npm start -- <command> --config config.json` after building:

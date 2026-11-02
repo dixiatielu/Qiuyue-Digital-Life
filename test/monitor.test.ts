@@ -63,7 +63,10 @@ test('real Pi deltas, queued steering and tool execution appear live while unkno
     assert.equal(store.event(source.id)?.status, 'processing');
     await entered.promise;
     assert.ok(monitor.snapshot().items.some(item => item.type === 'tool' && item.state === 'running'));
-    assert.deepEqual({ ...monitor.snapshot().status.busy, since: 0 }, { stage: 'tool', tool: 'send_group_msg', since: 0 });
+    const busy = monitor.snapshot().status.busy!;
+    assert.equal(busy.stage, 'tool'); assert.equal(busy.tool, 'send_group_msg');
+    assert.equal(busy.requestCount, 1); assert.ok(busy.lastOutputAt! >= busy.requestStartedAt!);
+    assert.ok(busy.outputChunks! > 0);
     const stages = packets.flatMap(packet => packet.type === 'event' && packet.change.type === 'status' && packet.change.status.busy ? [packet.change.status.busy.stage] : []);
     assert.ok(stages.includes('thinking') && stages.includes('writing'), stages.join());
     event(store, 'New message from another setting', 200);
@@ -77,6 +80,9 @@ test('real Pi deltas, queued steering and tool execution appear live while unkno
     assert.ok(snapshot.items.some(item => item.type === 'tool' && item.state === 'error'));
     assert.equal(snapshot.status.phase, 'Idle');
     assert.equal(snapshot.status.busy, undefined);
+    const run = snapshot.items.find(item => item.type === 'run')!;
+    assert.ok(run.text.includes('First message'));
+    assert.equal(run.state, 'unknown'); assert.match(run.summary!, /1 unknown/);
     assert.ok(!JSON.stringify(packets).includes('private-thought-never-publish'));
     assert.equal(store.pending(), 0);
     assert.equal(snapshot.items.find(item => item.id === source.id)?.state, 'processed');
@@ -84,6 +90,38 @@ test('real Pi deltas, queued steering and tool execution appear live while unkno
     assert.ok(restored.snapshot().items.some(item => item.type === 'tool' && item.text.includes('group_id') && item.details?.includes('unknown')));
     restored.close();
   } finally { release.resolve(); await running.catch(() => {}); monitor.close(); store.close(); }
+});
+
+test('request timing and output activity are independent of the run, tools, and QQ traffic', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 100_000 });
+  const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
+  try {
+    event(store, 'The trigger');
+    monitor.startRun('timing', store.claim(10)!);
+    t.mock.timers.tick(1000); monitor.requestStarted();
+    let busy = monitor.snapshot().status.busy!;
+    assert.equal(busy.since, 100_000); assert.equal(busy.requestStartedAt, 101_000);
+    assert.equal(busy.stage, 'waiting'); assert.equal(busy.lastOutputAt, undefined);
+    t.mock.timers.tick(2000);
+    const partial = answer([fauxThinking('do-not-expose-this-reasoning')]);
+    monitor.agentEvent({ type: 'message_update', message: partial, assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'do-not-expose-this-reasoning', partial } });
+    busy = monitor.snapshot().status.busy!;
+    assert.equal(busy.lastOutputAt, 103_000); assert.equal(busy.outputChunks, 1);
+    assert.equal(busy.requestStartedAt, 101_000);
+    assert.ok(!JSON.stringify(monitor.snapshot()).includes('do-not-expose-this-reasoning'));
+    t.mock.timers.tick(5000); event(store, 'New QQ traffic'); store.log('connection_opened', {});
+    assert.equal(monitor.snapshot().status.busy!.lastOutputAt, 103_000);
+    monitor.agentEvent({ type: 'tool_execution_start', toolCallId: 'read', toolName: 'read_event', args: {} });
+    t.mock.timers.tick(800);
+    monitor.agentEvent({ type: 'tool_execution_end', toolCallId: 'read', toolName: 'read_event', isError: false, result: { content: [] } });
+    assert.equal(monitor.snapshot().items.find(item => item.id === 'tool:read')!.durationMs, 800);
+    monitor.requestStarted(); busy = monitor.snapshot().status.busy!;
+    assert.equal(busy.since, 100_000); assert.equal(busy.requestStartedAt, 108_800);
+    assert.equal(busy.requestCount, 2); assert.equal(busy.lastOutputAt, undefined); assert.equal(busy.outputChunks, 0);
+    assert.equal(busy.completedTools, 1); assert.equal(busy.lastCompletedTool, 'read_event');
+    monitor.endRun();
+    assert.match(monitor.snapshot().items.find(item => item.type === 'run')!.summary!, /No external action/);
+  } finally { monitor.close(); store.close(); }
 });
 
 test('bounded replay restores missed events, detects gaps and never replays forgotten content', () => {
@@ -110,6 +148,23 @@ test('bounded replay restores missed events, detects gaps and never replays forg
     assert.deepEqual(current.map(packet => packet.type), ['ready']);
     const restarted = new Monitor(cfg, store);
     assert.ok(!JSON.stringify(restarted.snapshot()).includes('erase-this-content')); restarted.close();
+  } finally { monitor.close(); store.close(); }
+});
+
+test('traffic cannot evict the active trigger from the monitor or a connected viewer', () => {
+  const store = new Store(':memory:'); const monitor = new Monitor(config(), store); const view = new DisplayModel();
+  monitor.subscribe(undefined, packet => view.apply(packet));
+  try {
+    const source = event(store, 'Keep this trigger');
+    monitor.startRun('pinned', store.claim(10)!);
+    for (let index = 0; index < 230; index++) event(store, `Incoming ${index}`);
+    monitor.flush();
+    assert.equal(monitor.snapshot().items.find(item => item.id === 'run:pinned')?.text.includes('Keep this trigger'), true);
+    assert.equal(view.items.get('run:pinned')?.text.includes('Keep this trigger'), true);
+    assert.ok(monitor.snapshot().items.length <= 200); assert.ok(view.items.size <= 200);
+    store.forget(source.id);
+    assert.ok(!JSON.stringify(monitor.snapshot()).includes('Keep this trigger'));
+    assert.ok(!JSON.stringify([...view.items.values()]).includes('Keep this trigger'));
   } finally { monitor.close(); store.close(); }
 });
 
