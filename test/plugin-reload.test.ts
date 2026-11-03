@@ -1,4 +1,4 @@
-import type { PluginContext } from '../src/plugin-sdk.js';
+import type { CredentialReader } from '../src/credentials.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -325,5 +325,3 @@ test('reloading a plugin refreshes its credential snapshot without changing core
     assert.equal(h.manager.job?.contextReset, false); assert.equal((await h.execute('key_check')).changed, true);
   } finally { await h.close(); }
 });
-
-type CredentialReader = PluginContext['credential'];

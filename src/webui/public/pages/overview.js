@@ -1,7 +1,7 @@
 import { ago, api, Badge, Card, ContextNote, duration, failed, html, Modal, number, PageHeader, Tabs, t, time, toast, useState } from '../lib.js';
 
 const reasonLabel = reason => ({ thinking: t('a thought is under way', '正在思考'), reviewing: t('a memory review is under way', '正在整理记忆（review）'), calling: t('a model call is starting', '正在发起模型调用') })[reason] ?? reason;
-const fileLabel = name => ({ config: 'config.json', persona: t('persona file', '人格文件'), prompt: t('system prompt file', '系统提示词文件'), env: '.env' })[name] ?? name;
+const fileLabel = name => ({ config: 'config.json', persona: t('persona file', '人格文件'), prompt: t('system prompt file', '系统提示词文件'), env: '.env', credentials: t('credentials', '凭据文件') })[name] ?? name;
 const typeLabel = type => ({ environment: t('event', '事件'), observation: t('observation', '观察'), assistant: t('her text', '她的文字'), tool: t('tool', '工具'), action: t('action', '行动'), system: t('system', '系统'), run: t('thought', '思考') })[type] ?? type;
 const stateKind = state => ({ success: 'ok', done: 'ok', running: 'info', pending: 'info', error: 'bad', failed: 'bad', unknown: 'warn' })[state] ?? '';
 

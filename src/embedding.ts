@@ -1,3 +1,4 @@
+import { environmentCredential, type CredentialReader } from './credentials.js';
 import type { Config } from './config.js';
 import type { EnvironmentEvent } from './domain.js';
 
@@ -6,10 +7,10 @@ export interface Embedder { readonly model: string; embed(texts: string[], signa
 
 /** An OpenAI-compatible embeddings endpoint, such as https://api.openai.com/v1 or a local server the operator runs. */
 export class EmbeddingClient implements Embedder {
-  constructor(private config: Config['embedding'], private request: typeof fetch = fetch) {}
+  constructor(private config: Config['embedding'], private request: typeof fetch = fetch, private credential: CredentialReader = environmentCredential) {}
   get model() { return this.config.model; }
   async embed(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {
-    const key = process.env[this.config.apiKeyEnv];
+    const key = this.credential(this.config.apiKeyEnv);
     const response = await this.request(`${this.config.baseUrl.replace(/\/+$/, '')}/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },

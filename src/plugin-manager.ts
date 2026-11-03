@@ -1,9 +1,10 @@
 import type { Config } from './config.js';
+import type { CredentialReader } from './credentials.js';
 import { errorText } from './domain.js';
 import type { SemanticSource } from './embedding.js';
 import { discoverPlugins, loadUserPlugin, pluginSource, validPluginId } from './plugin-loader.js';
 import { waitFor } from './async.js';
-import type { PluginContext, PluginDefinition } from './plugin-sdk.js';
+import type { PluginDefinition } from './plugin-sdk.js';
 import { PluginHost, type LifePlugin } from './plugins.js';
 import { createBuiltinPlugin, pluginIds, type BuiltinPluginId } from './plugins/index.js';
 import type { LifeRuntime } from './runtime.js';
@@ -158,7 +159,7 @@ export class PluginManager {
         signal.throwIfAborted();
         if (builtin(id)) {
           if (discovered.includes(id)) throw new Error(`User plugin ${id} conflicts with a built-in plugin.`);
-          candidates.set(id, { plugin: createBuiltinPlugin(id, next, this.store, this.social, this.semantics), source: 'builtin', loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
+          candidates.set(id, { plugin: createBuiltinPlugin(id, next, this.store, this.social, this.semantics, credential), source: 'builtin', loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
         } else if (next.plugins[id] === false) {
           candidates.set(id, this.disabled(id, next));
         } else if (discovered.includes(id)) {
@@ -202,5 +203,3 @@ export class PluginManager {
     await this.operation;
   }
 }
-
-type CredentialReader = PluginContext['credential'];

@@ -134,7 +134,7 @@ export function PluginsPage() {
       <div class="fields">
         <${ConfigField} form=${form} path="web.enabled" type="bool" label=${t('Web tools on', '开启联网工具')} />
         <${ConfigField} form=${form} path="web.searchUrl" label=${t('Search endpoint', '搜索接口')} />
-        <${ConfigField} form=${form} path="web.searchKeyEnv" label=${t('Search key variable', '搜索密钥环境变量')} />
+        <${ConfigField} form=${form} path="web.searchKeyEnv" label=${t('Search credential', '搜索凭据名称')} />
         <${ConfigField} form=${form} path="web.timeoutMs" type="ms" label=${t('Timeout (ms)', '超时（毫秒）')} />
         <${ConfigField} form=${form} path="web.maxBytes" type="int" label=${t('Largest page (bytes)', '网页大小上限（字节）')} />
       </div>

@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
+import { once } from 'node:events';
 import { loadConfig } from '../src/config.js';
 import { builtinSystemPrompt, systemInstructions } from '../src/prompts.js';
 import { WebUi } from '../src/webui/server.js';
-import { setEnvText } from '../src/webui/files.js';
+import { Credentials, credentialPaths } from '../src/credentials.js';
 import { inspectConfig } from '../src/webui/inspect.js';
 import { ServiceJobs, type LiveMirror } from '../src/webui/daemon.js';
 import type { LifeReader } from '../src/webui/reader.js';
@@ -162,30 +163,75 @@ test('the persona and the system prompt are checked before saving, and the opera
   assert.ok(existsSync(join(dir, 'system-prompt.md')), 'going back to the built-in prompt leaves the operator file on disk');
 }));
 
-test('credentials are written to .env and never returned, only whether and how they end', () => page(async (call, dir) => {
-  const listed = await call('/api/secrets');
-  const model = listed.body.find((item: any) => item.name === 'MODEL_API_KEY');
-  assert.deepEqual(model.usedBy.slice(0, 1), ['model']);
-  assert.equal(model.value, '••••1234');
-  assert.ok(!JSON.stringify(listed.body).includes('sk-old-value'));
-  assert.equal(listed.body.find((item: any) => item.name === 'OTHER').value, '1', 'a variable that is not a credential is shown');
-  await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: 'sk-new value#5678' } });
-  assert.equal(readFileSync(join(dir, '.env'), 'utf8'), "# credentials\nMODEL_API_KEY='sk-new value#5678'\n\nOTHER=1\n");
-  assert.equal(process.env.MODEL_API_KEY, 'sk-new value#5678');
-  await call('/api/secrets', { method: 'PUT', body: { name: 'OTHER', value: null } });
-  assert.equal(readFileSync(join(dir, '.env'), 'utf8'), "# credentials\nMODEL_API_KEY='sk-new value#5678'\n\n");
-  assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'BAD NAME', value: 'x' } })).status, 400);
-  assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'MULTI', value: 'a\nb' } })).status, 400);
-  delete process.env.MODEL_API_KEY;
+test('credentials are masked, stored separately, version-checked, and cannot be read through history', async () => page(async (call, dir) => {
+  const before = await call('/api/secrets');
+  assert.equal(before.body.entries.find((item: any) => item.name === 'MODEL_API_KEY').value, '••••1234');
+  assert.equal(before.body.entries.find((item: any) => item.name === 'MODEL_API_KEY').source, 'legacy');
+  assert.ok(!before.body.entries.some((item: any) => item.name === 'OTHER'));
+  const originalEnvironment = process.env.MODEL_API_KEY;
+  const updated = await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: 'sk-new value#5678', revision: before.body.revision } });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.entries.find((item: any) => item.name === 'MODEL_API_KEY').source, 'file');
+  assert.equal(process.env.MODEL_API_KEY, originalEnvironment);
+  assert.ok(readFileSync(join(dir, '.env'), 'utf8').includes('sk-old-value-1234'), 'legacy input is read-only until explicit migration');
+  const credentials = new Credentials(credentialPaths(join(dir, 'config.json')), {});
+  assert.equal(credentials.get('MODEL_API_KEY'), 'sk-new value#5678');
+  assert.ok(!JSON.stringify(updated.body).includes('sk-new value'));
+  assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: 'stale-value', revision: before.body.revision } })).status, 409);
+  assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: 'unversioned' } })).status, 400);
+  const removed = await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: null, revision: updated.body.revision } });
+  assert.equal(removed.status, 200);
+  assert.equal(new Credentials(credentials.paths, {}).get('MODEL_API_KEY'), undefined, 'the old .env value stays disabled');
+  assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'BAD NAME', value: 'x', revision: removed.body.revision } })).status, 400);
+  assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'MULTI', value: 'a\nb', revision: removed.body.revision } })).status, 400);
+  const history = join(dir, 'data/webui/history/env');
+  mkdirSync(history, { recursive: true });
+  writeFileSync(join(history, '123-abcdef123456.env'), 'OLD_KEY=secret-from-old-version');
+  assert.equal((await call('/api/history/env')).status, 404);
+  const version = await call('/api/history/env/123-abcdef123456.env');
+  assert.equal(version.status, 404);
+  assert.ok(!JSON.stringify(version.body).includes('secret-from-old-version'));
 }));
 
-test('.env edits keep comments and order, and drop later definitions that would override the one set', () => {
-  assert.equal(setEnvText('', 'A', 'x'), 'A=x\n');
-  assert.equal(setEnvText('A=1\n# note\nB=2\nexport A=3\n', 'A', 'y'), 'A=y\n# note\nB=2\n');
-  assert.equal(setEnvText('A=1\nB=2', 'B', null), 'A=1\n');
-  assert.equal(setEnvText('A=1\n', 'C', 'with "double"'), "A=1\nC='with \"double\"'\n");
-  assert.throws(() => setEnvText('', 'D', `both ' and "`), /both single and double/);
+test('external credentials are read-only and take the same priority in the page and runtime', async () => {
+  const name = 'QIUYUE_WEBUI_EXTERNAL_KEY'; const old = process.env[name];
+  process.env[name] = 'externally-managed-secret';
+  try {
+    await page(async (call, dir) => {
+      const path = join(dir, 'config.json'); const config = JSON.parse(readFileSync(path, 'utf8'));
+      config.model.apiKeyEnv = name; writeFileSync(path, JSON.stringify(config));
+      writeFileSync(join(dir, '.env'), `${name}=legacy-value\n`);
+      const list = await call('/api/secrets');
+      const item = list.body.entries.find((item: any) => item.name === name);
+      assert.equal(item.source, 'environment'); assert.equal(item.writable, false);
+      assert.equal(new Credentials(credentialPaths(path)).get(name), 'externally-managed-secret');
+      assert.equal((await call('/api/secrets', { method: 'PUT', body: { name, value: 'replacement', revision: list.body.revision } })).status, 400);
+      assert.equal(existsSync(join(dir, 'credentials.json')), false);
+    });
+  } finally { if (old === undefined) delete process.env[name]; else process.env[name] = old; }
 });
+
+test('page connection tests and model listings immediately use the same file credential as the next daemon start', async () => page(async (call, dir) => {
+  const authorizations: unknown[] = [];
+  const endpoint = createServer((request, response) => {
+    authorizations.push(request.headers.authorization);
+    request.resume();
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ data: request.url?.endsWith('/models') ? [{ id: 'test-model' }] : [{ index: 0, embedding: [1, 0] }] }));
+  });
+  endpoint.listen(0, '127.0.0.1'); await once(endpoint, 'listening');
+  try {
+    const baseUrl = `http://127.0.0.1:${(endpoint.address() as AddressInfo).port}/v1`;
+    const before = await call('/api/secrets');
+    const saved = await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: 'latest-file-test-key', revision: before.body.revision } });
+    assert.equal(saved.status, 200);
+    assert.equal((await call('/api/test/embedding', { method: 'POST', body: { embedding: { baseUrl, model: 'test', apiKeyEnv: 'MODEL_API_KEY' } } })).status, 200);
+    assert.equal((await call('/api/providers/models', { method: 'POST', body: { provider: { id: 'test', name: 'Test', api: 'openai-completions', baseUrl, apiKeyEnv: 'MODEL_API_KEY' } } })).status, 200);
+    const startup = new Credentials(credentialPaths(join(dir, 'config.json')));
+    assert.deepEqual(authorizations, [0, 1].map(() => `Bearer ${startup.get('MODEL_API_KEY')}`));
+    assert.equal(startup.get('MODEL_API_KEY'), 'latest-file-test-key');
+  } finally { endpoint.closeAllConnections(); await new Promise<void>(done => endpoint.close(() => done())); }
+}));
 
 test('providers start from the endpoints already configured and are checked when saved', () => page(async call => {
   const listed = await call('/api/providers');

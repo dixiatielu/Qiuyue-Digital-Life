@@ -4,7 +4,7 @@ import { api, Card, ConfigField, failed, html, Loading, PageHeader, SaveBar, t, 
 const sections = () => [
   ['snowluma', t('QQ connection (SnowLuma)', 'QQ 连接（SnowLuma）'), [
     { path: 'snowluma.url', label: t('WebSocket URL', 'WebSocket 地址'), help: t('The forward OneBot WebSocket of the SnowLuma server, ws:// or wss://.', 'SnowLuma 服务端的正向 OneBot WebSocket，ws:// 或 wss://。') },
-    { path: 'snowluma.tokenEnv', label: t('Token variable', '令牌环境变量'), help: t('Name of the variable in .env that holds the SnowLuma token.', '.env 中保存 SnowLuma 令牌的变量名。') },
+    { path: 'snowluma.tokenEnv', label: t('Credential name', '凭据名称'), help: t('The named credential for the SnowLuma connection.', '用于 SnowLuma 连接的凭据名称。') },
     { path: 'snowluma.selfId', type: 'int', label: t('QQ account', 'QQ 账号'), warn: t('The database belongs to one account; another account makes the daemon refuse to start.', '数据库绑定一个账号；换成别的账号后常驻进程会拒绝启动。') },
     { path: 'snowluma.groups', type: 'intlist', label: t('History groups', '补查历史的群'), help: t('One group per line. After a disconnect, missed messages in these groups are recovered. It does not limit which groups she hears live.', '每行一个群号。断线后会补查这些群漏掉的消息；不限制实时接收的范围。') },
     { path: 'snowluma.maxStreamBytes', type: 'int', label: t('Stream size limit (bytes)', '流式接口大小上限（字节）') },
@@ -55,12 +55,14 @@ const sections = () => [
     { path: 'development.recordLines', type: 'int', label: t('Chat record lines per read', '每次读取的聊天记录行数') },
   ]],
   ['webui', t('This page', '管理网页'), [
+    { path: 'uiLanguage', type: 'select', label: t('Interface language', '界面语言'), options: [['en', 'English'], ['zh', '中文']], help: t('Restart the daemon and page after changing it.', '修改后重启常驻进程和管理网页。') },
     { path: 'webui.host', label: t('Listening address', '监听地址'), help: t('127.0.0.1 keeps it on this machine; reach it through an SSH tunnel.', '127.0.0.1 只在本机可访问，请通过 SSH 隧道打开。') },
     { path: 'webui.port', type: 'int', label: t('Port', '端口') },
-    { path: 'webui.tokenEnv', label: t('Token variable', '令牌环境变量'), help: t('When unset, each start prints a new token.', '未设置时每次启动打印一个新令牌。') },
+    { path: 'webui.tokenEnv', label: t('Credential name', '凭据名称'), help: t('When unset, each start prints a new token.', '未设置时每次启动打印一个新令牌。') },
     { path: 'webui.service', label: t('systemd user unit', 'systemd 用户服务名'), help: t('Lets this page start, stop, and restart the daemon, e.g. qiuyue-digital-life.service.', '设置后网页可以启停、重启常驻进程，例如 qiuyue-digital-life.service。') },
   ]],
   ['files', t('Files', '文件路径'), [
+    { path: 'credentialsFile', label: t('Credential file', '凭据文件'), help: t('Defaults to credentials.json beside config.json. An absolute path can keep it outside the checkout. Move existing credentials before changing this path.', '默认是 config.json 旁边的 credentials.json；可用绝对路径放在仓库外。更改路径前请先迁移已有凭据。') },
     { path: 'database', label: t('Database', '数据库') },
     { path: 'socket', label: t('Management socket', '管理套接字') },
     { path: 'personaFile', label: t('Persona file', '人格文件'), help: t('Edited on the persona page.', '内容在人格页编辑。') },

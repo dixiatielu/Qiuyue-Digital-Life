@@ -1,3 +1,4 @@
+import { CredentialConflictError } from '../credentials.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -27,7 +28,6 @@ const cookie = 'qiuyue_webui';
 // These contain presentation only. Management modules and every API still require authentication.
 const loginAssets = new Set(['/app/style.css', '/app/favicon.svg', '/app/login.js', '/app/theme.js']);
 const credentialFields: [string, string][] = [['model', 'apiKeyEnv'], ['snowluma', 'tokenEnv'], ['web', 'searchKeyEnv'], ['embedding', 'apiKeyEnv'], ['drawing', 'apiKeyEnv'], ['webui', 'tokenEnv']];
-const secretName = /key|token|secret|password|cookie|credential/i;
 
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 type Handler = (request: { url: URL; body: any; params: string[] }) => unknown | Promise<unknown>;
@@ -53,7 +53,6 @@ function tail(path: string, lines: number, bytes = 256_000) {
   try { readSync(fd, buffer, 0, length, size - length); } finally { closeSync(fd); }
   return buffer.toString('utf8').split('\n').slice(-lines - 1).join('\n');
 }
-const masked = (value: string) => value.length > 8 ? `••••${value.slice(-4)}` : '••••';
 
 /** The management page: reads and saves the operator's files, follows the daemon, and asks it to act through the management interface (ADR-0020). */
 export class WebUi {
@@ -96,8 +95,9 @@ export class WebUi {
   /** Whether a start with this configuration would continue the working context saved now. */
   private continuity(config: Config) {
     const saved = this.reader.workingContext();
-    const key = hash(JSON.stringify(config));
-    if (this.inspected?.key !== key) this.inspected = { key, result: inspectConfig(config) };
+    const credentials = this.files.credentials();
+    const key = hash(JSON.stringify(config) + credentials.revision);
+    if (this.inspected?.key !== key) this.inspected = { key, result: inspectConfig(config, credentials.get) };
     const result = this.inspected.result;
     const userPlugins = discoverPlugins(config.extensions.directory).some(id => !(pluginIds as readonly string[]).includes(id) && config.plugins[id] !== false);
     return { continues: userPlugins ? null : Boolean(saved?.current && result.identities.includes(saved.identity)), unknown: userPlugins, saved: saved ? { at: saved.updatedAt, current: saved.current } : null, plugins: result.plugins, tools: result.tools.length, credentials: result.credentials };
@@ -115,9 +115,9 @@ export class WebUi {
       let status: unknown = null;
       if (running) { try { status = await callControl(this.paths.socket, { args: ['status'] }); } catch { /* the live view says why */ } }
       return {
-        lang: process.env.QIUYUE_UI_LANGUAGE?.toLowerCase() === 'zh' ? 'zh' : 'en', configPath: this.files.configPath,
+        lang: config?.uiLanguage ?? (process.env.QIUYUE_UI_LANGUAGE?.toLowerCase() === 'zh' ? 'zh' : 'en'), configPath: this.files.configPath,
         config: { valid: Boolean(config), error },
-        daemon: { running, pid: running ? daemon.pid : undefined, startedAt, changed: changedSince(startedAt, { config: this.files.configPath, persona: (() => { try { return this.files.personaPath(raw); } catch { return undefined; } })(), prompt: this.files.promptPath(raw), env: this.files.envPath }) },
+        daemon: { running, pid: running ? daemon.pid : undefined, startedAt, changed: changedSince(startedAt, { config: this.files.configPath, persona: (() => { try { return this.files.personaPath(raw); } catch { return undefined; } })(), prompt: this.files.promptPath(raw), env: this.files.envPath, credentials: this.files.credentials().paths.file }) },
         service: settings.service ? { unit: settings.service, ...await serviceState(settings.service) } : null,
         live: { connected: this.mirror.connected, message: this.mirror.message },
         status, busy: busyReasons(this.mirror, this.reader), activity: this.reader.activity(), counts: this.reader.counts(),
@@ -196,18 +196,19 @@ export class WebUi {
 
     this.on('GET', '/api/providers', () => ({ providers: this.providers.list(this.files.raw()) }));
     this.on('PUT', '/api/providers', ({ body }) => ({ providers: this.providers.save(body.providers) }));
-    this.on('POST', '/api/providers/models', ({ body }) => { this.files.refreshEnv(); return remoteModels(body.provider as ProviderProfile).then(models => ({ models })); });
+    this.on('POST', '/api/providers/models', ({ body }) => { return remoteModels(body.provider as ProviderProfile, fetch, this.files.credentials().get).then(models => ({ models })); });
     this.on('GET', '/api/catalog', ({ url }) => catalog(url.searchParams.get('provider') ?? undefined));
-    this.on('POST', '/api/test/model', ({ body }) => { this.files.refreshEnv(); return testModel(body.model); });
+    this.on('POST', '/api/test/model', ({ body }) => { return testModel(body.model, 60_000, this.files.credentials().get); });
     this.on('POST', '/api/test/embedding', ({ body }) => {
-      this.files.refreshEnv();
-      return testEmbedding({ enabled: true, apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [], ...body.embedding });
+      return testEmbedding({ enabled: true, apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [], ...body.embedding }, this.files.credentials().get);
     });
 
     this.on('GET', '/api/secrets', () => this.secrets());
     this.on('PUT', '/api/secrets', ({ body }) => {
       if (typeof body.name !== 'string' || (body.value !== null && typeof body.value !== 'string')) throw new HttpError(400, 'A name and a value, or null to remove it, are required.');
-      this.files.setEnv(body.name, body.value === null || body.value === '' ? null : body.value);
+      if (typeof body.revision !== 'string') throw new HttpError(400, 'Reload the credential list before saving.');
+      this.files.credentials().set(body.name, body.value === null || body.value === '' ? null : body.value, body.revision);
+      this.inspected = undefined;
       return this.secrets();
     });
   }
@@ -220,22 +221,17 @@ export class WebUi {
     const { config, error } = this.current();
     return { context: config ? this.continuity(config) : null, error: error ?? null };
   }
-  /** Each credential the configuration or a provider names, and every variable in .env; values never leave the server, only whether they are set. */
+  /** All managed values are secrets; source metadata never includes an unmasked value. */
   private secrets() {
     let raw: Record<string, any> = {};
     let config: Config | undefined;
-    try { ({ raw, config } = this.current()); } catch { /* names from .env alone */ }
+    try { ({ raw, config } = this.current()); } catch { /* still allow credentials while repairing config */ }
     const usedBy = new Map<string, string[]>();
     const use = (name: unknown, by: string) => { if (typeof name === 'string' && name) usedBy.set(name, [...usedBy.get(name) ?? [], by]); };
     for (const [section, field] of credentialFields) use((config as any)?.[section]?.[field] ?? raw[section]?.[field], section);
-    try { for (const profile of this.providers.list(raw)) use(profile.apiKeyEnv, `provider:${profile.name}`); } catch { /* an unreadable provider list adds nothing */ }
-    const file = this.files.env();
-    const names = [...new Set([...usedBy.keys(), ...Object.keys(file)])].sort();
-    return names.map(name => {
-      const value = file[name] ?? process.env[name];
-      const secret = usedBy.has(name) || secretName.test(name);
-      return { name, usedBy: usedBy.get(name) ?? [], inFile: name in file, set: Boolean(value), secret, value: value ? (secret ? masked(value) : value) : '' };
-    });
+    try { for (const profile of this.providers.list(raw)) use(profile.apiKeyEnv, `provider:${profile.name}`); } catch { /* unreadable providers add no names */ }
+    const credentials = this.files.credentials();
+    return { file: credentials.paths.file, revision: credentials.revision, entries: credentials.list([...usedBy.keys()]).map(item => ({ ...item, usedBy: usedBy.get(item.name) ?? [] })) };
   }
   private authorized(request: IncomingMessage) {
     const expected = Buffer.from(this.token);
@@ -314,7 +310,7 @@ export class WebUi {
       }
       throw new HttpError(404, 'Unknown API.');
     } catch (error) {
-      const status = error instanceof HttpError ? error.status : error instanceof ConflictError ? 409 : 400;
+      const status = error instanceof HttpError ? error.status : error instanceof ConflictError || error instanceof CredentialConflictError ? 409 : 400;
       send(response, status, JSON.stringify({ error: errorText(error) }));
     }
   }
@@ -364,7 +360,7 @@ export async function runWebUi(configPath: string) {
   let raw: Record<string, any> = {};
   try { raw = files.raw(); } catch (error) { console.error(ui(`The configuration is not readable (${errorText(error)}); using default page settings.`, `配置无法读取（${errorText(error)}），网页使用默认设置。`)); }
   const settings = webuiSettings(raw);
-  const configured = process.env[settings.tokenEnv];
+  const configured = files.credentials().get(settings.tokenEnv);
   const token = configured || randomBytes(24).toString('base64url');
   const app = new WebUi(configPath, token, WebUi.paths(configPath));
   const server = await app.listen(settings.host, settings.port);

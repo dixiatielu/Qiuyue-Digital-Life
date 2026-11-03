@@ -9,6 +9,10 @@ import { PiBrain } from '../src/brain.js';
 import { Store } from '../src/store.js';
 import { createTools } from '../src/tools.js';
 import { config, event, fixture } from './helpers.js';
+import { Credentials, credentialPaths } from '../src/credentials.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const custom: ModelConfig = {
   provider: 'test-gateway', id: 'private-vision-model', apiKeyEnv: 'QIUYUE_TEST_MODEL_KEY',
@@ -123,4 +127,28 @@ test('explicit API selects the transport even when the provider name is arbitrar
     assert.equal(result.stopReason, 'error');
     assert.match(result.errorMessage!, /expected test rejection/);
   }
+});
+
+test('catalog and custom models both use the configured file credential without environment exports', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-model-credential-'));
+  try {
+    const paths = credentialPaths(join(dir, 'config.json'));
+    const empty = new Credentials(paths, {});
+    empty.set('FILE_MODEL_KEY', 'file-model-test-secret', empty.revision);
+    const credentials = new Credentials(paths, {});
+    const catalog = builtinModels().getModels('openai').find(model => model.input.includes('image') && model.api === 'openai-responses')!;
+    for (const configured of [{ ...custom, apiKeyEnv: 'FILE_MODEL_KEY' }, { provider: catalog.provider, id: catalog.id, apiKeyEnv: 'FILE_MODEL_KEY' }]) {
+      const { model, stream } = createModelBackend(configured, credentials.get);
+      let authorization: string | null = null;
+      await stream(model, { messages: [{ role: 'user', content: 'test', timestamp: 1 }] }, {
+        maxTokens: 16,
+        fetch: async (input, init) => {
+          authorization = new Headers(input instanceof Request ? input.headers : init?.headers).get('authorization');
+          return new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'expected test rejection' } }), { status: 401, headers: { 'content-type': 'application/json' } });
+        },
+      }).result();
+      assert.equal(authorization, 'Bearer file-model-test-secret');
+      assert.equal(process.env.FILE_MODEL_KEY, undefined);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

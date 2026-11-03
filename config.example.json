@@ -1,4 +1,6 @@
 {
+  "credentialsFile": "credentials.json",
+  "uiLanguage": "en",
   "database": "data/life.sqlite",
   "socket": "data/control.sock",
   "personaFile": "persona.example.md",

@@ -26,7 +26,7 @@ function ProviderEditor({ profile, secrets, onSave, onClose }) {
       <div class="field"><div class="field-label"><label>${t('Name', '名称')}</label></div><input value=${draft.name} onInput=${event => field('name', event.currentTarget.value)} /></div>
       <div class="field"><div class="field-label"><label>API</label></div><select value=${draft.api} onChange=${event => field('api', event.currentTarget.value)}>${apis.map(([id, name]) => html`<option value=${id}>${name}</option>`)}</select></div>
       <div class="field"><div class="field-label"><label>${t('Base URL', '接口地址')}</label></div><input value=${draft.baseUrl} placeholder="https://api.example.com/v1" onInput=${event => field('baseUrl', event.currentTarget.value)} spellcheck="false" /></div>
-      <div class="field"><div class="field-label"><label>${t('Key variable', '密钥环境变量')}</label></div><input list="secret-names" value=${draft.apiKeyEnv} onInput=${event => field('apiKeyEnv', event.currentTarget.value)} spellcheck="false" />
+      <div class="field"><div class="field-label"><label>${t('Credential name', '凭据名称')}</label></div><input list="secret-names" value=${draft.apiKeyEnv} onInput=${event => field('apiKeyEnv', event.currentTarget.value)} spellcheck="false" />
         <datalist id="secret-names">${secrets.map(secret => html`<option value=${secret.name} />`)}</datalist>
         <div class="field-help">${secrets.find(secret => secret.name === draft.apiKeyEnv)?.set ? html`<${Badge} kind="ok">${t('set', '已设置')}<//>` : html`<${Badge} kind="warn">${t('not set — add it under credentials', '未设置——请在下方凭据中添加')}<//>`}</div></div>
       <div class="field wide"><div class="field-label"><label>compat</label></div><textarea class="mono" rows="5" value=${compat} placeholder=${'{ "supportsDeveloperRole": false }'} onInput=${event => setCompat(event.currentTarget.value)}></textarea>
@@ -97,7 +97,7 @@ function MainModel({ form, profiles }) {
       ${custom ? html`
         <${ConfigField} form=${form} path="model.api" type="select" options=${apis} label="API" />
         <${ConfigField} form=${form} path="model.baseUrl" label=${t('Base URL', '接口地址')} />` : html`<${ConfigField} form=${form} path="model.baseUrl" label=${t('Base URL override', '覆盖接口地址')} help=${t('Optional; leave empty for the provider default.', '可选；留空使用供应商默认地址。')} />`}
-      <${ConfigField} form=${form} path="model.apiKeyEnv" label=${t('Key variable', '密钥环境变量')} help=${custom ? '' : t('A catalog provider reads its own standard variable.', '内置目录的供应商读取它自己的标准环境变量。')} />
+      <${ConfigField} form=${form} path="model.apiKeyEnv" label=${t('Credential name', '凭据名称')} help=${t('The named credential is used for both catalog models and custom endpoints.', '内置目录模型和自定义端点都使用这里指定的凭据。')} />
       <${ConfigField} form=${form} path="model.thinkingLevel" type="select" options=${[['', t('(off)', '（关闭）')], ...thinking.map(level => [level, level])]} label=${t('Thinking level', '思考强度')} help=${t('Only a reasoning model can think; with the OpenAI format, off sends nothing and the model uses its own default.', '只有推理模型可以思考；使用 OpenAI 格式时，off 不发送参数，模型按自身默认强度思考。')} />
       ${custom ? html`
         <div class="field"><div class="field-label"><label>${t('Input', '输入能力')}</label></div><div class="row">
@@ -128,7 +128,7 @@ function Endpoint({ form, profiles, section, title, help, fields, testable }) {
       <${ConfigField} form=${form} path=${`${section}.enabled`} type="bool" label=${t('On', '启用')} />
       <${ConfigField} form=${form} path=${`${section}.baseUrl`} label=${t('Base URL', '接口地址')} />
       <div class="field"><div class="field-label"><label>${t('Model', '模型')}</label></div><input list=${`${section}-models`} value=${form.get(`${section}.model`) ?? ''} placeholder=${form.effective[section]?.model ?? ''} onInput=${event => form.set(`${section}.model`, event.currentTarget.value || undefined)} spellcheck="false" /><${ModelList} id=${`${section}-models`} models=${models} /></div>
-      <${ConfigField} form=${form} path=${`${section}.apiKeyEnv`} label=${t('Key variable', '密钥环境变量')} />
+      <${ConfigField} form=${form} path=${`${section}.apiKeyEnv`} label=${t('Credential name', '凭据名称')} />
       ${fields.map(field => html`<${ConfigField} form=${form} ...${{ ...field, path: `${section}.${field.path}` }} />`)}
     </div>
   <//>`;
@@ -142,18 +142,20 @@ function Secrets({ secrets }) {
   // Typing a new variable's name keeps the value already entered.
   const rename = name => setOpen({ ...editing, name });
   const write = async (name, next) => {
-    try { secrets.set(await api('/api/secrets', { method: 'PUT', body: { name, value: next } })); setEditing(null); toast(next === null ? t(`Removed ${name}.`, `已删除 ${name}。`) : t(`Saved ${name}. Restart the daemon to use it.`, `已保存 ${name}，重启常驻进程后生效。`), 'ok'); }
+    try { secrets.set(await api('/api/secrets', { method: 'PUT', body: { name, value: next, revision: secrets.data.revision } })); setEditing(null); toast(next === null ? t(`Disabled ${name}. Restart the daemon to use this change.`, `已停用 ${name}，重启常驻进程后生效。`) : t(`Saved ${name}. Restart the daemon to use it.`, `已保存 ${name}，重启常驻进程后生效。`), 'ok'); }
     catch (error) { failed(error); }
   };
-  return html`<${Card} title=${t('Credentials (.env)', '凭据（.env）')} actions=${html`<button onClick=${() => setEditing({ name: '', fresh: true })}>${t('Add variable', '添加变量')}</button>`}>
-    <p class="muted small">${t('Values are written to .env beside config.json and never sent back to the page; only their last characters are shown. The daemon reads .env when it starts.', '值写入 config.json 旁边的 .env，不会回传到网页，只显示末尾几位。常驻进程在启动时读取 .env。')}</p>
-    <table class="table"><thead><tr><th>${t('Variable', '变量')}</th><th>${t('Used by', '用于')}</th><th>${t('Value', '值')}</th><th></th></tr></thead><tbody>
-      ${secrets.data.map(secret => html`<tr><td class="mono">${secret.name}</td><td>${secret.usedBy.map(use => html`<${Badge}>${use}<//> `)}</td>
-        <td>${secret.set ? html`<span class="mono">${secret.value}</span>${secret.inFile ? null : html` <${Badge}>${t('from environment', '来自进程环境')}<//>`}` : html`<${Badge} kind="warn">${t('not set', '未设置')}<//>`}</td>
-        <td class="nowrap"><button class="ghost tiny" onClick=${() => setEditing(secret)}>${secret.set ? t('Replace', '更换') : t('Set', '设置')}</button>
-          ${secret.inFile ? html`<button class="ghost tiny danger" onClick=${() => confirm(t(`Remove ${secret.name} from .env?`, `从 .env 删除 ${secret.name}？`)) && write(secret.name, null)}>${t('Remove', '删除')}</button>` : null}</td></tr>`)}
+  return html`<${Card} title=${t('Credentials', '凭据')} actions=${html`<button onClick=${() => setEditing({ name: '', fresh: true })}>${t('Add credential', '添加凭据')}</button>`}>
+    <p class="muted small">${t('Saved separately without value history. Changes apply to connection tests immediately and to the daemon after restart. Restart the management page after changing its login token. External environment credentials are read-only.', '凭据单独保存，不保留旧值历史。连接测试立即使用新值，常驻进程重启后生效。更改网页登录令牌后还需重启管理网页。外部环境提供的凭据只读。')}</p>
+    <p class="muted small mono">${secrets.data.file}</p>
+    <table class="table"><thead><tr><th>${t('Name', '名称')}</th><th>${t('Used by', '用于')}</th><th>${t('Status', '状态')}</th><th>${t('Source', '来源')}</th><th></th></tr></thead><tbody>
+      ${secrets.data.entries.map(secret => html`<tr><td class="mono">${secret.name}</td><td>${secret.usedBy.map(use => html`<${Badge}>${use}<//> `)}</td>
+        <td>${secret.set ? html`<span class="mono">${secret.value}</span>` : html`<${Badge} kind="warn">${secret.source === 'file' ? t('disabled', '已停用') : t('not set', '未设置')}<//>`}</td>
+        <td>${({ environment: t('External environment', '外部环境'), file: t('Credential file', '凭据文件'), legacy: t('Legacy .env', '旧 .env'), missing: '—' })[secret.source]}</td>
+        <td class="nowrap">${secret.writable ? html`<button class="ghost tiny" onClick=${() => setEditing(secret)}>${secret.set ? t('Replace', '更换') : t('Set', '设置')}</button>
+          ${secret.set ? html`<button class="ghost tiny danger" onClick=${() => confirm(t(`Disable ${secret.name}? Old .env values will stay disabled too.`, `停用 ${secret.name}？旧 .env 中的同名值也不会再使用。`)) && write(secret.name, null)}>${t('Disable', '停用')}</button>` : null}` : html`<span class="muted small">${t('Read-only', '只读')}</span>`}</td></tr>`)}
     </tbody></table>
-    ${editing ? html`<${Modal} title=${editing.fresh ? t('Add a variable', '添加变量') : editing.name} onClose=${() => setEditing(null)}
+    ${editing ? html`<${Modal} title=${editing.fresh ? t('Add a credential', '添加凭据') : editing.name} onClose=${() => setEditing(null)}
       footer=${html`<button class="ghost" onClick=${() => setEditing(null)}>${t('Cancel', '取消')}</button><button class="primary" disabled=${!editing.name || !value} onClick=${() => write(editing.name, value)}>${t('Save', '保存')}</button>`}>
       ${editing.fresh ? html`<div class="field"><div class="field-label"><label>${t('Name', '名称')}</label></div><input class="mono" value=${editing.name} onInput=${event => rename(event.currentTarget.value.trim())} placeholder="MY_API_KEY" /></div>` : null}
       <div class="field"><div class="field-label"><label>${t('Value', '值')}</label></div><div class="row"><input class="mono" type=${reveal ? 'text' : 'password'} autocomplete="off" value=${value} onInput=${event => setValue(event.currentTarget.value)} />
@@ -174,7 +176,7 @@ export function ModelsPage() {
   return html`
     <${PageHeader} title=${t('Models & connections', '模型与连接')} eyebrow="MODELS & PROVIDERS" description=${t('Configure thinking, recall and drawing in one place.', '为思考、回忆和创作，选择合适的模型。')} />
     <${Tabs} value=${tab} onChange=${setTab} tabs=${[['main', t('Main model', '主模型')], ['embedding', 'Embedding'], ['drawing', t('Drawing', '画图模型')], ['providers', t('Providers', '供应商')], ['credentials', t('Credentials', '凭据')]]} />
-    <div hidden=${tab !== 'providers'}><${Providers} profiles=${profiles} secrets=${secrets.data} form=${form} /></div>
+    <div hidden=${tab !== 'providers'}><${Providers} profiles=${profiles} secrets=${secrets.data.entries} form=${form} /></div>
     <div hidden=${tab !== 'main'}><${MainModel} form=${form} profiles=${list} /></div>
     <div hidden=${tab !== 'embedding'}>
     <${Endpoint} form=${form} profiles=${list} section="embedding" testable title=${t('Embedding (recall by meaning)', 'Embedding（按语义想起）')}

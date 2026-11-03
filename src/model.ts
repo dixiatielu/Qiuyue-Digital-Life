@@ -1,4 +1,5 @@
-import { createModels, createProvider, envApiKeyAuth, type Api, type Model, type ModelThinkingLevel, type OpenAICompletionsCompat, type OpenAIResponsesCompat, type AnthropicMessagesCompat } from '@earendil-works/pi-ai';
+import { environmentCredential, type CredentialReader } from './credentials.js';
+import { createModels, createProvider, type Api, type Model, type ModelThinkingLevel, type OpenAICompletionsCompat, type OpenAIResponsesCompat, type AnthropicMessagesCompat } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
@@ -72,13 +73,18 @@ export function resolveModel(config: ModelConfig): Model<Api> {
   return model;
 }
 
-export function createModelBackend(config: ModelConfig) {
+export function createModelBackend(config: ModelConfig, credential: CredentialReader = environmentCredential) {
   const model = resolveModel(config);
   const models = config.api ? createModels() : builtinModels();
   if (config.api) models.setProvider(createProvider({
     id: config.provider, baseUrl: model.baseUrl, models: [model],
-    auth: { apiKey: envApiKeyAuth(config.provider, [config.apiKeyEnv]) },
+    auth: { apiKey: { name: config.apiKeyEnv, async resolve({ credential: supplied }) { const apiKey = supplied?.key ?? credential(config.apiKeyEnv); return apiKey ? { auth: { apiKey } } : undefined; } } },
     api: apis[config.api].create(),
   }));
-  return { model, stream: models.streamSimple.bind(models) };
+  const stream: typeof models.streamSimple = (target, context, options) => {
+    const apiKey = options?.apiKey ?? credential(config.apiKeyEnv);
+    if (!apiKey) throw new Error(`Missing credential ${config.apiKeyEnv}.`);
+    return models.streamSimple(target, context, { ...options, apiKey });
+  };
+  return { model, stream };
 }

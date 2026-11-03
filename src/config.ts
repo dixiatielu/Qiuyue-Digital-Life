@@ -1,3 +1,4 @@
+import { credentialPaths } from './credentials.js';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { findSnowLumaAction, type SnowLumaPermissions } from './snowluma-catalog.js';
@@ -5,6 +6,8 @@ import { validateModelConfig, type ModelConfig } from './model.js';
 import { checkSystemPrompt } from './prompts.js';
 
 export interface Config {
+  credentialsFile: string;
+  uiLanguage: 'en' | 'zh';
   database: string;
   socket: string;
   persona: string;
@@ -37,6 +40,8 @@ export function loadConfig(path: string): Config {
   const persona = readFileSync(resolve(base, raw.personaFile), 'utf8');
   if (raw.systemPromptFile !== undefined && (typeof raw.systemPromptFile !== 'string' || !raw.systemPromptFile.trim())) throw new Error('systemPromptFile must be a non-empty file path when set.');
   const config: Config = {
+    credentialsFile: credentialPaths(path, raw.credentialsFile).file,
+    uiLanguage: raw.uiLanguage ?? (process.env.QIUYUE_UI_LANGUAGE?.toLowerCase() === 'zh' ? 'zh' : 'en'),
     database: resolve(base, raw.database ?? 'data/life.sqlite'),
     socket: resolve(base, raw.socket ?? 'data/control.sock'),
     persona,
@@ -59,6 +64,7 @@ export function loadConfig(path: string): Config {
     embedding: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [], ...raw.embedding },
     drawing: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', timeoutMs: 300_000, ...raw.drawing, dir: resolve(base, raw.drawing?.dir ?? 'data/drawings') },
   };
+  if (!['en', 'zh'].includes(config.uiLanguage)) throw new Error('uiLanguage must be en or zh.');
   if (!config.persona.trim()) throw new Error('The persona content in personaFile must not be empty.');
   if (config.systemPrompt !== undefined) checkSystemPrompt(config.systemPrompt);
   if (raw.plugins !== undefined && (!raw.plugins || typeof raw.plugins !== 'object' || Array.isArray(raw.plugins))) throw new Error('plugins must be an object of plugin IDs and boolean switches.');

@@ -1,3 +1,4 @@
+import { environmentCredential, type CredentialReader } from '../credentials.js';
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Type } from 'typebox';
@@ -12,10 +13,10 @@ export interface Painter { readonly model: string; paint(prompt: string, signal?
 
 /** An OpenAI-compatible /images/generations endpoint. A gateway may ignore size, quality, and format, so the endpoint's defaults are taken as they come. */
 export class ImageClient implements Painter {
-  constructor(private config: Config['drawing'], private request: typeof fetch = fetch) {}
+  constructor(private config: Config['drawing'], private request: typeof fetch = fetch, private credential: CredentialReader = environmentCredential) {}
   get model() { return this.config.model; }
   async paint(prompt: string, signal?: AbortSignal): Promise<Buffer> {
-    const key = process.env[this.config.apiKeyEnv];
+    const key = this.credential(this.config.apiKeyEnv);
     const response = await this.request(`${this.config.baseUrl.replace(/\/+$/, '')}/images/generations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) },
@@ -112,8 +113,8 @@ export class Drawings {
 }
 
 export function drawingEnabled(config: Config) { return config.drawing.enabled && config.plugins.drawing !== false; }
-export function drawingCredentialProblems(config: Config): string[] {
-  return drawingEnabled(config) && !process.env[config.drawing.apiKeyEnv]
+export function drawingCredentialProblems(config: Config, credential: CredentialReader = environmentCredential): string[] {
+  return drawingEnabled(config) && !credential(config.drawing.apiKeyEnv)
     ? [ui(`Missing ${config.drawing.apiKeyEnv} for drawing.`, `缺少画图所需的 ${config.drawing.apiKeyEnv}。`)] : [];
 }
 export function drawingPlugin(drawings: Drawings, enabled: () => boolean = () => true): LifePlugin {

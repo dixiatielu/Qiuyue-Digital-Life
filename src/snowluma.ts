@@ -1,3 +1,4 @@
+import { environmentCredential, type CredentialReader } from './credentials.js';
 import { SnowLumaWebSocketClient, SnowLumaApiError, fromCQString, type SnowLumaAction, type SnowLumaStreamAction } from '@snowluma/sdk';
 import type { Config } from './config.js';
 import type { EnvironmentEvent } from './domain.js';
@@ -44,8 +45,8 @@ export class SnowLumaAdapter implements SocialAdapter {
   private closing = false;
   private recovery?: Promise<void>;
   private anchors = new Map<number, number | undefined>();
-  constructor(private config: Config['snowluma'], private store: Store, private notify: () => void) {
-    this.client = new SnowLumaWebSocketClient({ url: config.url, accessToken: process.env[config.tokenEnv], reconnect: true, requestTimeoutMs: 20_000 });
+  constructor(private config: Config['snowluma'], private store: Store, private notify: () => void, credential: CredentialReader = environmentCredential) {
+    this.client = new SnowLumaWebSocketClient({ url: config.url, accessToken: credential(config.tokenEnv), reconnect: true, requestTimeoutMs: 20_000 });
     this.client.onEvent(raw => { if (this.closing) return; const event = normalizeEvent(raw as Record<string, unknown>, config); if (event && store.receive(event)?.status === 'pending') notify(); });
     this.client.on('close', () => { this.verified = false; if (!this.closing) { this.captureAnchors(); store.log('connection_closed', {}); } });
     this.client.on('error', error => { if (!this.closing) store.log('connection_error', { message: errorText(error) }); });

@@ -1,3 +1,4 @@
+import { credentialNames, environmentCredential, type CredentialReader } from './credentials.js';
 import { ui } from './ui-language.js';
 import { randomUUID } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
@@ -71,8 +72,8 @@ export class Monitor {
   private contextTokens?: number;
   private inputBudget?: number;
   private readonly secrets: string[];
-  constructor(private config: Config, private store: Store, private capacity = 2000) {
-    this.secrets = [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv].map(name => process.env[name]).filter((value): value is string => Boolean(value));
+  constructor(private config: Config, private store: Store, private capacity = 2000, credential: CredentialReader = environmentCredential) {
+    this.secrets = credentialNames(config).map(credential).filter((value): value is string => Boolean(value));
     this.loadHistory();
     this.disconnect = store.subscribe(notice => this.onStore(notice));
   }

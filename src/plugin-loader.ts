@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { Check } from 'typebox/value';
 import type { TSchema } from 'typebox';
 import type { Config } from './config.js';
+import type { CredentialReader } from './credentials.js';
 import { errorText } from './domain.js';
 import type { LifePlugin } from './plugins.js';
 import type { PluginContext, PluginDefinition, UserTool } from './plugin-sdk.js';
@@ -187,5 +188,3 @@ export async function loadUserPlugin(id: string, config: Config, store: Store, c
     return { plugin, definition: metadata, sourceHash: source.hash };
   } catch (error) { try { await waitFor(cleanup(), AbortSignal.timeout(5000)); } catch { /* preserve the loading error */ } throw error; }
 }
-
-type CredentialReader = PluginContext['credential'];

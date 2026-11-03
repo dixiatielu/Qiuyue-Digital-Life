@@ -1,3 +1,4 @@
+import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend } from './model.js';
 import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
@@ -82,8 +83,8 @@ export class PiBrain implements Brain {
   /** Preemptions since a decision was last carried out as made. */
   private preemptions = 0;
   private callStartedAt = 0;
-  constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall) {
-    const { model, stream } = backend ?? createModelBackend(config.model);
+  constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential) {
+    const { model, stream } = backend ?? createModelBackend(config.model, credential);
     this.stream = stream;
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
@@ -91,7 +92,7 @@ export class PiBrain implements Brain {
     this.agent = new Agent({
       initialState: { model: config.model.baseUrl ? { ...model, baseUrl: config.model.baseUrl } : model, systemPrompt: this.instructions(), tools: tools.current(), thinkingLevel: config.model.thinkingLevel ?? 'off' },
       streamFn: (target, context, options) => stream(target, context, { ...options, maxTokens: Math.min(config.limits.outputReserveTokens, target.maxTokens) }),
-      getApiKey: () => process.env[config.model.apiKeyEnv], toolExecution: 'sequential', steeringMode: 'all',
+      getApiKey: () => credential(config.model.apiKeyEnv), toolExecution: 'sequential', steeringMode: 'all',
       convertToLlm: toModelMessages,
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
       beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
@@ -243,7 +244,7 @@ export class PiBrain implements Brain {
       ensureCurrent(this.store, this.thought, signal);
       this.chargeCall();
       this.display(monitor => monitor.requestStarted('compacting'));
-      const response = await (await stream(model, normalizeContext({ messages: toModelMessages(request) }), { apiKey: process.env[this.config.model.apiKeyEnv], signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result();
+      const response = await (await stream(model, normalizeContext({ messages: toModelMessages(request) }), { apiKey: this.credential(this.config.model.apiKeyEnv), signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result();
       ensureCurrent(this.store, this.thought, signal);
       this.store.log('context_summary_completed', { runId: this.runId, attempt, usage: response.usage, stopReason: response.stopReason });
       transient = response.stopReason === 'error' || response.stopReason === 'aborted';

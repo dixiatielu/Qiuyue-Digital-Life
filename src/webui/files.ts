@@ -1,15 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { parseEnv } from 'node:util';
+import { Credentials, credentialPaths } from '../credentials.js';
 import { loadConfig, type Config } from '../config.js';
 import { builtinSystemPrompt, checkSystemPrompt } from '../prompts.js';
 
-export type HistoryKind = 'config' | 'persona' | 'prompt' | 'env';
-const kept: Record<HistoryKind, { count: number; ext: string }> = { config: { count: 50, ext: 'json' }, persona: { count: 200, ext: 'md' }, prompt: { count: 100, ext: 'md' }, env: { count: 5, ext: 'env' } };
+export type HistoryKind = 'config' | 'persona' | 'prompt';
+const kept: Record<HistoryKind, { count: number; ext: string }> = { config: { count: 50, ext: 'json' }, persona: { count: 200, ext: 'md' }, prompt: { count: 100, ext: 'md' } };
 export const historyKinds = Object.keys(kept) as HistoryKind[];
 export const hash = (text: string) => createHash('sha256').update(text).digest('hex');
-const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** A file changed on disk after the page read it, by hand or by another session. */
 export class ConflictError extends Error {}
 
@@ -24,34 +23,7 @@ function writeAtomic(path: string, text: string) {
 const readText = (path: string | undefined) => path && existsSync(path) ? readFileSync(path, 'utf8') : '';
 const normalized = (text: string) => text.replace(/\r\n?/g, '\n');
 
-/** One line of a .env file for a value, quoted only when it has to be. */
-export function checkEnvName(name: string) {
-  if (!envName.test(name)) throw new Error('An environment variable name has only letters, digits, and underscores, and does not start with a digit.');
-}
-export function envLine(name: string, value: string) {
-  checkEnvName(name);
-  if (/[\r\n]/.test(value)) throw new Error('A credential must be a single line.');
-  if (/^[\w@%+=:,./~^-]*$/.test(value)) return `${name}=${value}`;
-  if (!value.includes("'")) return `${name}='${value}'`;
-  if (!value.includes('"')) return `${name}="${value}"`;
-  throw new Error('A credential cannot contain both single and double quotes.');
-}
-/** Set or remove one variable in .env text, leaving every other line and comment where it was. */
-export function setEnvText(text: string, name: string, value: string | null) {
-  checkEnvName(name);
-  const line = value === null ? undefined : envLine(name, value);
-  const pattern = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=`);
-  const lines = text ? text.replace(/\n$/, '').split('\n') : [];
-  const index = lines.findIndex(item => pattern.test(item));
-  // Later definitions of the same name would override this one when loaded, so they go.
-  const rest = lines.filter((item, at) => at <= index || !pattern.test(item));
-  if (index < 0) { if (line !== undefined) rest.push(line); }
-  else if (line === undefined) rest.splice(index, 1);
-  else rest[index] = line;
-  return rest.length ? rest.join('\n') + '\n' : '';
-}
-
-/** The operator's files: configuration, persona, system prompt, and credentials, each saved whole with earlier versions kept beside the life database. */
+/** The operator's files: configuration, persona, and system prompt, each saved whole with earlier versions kept beside the life database. */
 export class OperatorFiles {
   readonly base: string;
   readonly envPath: string;
@@ -72,6 +44,7 @@ export class OperatorFiles {
   }
   /** Load a configuration the way the daemon will, without touching the real file. */
   check(raw: Record<string, any>, overrides: { persona?: string; prompt?: string } = {}): Config {
+    credentialPaths(this.configPath, raw.credentialsFile);
     const temp = (suffix: string) => join(this.base, `.webui-check-${randomUUID()}${suffix}`);
     const files: string[] = [];
     const candidate = { ...raw };
@@ -132,15 +105,11 @@ export class OperatorFiles {
     this.check(raw);
     this.replace('config', this.configPath, JSON.stringify(raw, null, 2) + '\n');
   }
-  env(): Record<string, string> { return existsSync(this.envPath) ? parseEnv(readFileSync(this.envPath, 'utf8')) as Record<string, string> : {}; }
-  /** Write one credential to .env and to this process, so tests from the page see it at once. */
-  setEnv(name: string, value: string | null) {
-    const text = setEnvText(readText(this.envPath), name, value);
-    this.replace('env', this.envPath, text);
-    if (value === null) delete process.env[name]; else process.env[name] = value;
+  credentials() {
+    let file: unknown;
+    try { file = this.raw().credentialsFile; } catch { /* the page also repairs invalid configuration */ }
+    return new Credentials(credentialPaths(this.configPath, file));
   }
-  /** Bring this process up to date with .env as it is on disk now. */
-  refreshEnv() { for (const [name, value] of Object.entries(this.env())) process.env[name] = value; }
   private historyDir(kind: HistoryKind) { return join(this.dataDir, 'history', kind); }
   history(kind: HistoryKind) {
     const dir = this.historyDir(kind);

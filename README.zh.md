@@ -30,7 +30,7 @@ npm ci
 ```bash
 cp config.example.json config.json
 cp persona.example.md persona.md
-cp .env.example .env
+install -m 600 credentials.example.json credentials.json
 npm run dev -- models openai
 ```
 
@@ -39,10 +39,10 @@ npm run dev -- models openai
 - **`config.json`：** 设置 SnowLuma 地址，将 `snowluma.selfId` 设为已登录的 QQ 账号，并将 `model.provider` 和 `model.id` 设为支持图片输入的模型。将 `personaFile` 改为 `persona.md`。`snowluma.groups` 指定连接或恢复时需要补查历史消息的群，可为空，不限制实时事件的接收范围。
 - **`config.json` 中的 `model.thinkingLevel`（可选）：** 推理模型每轮思考的强度：`off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`。自定义模型还需将 `model.reasoning` 设为 `true`。强度如何发送由 `model.compat.thinkingFormat` 决定，请使用接口接受的格式，网关可能拒绝其他格式。使用 OpenAI 格式时，`off` 不发送任何参数，模型按自身默认强度思考；想尽量少思考请用 `minimal`。
 - **`config.json` 中的 `embedding`（可选）：** 如需让数字生命按大家正在聊的内容想起记忆，将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 embeddings 接口。各个阈值都取决于模型：`threshold`（消息让它想起什么）、`searchThreshold`（主动 `recall` 时的几个关键词，得分通常更低）和 `stickerThreshold`（描述与大家所说相符的已存表情，最多 `stickerLimit` 个）分别按 `qwen3-vl-embedding` 校准为 `0.65`、`0.55` 和 `0.65`，其他模型需要自行校准。在 `selfNames` 中列出别人对数字生命的称呼，避免一条消息因为提到它就匹配上所有提到它的记忆。不启用时，思考不会自动想起记忆，主动调用 `recall` 只按原词检索。
-- **`config.json` 中的 `drawing`（可选）：** 如需让数字生命画画，将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 `/images/generations` 接口（例如提供 `gpt-image-2.5` 的网关），密钥放在 `apiKeyEnv` 所指的环境变量里。画一张图要半分钟以上，所以画好后会作为一条观察回到数字生命那里；请求超过 `timeoutMs` 即放弃。画好的图保存在 `dir`（默认是配置文件旁的 `data/drawings`），保留时长与记忆相同。画图次数不设上限，请自行留意接口额度。
+- **`config.json` 中的 `drawing`（可选）：** 如需让数字生命画画，将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 `/images/generations` 接口（例如提供 `gpt-image-2.5` 的网关），凭据名称由 `apiKeyEnv` 指定。画一张图要半分钟以上，所以画好后会作为一条观察回到数字生命那里；请求超过 `timeoutMs` 即放弃。画好的图保存在 `dir`（默认是配置文件旁的 `data/drawings`），保留时长与记忆相同。画图次数不设上限，请自行留意接口额度。
 - **`config.json` 中的 `life`：** `enabled` 决定首次启动时是否开启自主生活，`allowFiction` 允许虚构日常。自主生活开启时，`freeTime` 会在聊天安静一段时间（每次在 `quietMinMs` 到 `quietMaxMs` 之间随机）后提供一次 life wake，与其他 life wake 至少相隔 `gapMs`，每天最多 `perDay` 次。数字生命在安排醒来要做的活动时标记 rest，就能让它在那之前不来。
 - **`persona.md`：** 描述数字生命的身份和人格。
-- **`.env`：** 填写 `MODEL_API_KEY`，以及 SnowLuma 服务端需要的 `SNOWLUMA_TOKEN`。如需联网搜索，可填写 `DEEPSEEK_API_KEY`。设置 `QIUYUE_UI_LANGUAGE=zh` 可切换中文；常驻进程和查看终端应使用相同语言，修改后需重启常驻进程。
+- **`credentials.json`：** 在 `credentials` 对象中填写 `MODEL_API_KEY`、SnowLuma 所需的 `SNOWLUMA_TOKEN`，以及联网搜索用的 `DEEPSEEK_API_KEY`、管理网页用的 `WEBUI_TOKEN`；保留示例中的 `version` 和 `changes`。`credentialsFile` 默认指向配置旁的 `credentials.json`，可设为绝对路径放在仓库外。文件仍是明文，以 `0600` 权限保护。读取顺序统一为：外部环境变量 → 凭据文件 → 旧 `.env`；空的外部变量或文件中的 `null` 会停用该凭据，不再回退。原有 `apiKeyEnv`、`tokenEnv`、`searchKeyEnv` 字段继续作为凭据名称使用。中文界面请在 `config.json` 设置 `uiLanguage: "zh"`，修改后重启常驻进程和查看界面。
 
 > **启动前请注意：** 示例配置开放了全部 SnowLuma 接口，且不限制模型调用和行动次数。请根据需要调整 `snowluma.tools` 和 `limits`。自主生活默认关闭，可单独开启。
 
@@ -86,13 +86,14 @@ npm start -- tui --config config.json
 npm start -- webui --config config.json
 ```
 
-用网页完成同样的管理：实时状态和时间线、暂停与自主生活开关、配置、插件与 QQ 接口权限、人格文件与数字生命自己的发展、系统提示词、模型供应商，以及 `.env` 中的凭据。它独立于常驻进程运行，常驻进程重启时网页不断开；配置无法加载时也能打开网页修复。
+用网页完成同样的管理：实时状态和时间线、暂停与自主生活开关、配置、插件与 QQ 接口权限、人格文件与数字生命自己的发展、系统提示词、模型供应商，以及单独存储的凭据。它独立于常驻进程运行，常驻进程重启时网页不断开；配置无法加载时也能打开网页修复。
 
-- **访问：** 监听 `webui.host`:`webui.port`（默认 `127.0.0.1:8848`）；从其他机器访问请用 SSH 隧道，例如 `ssh -L 8848:127.0.0.1:8848 <服务器>`。打开 `config.json` 同目录下的 `.env`，将 `WEBUI_TOKEN=` 后面的值（不含两侧引号）粘贴到登录框；变量名由 `webui.tokenEnv` 指定，变量名本身不是令牌。如果 `.env` 和服务环境里都未配置令牌，每次启动会在终端或服务日志中打印本次启动的登录链接，请打开最近一次的链接。
+- **访问：** 监听 `webui.host`:`webui.port`（默认 `127.0.0.1:8848`）；从其他机器访问请用 SSH 隧道，例如 `ssh -L 8848:127.0.0.1:8848 <服务器>`。将 `webui.tokenEnv` 指定的凭据值（默认名称 `WEBUI_TOKEN`）粘贴到登录框；凭据名称本身不是令牌。如果未配置令牌，每次启动会在终端或服务日志中打印本次启动的登录链接，请打开最近一次的链接。
 - **界面：** 六个主标签页按活动、配置、能力、人格、提示词和模型分区。右上角「主题色」支持六组预设、自定义 HEX，以及浅色、深色、跟随系统；偏好自动保存在当前浏览器，立即生效，无需重启。配置中的时间可切换毫秒、秒、分钟、小时显示，保存时统一换算为毫秒。
-- **保存：** 每次保存都按常驻进程的方式校验配置；如果文件在网页读取后被其他地方改过，会拒绝保存；历史版本保存在 `data/webui/history`。插件设置可在能力页通过重载应用，核心设置仍在重启后生效。网页显示实际插件版本与重载结果，并提示是否延续工作上下文：修改人格、系统提示词、模型或工具集会让工作上下文重新开始。
+- **保存：** 每次保存都按常驻进程的方式校验配置；如果文件在网页读取后被其他地方改过，会拒绝保存；配置、人格和提示词的历史版本保存在 `data/webui/history`。凭据不保存旧值，只在凭据文件中记录最近 100 次变更的名称、时间和操作。插件设置可在能力页通过重载应用，核心设置仍在重启后生效。网页显示实际插件版本与重载结果，并提示是否延续工作上下文：修改人格、系统提示词、模型或工具集会让工作上下文重新开始。
 - **系统提示词：** 保存时写入 `config.json` 旁的 `system-prompt.md`（不在 git 中），并设置 `systemPromptFile`；不设置时使用内置提示词。内置提示词在你保存之后有更新时，网页会提示。
 - **重启：** 把 `webui.service` 设为常驻进程的 systemd 用户服务名（例如 `qiuyue-digital-life.service`），就能在网页上启动、停止和重启它。重启可以等到没有思考和记忆整理在进行时再执行。
+- **凭据：** 网页展示掩码和来源，外部环境提供的凭据只读，新值只写入 `credentialsFile`。连接测试按与常驻进程相同的优先级读取最新文件；插件凭据可通过重载对应插件生效，核心模块的凭据仍需重启常驻进程，修改网页登录令牌还需重启管理网页。停用凭据后不会重新启用旧 `.env` 中的值。先将常驻进程和管理网页更新到此版本，再迁移现有安装：将 `credentialsFile` 设为目标位置，再执行 `npm run dev -- credentials migrate --config config.json`：先复制凭据，再删除 `.env` 中对应的定义，保留普通设置，并清除旧的 `history/env` 目录。迁移可以安全重试，不打印凭据值。
 - **供应商：** 网页把供应商端点保存在 `data/webui/providers.json`；选用某个供应商时，会把它的地址、API 和密钥变量复制到 `model`、`embedding` 或 `drawing`。常驻进程只读 `config.json`。
 
 ## 工作原理

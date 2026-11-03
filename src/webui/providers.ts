@@ -1,3 +1,4 @@
+import { checkCredentialName, environmentCredential, type CredentialReader } from '../credentials.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { normalizeContext } from '@earendil-works/pi-ai';
@@ -5,7 +6,7 @@ import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Config } from '../config.js';
 import { createModelBackend, validateModelConfig, type ModelConfig } from '../model.js';
 import { EmbeddingClient } from '../embedding.js';
-import { checkEnvName, hash } from './files.js';
+import { hash } from './files.js';
 
 export const providerApis = ['openai-completions', 'openai-responses', 'anthropic-messages'] as const;
 /**
@@ -21,7 +22,7 @@ function checkProfile(profile: ProviderProfile) {
   let url: URL | undefined;
   try { url = new URL(profile.baseUrl); } catch { /* reported below */ }
   if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error(`${profile.name}: the base URL must be HTTP/HTTPS without credentials, query parameters, or a fragment.`);
-  checkEnvName(profile.apiKeyEnv);
+  checkCredentialName(profile.apiKeyEnv);
   if (profile.compat !== undefined && (!profile.compat || typeof profile.compat !== 'object' || Array.isArray(profile.compat))) throw new Error(`${profile.name}: compat must be an object.`);
 }
 
@@ -56,9 +57,9 @@ export class ProviderProfiles {
 
 const trimmed = (url: string) => url.replace(/\/+$/, '');
 /** The model IDs an endpoint offers, from its /models listing. */
-export async function remoteModels(profile: ProviderProfile, request: typeof fetch = fetch): Promise<string[]> {
+export async function remoteModels(profile: ProviderProfile, request: typeof fetch = fetch, credential: CredentialReader = environmentCredential): Promise<string[]> {
   checkProfile(profile);
-  const key = process.env[profile.apiKeyEnv];
+  const key = credential(profile.apiKeyEnv);
   const anthropic = profile.api === 'anthropic-messages';
   const headers: Record<string, string> = anthropic ? { 'anthropic-version': '2023-06-01', ...(key ? { 'x-api-key': key } : {}) } : (key ? { Authorization: `Bearer ${key}` } : {});
   const base = trimmed(profile.baseUrl);
@@ -76,9 +77,9 @@ export async function remoteModels(profile: ProviderProfile, request: typeof fet
 }
 
 /** Send one short request to a model configuration and report what came back. */
-export async function testModel(config: ModelConfig, timeoutMs = 60_000) {
+export async function testModel(config: ModelConfig, timeoutMs = 60_000, credential: CredentialReader = environmentCredential) {
   validateModelConfig(config);
-  const { model, stream } = createModelBackend(config);
+  const { model, stream } = createModelBackend(config, credential);
   const started = Date.now();
   const context = normalizeContext({ systemPrompt: 'This is a connection test. Reply with OK.', messages: [{ role: 'user', content: 'ping', timestamp: started }] });
   const reply = await stream(model, context, { maxTokens: Math.min(1024, model.maxTokens), signal: AbortSignal.timeout(timeoutMs) }).result();
@@ -87,9 +88,9 @@ export async function testModel(config: ModelConfig, timeoutMs = 60_000) {
   return { ms: Date.now() - started, text: text.slice(0, 500), stopReason: reply.stopReason, usage: reply.usage };
 }
 
-export async function testEmbedding(config: Config['embedding']) {
+export async function testEmbedding(config: Config['embedding'], credential: CredentialReader = environmentCredential) {
   const started = Date.now();
-  const [vector] = await new EmbeddingClient(config).embed(['连接测试']);
+  const [vector] = await new EmbeddingClient(config, fetch, credential).embed(['连接测试']);
   return { ms: Date.now() - started, dimensions: vector!.length };
 }
 

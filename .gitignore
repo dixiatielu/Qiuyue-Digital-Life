@@ -12,3 +12,5 @@ data/
 coverage/
 /plugins/
 .qiuyue-cache/
+credentials.json
+credentials.json.*.tmp
