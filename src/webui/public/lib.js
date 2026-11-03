@@ -28,7 +28,7 @@ export const failed = error => toast(error?.message ?? error, 'error');
 export function Toasts() {
   const [items, setItems] = useState([]);
   useEffect(() => { toastListeners.add(setItems); return () => toastListeners.delete(setItems); }, []);
-  return html`<div class="toasts">${items.map(item => html`<div key=${item.id} class=${`toast ${item.kind}`}>${item.text}</div>`)}</div>`;
+  return html`<div class="toasts" role="status" aria-live="polite">${items.map(item => html`<div key=${item.id} class=${`toast ${item.kind}`}>${item.text}</div>`)}</div>`;
 }
 
 // --- formatting ---
@@ -121,24 +121,48 @@ export function DiffView({ before, after, context = 3 }) {
 export function Card({ title, actions, children, class: extra = '' }) {
   return html`<section class=${`card ${extra}`}>${title || actions ? html`<header class="card-head"><h2>${title}</h2><div class="row">${actions}</div></header>` : null}${children}</section>`;
 }
-export function Toggle({ value, onChange, disabled, label }) {
-  return html`<label class=${`switch ${disabled ? 'disabled' : ''}`}><input type="checkbox" checked=${Boolean(value)} disabled=${disabled} onChange=${event => onChange(event.currentTarget.checked)} /><span class="slider"></span>${label ? html`<span>${label}</span>` : null}</label>`;
+export function Toggle({ value, onChange, disabled, label, id }) {
+  return html`<label class=${`switch ${disabled ? 'disabled' : ''}`}><input id=${id} type="checkbox" checked=${Boolean(value)} disabled=${disabled} onChange=${event => onChange(event.currentTarget.checked)} /><span class="slider"></span>${label ? html`<span>${label}</span>` : null}</label>`;
 }
 export function Badge({ kind = '', children }) { return html`<span class=${`badge ${kind}`}>${children}</span>`; }
-export function Modal({ title, onClose, children, footer, wide }) {
+export function PageHeader({ title, eyebrow, description, children }) {
+  return html`<header class="page-head"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${description ? html`<p class="page-description">${description}</p>` : null}</div><div class="row wrap">${children}</div></header>`;
+}
+export function Modal({ title, onClose, children, footer, wide, class: extra = '' }) {
+  const dialog = useRef(null);
+  const close = useRef(onClose); close.current = onClose;
   useEffect(() => {
-    const key = event => { if (event.key === 'Escape') onClose(); };
-    addEventListener('keydown', key); return () => removeEventListener('keydown', key);
-  }, [onClose]);
-  return html`<div class="modal-back" onClick=${event => { if (event.target === event.currentTarget) onClose(); }}>
-    <div class=${`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label=${title}>
+    const previous = document.activeElement;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    dialog.current.querySelector('button')?.focus();
+    const key = event => {
+      if (event.key === 'Escape') { event.preventDefault(); close.current(); }
+      if (event.key === 'Tab') {
+        const items = [...dialog.current.querySelectorAll('button, a[href], input, select, textarea, [tabindex="0"]')].filter(el => !el.disabled && el.getClientRects().length);
+        const first = items[0], last = items.at(-1);
+        if (event.shiftKey && document.activeElement === first) { last?.focus(); event.preventDefault(); }
+        else if (!event.shiftKey && document.activeElement === last) { first?.focus(); event.preventDefault(); }
+      }
+    };
+    addEventListener('keydown', key);
+    return () => { removeEventListener('keydown', key); document.body.style.overflow = overflow; if (previous?.isConnected) previous.focus(); };
+  }, []);
+  return html`<div class=${`modal-back ${extra}`} onClick=${event => { if (event.target === event.currentTarget) onClose(); }}>
+    <div ref=${dialog} class=${`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label=${title}>
       <header class="card-head"><h2>${title}</h2><button class="ghost icon" onClick=${onClose} aria-label=${t('Close', '关闭')}>✕</button></header>
       <div class="modal-body">${children}</div>
       ${footer ? html`<footer class="modal-foot">${footer}</footer>` : null}
     </div></div>`;
 }
 export function Tabs({ tabs, value, onChange }) {
-  return html`<div class="tabs" role="tablist">${tabs.map(([id, label]) => html`<button role="tab" aria-selected=${value === id} class=${value === id ? 'active' : ''} onClick=${() => onChange(id)}>${label}</button>`)}</div>`;
+  const move = event => {
+    const index = tabs.findIndex(([id]) => id === value);
+    const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+    if (next < 0) return;
+    event.preventDefault(); onChange(tabs[next][0]); event.currentTarget.children[next]?.focus();
+  };
+  return html`<div class="tabs" role="tablist" aria-label=${t('Sections', '页面分区')} onKeyDown=${move}>${tabs.map(([id, label]) => html`<button key=${id} role="tab" tabIndex=${value === id ? 0 : -1} aria-selected=${value === id} class=${value === id ? 'active' : ''} onClick=${() => onChange(id)}>${label}</button>`)}</div>`;
 }
 export function Loading({ state }) {
   if (state.error) return html`<div class="card"><p class="error">${state.error.message}</p><button onClick=${state.reload}>${t('Retry', '重试')}</button></div>`;
@@ -152,7 +176,6 @@ export function ContextNote({ context }) {
   return html`<p class="note warn">${t('After a restart, the working context starts afresh: the persona, system prompt, model, tool set, or account differs from the one it was saved with. Memories and continuing state are kept.', '重启后工作上下文会重新开始：人格、系统提示词、模型、工具集或账号与保存时不同。记忆和持续状态不受影响。')}</p>`;
 }
 
-const msUnits = value => value >= 3_600_000 && value % 60_000 === 0 ? duration(value) : value >= 1000 ? t(`${value / 1000}s`, `${value / 1000} 秒`) : '';
 /** One field of the configuration: shows the default in grey until set, and can go back to it. */
 export function ConfigField({ form, path, type = 'string', label, help, nullable, options, min, max, step, warn, placeholder }) {
   const value = form.get(path);
@@ -161,31 +184,34 @@ export function ConfigField({ form, path, type = 'string', label, help, nullable
   const shown = unset ? fallback : value;
   const set = next => form.set(path, next);
   const [text, setText] = useState(null);
+  const [unit, setUnit] = useState(() => typeof shown === 'number' && shown >= 60000 ? 60000 : typeof shown === 'number' && shown >= 1000 ? 1000 : 1);
+  const displayLabel = type === 'ms' ? label.replace(/\s*\(ms\)|（毫秒）/g, '') : label;
   let control;
-  if (type === 'bool') control = html`<${Toggle} value=${shown} onChange=${set} />`;
-  else if (type === 'select') control = html`<select value=${shown ?? ''} onChange=${event => set(event.currentTarget.value || undefined)}>${options.map(([id, name]) => html`<option value=${id}>${name}</option>`)}</select>`;
+  if (type === 'bool') control = html`<${Toggle} id=${`field-${path}`} value=${shown} onChange=${set} />`;
+  else if (type === 'select') control = html`<select id=${`field-${path}`} value=${shown ?? ''} onChange=${event => set(event.currentTarget.value || undefined)}>${options.map(([id, name]) => html`<option value=${id}>${name}</option>`)}</select>`;
   else if (type === 'int' || type === 'number' || type === 'ms') {
     const isNull = shown === null;
+    const scale = type === 'ms' ? unit : 1;
     control = html`<div class="row">
-      <input type="number" class="num" value=${isNull ? '' : value ?? ''} placeholder=${isNull ? t('unlimited', '不限') : fallback ?? placeholder ?? ''} min=${min} max=${max} step=${step ?? (type === 'number' ? 'any' : 1)} disabled=${isNull}
-        onInput=${event => { const raw = event.currentTarget.value; set(raw === '' ? undefined : type === 'number' ? Number(raw) : Math.round(Number(raw))); }} />
-      ${type === 'ms' && typeof shown === 'number' ? html`<span class="muted small">${msUnits(shown)}</span>` : null}
+      <input id=${`field-${path}`} type="number" class="num" value=${isNull || value === undefined ? '' : value / scale} placeholder=${isNull ? t('unlimited', '不限') : fallback == null ? placeholder ?? '' : fallback / scale} min=${min == null ? undefined : min / scale} max=${max == null ? undefined : max / scale} step=${step ?? (type === 'number' || type === 'ms' ? 'any' : 1)} disabled=${isNull}
+        onInput=${event => { const raw = event.currentTarget.value; set(raw === '' ? undefined : type === 'number' ? Number(raw) : Math.round(Number(raw) * scale)); }} />
+      ${type === 'ms' ? html`<select class="time-unit" aria-label=${t(`${displayLabel} unit`, `${displayLabel}单位`)} value=${unit} onChange=${event => setUnit(Number(event.currentTarget.value))}>${[[1, t('ms', '毫秒')], [1000, t('seconds', '秒')], [60000, t('minutes', '分钟')], [3600000, t('hours', '小时')]].map(([scale, name]) => html`<option value=${scale}>${name}</option>`)}</select>` : null}
       ${nullable ? html`<label class="check"><input type="checkbox" checked=${isNull} onChange=${event => set(event.currentTarget.checked ? null : fallback ?? 1)} />${t('unlimited', '不限')}</label>` : null}
     </div>`;
   } else if (type === 'list' || type === 'intlist') {
     const current = Array.isArray(shown) ? shown.join('\n') : '';
-    control = html`<textarea rows=${Math.min(8, Math.max(2, (text ?? current).split('\n').length + 1))} value=${text ?? (unset ? '' : current)} placeholder=${unset ? current : ''}
+    control = html`<textarea id=${`field-${path}`} rows=${Math.min(8, Math.max(2, (text ?? current).split('\n').length + 1))} value=${text ?? (unset ? '' : current)} placeholder=${unset ? current : ''}
       onInput=${event => setText(event.currentTarget.value)}
       onBlur=${() => { if (text === null) return; const items = text.split('\n').map(item => item.trim()).filter(Boolean); set(type === 'intlist' ? items.map(item => /^\d+$/.test(item) ? Number(item) : item) : items); setText(null); }}></textarea>`;
   } else if (type === 'json') {
     const current = shown === undefined ? '' : JSON.stringify(shown, null, 2);
     let invalid = false;
     if (text !== null) { try { if (text.trim()) JSON.parse(text); } catch { invalid = true; } }
-    control = html`<textarea class=${`mono ${invalid ? 'invalid' : ''}`} rows="6" value=${text ?? current} onInput=${event => setText(event.currentTarget.value)}
+    control = html`<textarea id=${`field-${path}`} class=${`mono ${invalid ? 'invalid' : ''}`} rows="6" value=${text ?? current} onInput=${event => setText(event.currentTarget.value)}
       onBlur=${() => { if (text === null) return; try { set(text.trim() ? JSON.parse(text) : undefined); setText(null); } catch { /* left for the operator to fix */ } }}></textarea>`;
-  } else control = html`<input type="text" value=${value ?? ''} placeholder=${fallback ?? placeholder ?? ''} onInput=${event => set(event.currentTarget.value === '' ? undefined : event.currentTarget.value)} spellcheck="false" />`;
-  return html`<div class="field">
-    <div class="field-label"><label>${label}</label>${unset && fallback !== undefined ? html`<${Badge}>${t('default', '默认')}<//>` : null}
+  } else control = html`<input id=${`field-${path}`} type="text" value=${value ?? ''} placeholder=${fallback ?? placeholder ?? ''} onInput=${event => set(event.currentTarget.value === '' ? undefined : event.currentTarget.value)} spellcheck="false" />`;
+  return html`<div class=${`field ${type === 'bool' ? 'field-bool' : ''}`}>
+    <div class="field-label"><label for=${`field-${path}`}>${displayLabel}</label>${unset && fallback !== undefined ? html`<${Badge}>${t('default', '默认')}<//>` : null}
       ${!unset ? html`<button class="ghost tiny" title=${t('Back to the default', '恢复默认')} onClick=${() => { setText(null); form.set(path, undefined); }}>↺</button>` : null}</div>
     <div class="field-control">${control}</div>
     ${help ? html`<div class="field-help">${help}</div>` : null}

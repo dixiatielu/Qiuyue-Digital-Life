@@ -1,4 +1,5 @@
-import { api, Badge, Card, ConfigField, ContextNote, getPath, html, Loading, SaveBar, t, useAsync, useConfigDraft, useMemo, useState } from '../lib.js';
+import { Icon } from '../icons.js';
+import { api, Badge, Card, ConfigField, ContextNote, getPath, html, Loading, PageHeader, SaveBar, Tabs, t, useAsync, useConfigDraft, useMemo, useState } from '../lib.js';
 
 const permitted = tools => name => !(tools.deny ?? []).includes(name) && (tools.allow === '*' || (tools.allow ?? []).includes(name));
 
@@ -70,6 +71,7 @@ function Permissions({ form }) {
 }
 
 export function PluginsPage() {
+  const [tab, setTab] = useState('installed');
   const form = useConfigDraft();
   const info = useAsync(() => api('/api/plugins'));
   if (!form.state.data || !info.data) return html`<${Loading} state=${form.state.data ? info : form.state} />`;
@@ -79,20 +81,21 @@ export function PluginsPage() {
   const inspected = info.data.inspected;
   const credentials = inspected?.credentials ?? { problems: [], warnings: [] };
   return html`
-    <header class="page-head"><h1>${t('Plugins', '插件')}</h1></header>
-    <p class="muted">${t('Plugins are modules built into this program; here they are switched on and off. Default leaves each to its own rule. Turning one on or off changes her tool set, so the next start begins a fresh working context.', '插件是程序内置的模块，这里只能开关。“默认”按插件自己的规则决定。开关插件会改变她的工具集，下次启动时工作上下文会重新开始。')}</p>
+    <${PageHeader} title=${t('Capabilities', '能力与插件')} eyebrow="CAPABILITIES" description=${t('What she can do, and what each capability needs.', '她能做什么，以及每项能力需要的条件。')} />
+    <p class="muted small">${t('Plugins are modules built into this program; here they are switched on and off. Default leaves each to its own rule. Turning one on or off changes her tool set, so the next start begins a fresh working context.', '插件是程序内置的模块，这里只能开关。“默认”按插件自己的规则决定。开关插件会改变她的工具集，下次启动时工作上下文会重新开始。')}</p>
     ${[...credentials.problems, ...credentials.warnings].map(text => html`<p class=${`note ${credentials.problems.includes(text) ? 'error' : 'warn'}`}>${text}</p>`)}
-    <div class="plugin-grid">${info.data.ids.map(id => {
+    <${Tabs} value=${tab} onChange=${setTab} tabs=${[['installed', t('Built-in plugins', '内置插件')], ['permissions', t('QQ permissions', 'QQ 接口权限')], ['web', t('Web settings', '联网设置')]]} />
+    <div hidden=${tab !== 'installed'} class="plugin-grid">${info.data.ids.map(id => {
       const meta = describe(id, value, allowed);
       const active = inspected?.plugins.includes(id);
-      return html`<${Card} key=${id} title=${html`${meta.name} <span class="muted mono small">${id}</span>`} actions=${html`<${Tri} value=${form.get(`plugins.${id}`)} onChange=${next => form.set(`plugins.${id}`, next)} />`}>
+      return html`<${Card} key=${id} title=${html`<span class="plugin-name"><${Icon} name="plugins" /><span>${meta.name}<small class="muted mono">${id}</small></span></span>`} actions=${html`<${Tri} value=${form.get(`plugins.${id}`)} onChange=${next => form.set(`plugins.${id}`, next)} />`}>
         <p>${meta.text}</p>
         ${meta.warn && form.get(`plugins.${id}`) === false ? html`<p class="note error">${meta.warn}</p>` : null}
         <ul class="needs">${meta.needs.map(([ok, text]) => html`<li class=${ok === null ? '' : ok ? 'ok' : 'bad'}>${ok === null ? '·' : ok ? '✓' : '✗'} ${text}</li>`)}</ul>
         <p class="small">${t('Saved configuration: ', '已保存的配置下：')}${inspected ? active ? html`<${Badge} kind="ok">${t('enabled', '已启用')}<//>` : html`<${Badge} kind="bad">${t('not enabled', '未启用')}<//>` : '—'}</p>
       <//>`;
     })}</div>
-    <${Card} title=${t('Web access', '联网')}>
+    <div hidden=${tab !== 'web'}><${Card} title=${t('Web access', '联网')}>
       <div class="fields">
         <${ConfigField} form=${form} path="web.enabled" type="bool" label=${t('Web tools on', '开启联网工具')} />
         <${ConfigField} form=${form} path="web.searchUrl" label=${t('Search endpoint', '搜索接口')} />
@@ -101,7 +104,7 @@ export function PluginsPage() {
         <${ConfigField} form=${form} path="web.maxBytes" type="int" label=${t('Largest page (bytes)', '网页大小上限（字节）')} />
       </div>
     <//>
-    <${Permissions} form=${form} />
+    </div><div hidden=${tab !== 'permissions'}><${Permissions} form=${form} /></div>
     ${inspected ? html`<${ContextNote} context=${inspected} />` : null}
     <${SaveBar} form=${form} onSaved=${info.reload} />`;
 }

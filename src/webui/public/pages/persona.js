@@ -1,4 +1,4 @@
-import { api, Badge, Card, ContextNote, DiffView, failed, html, Loading, Modal, t, Tabs, time, toast, useAsync, useMemo, useState } from '../lib.js';
+import { api, Badge, Card, ContextNote, DiffView, failed, html, Loading, PageHeader, Modal, t, Tabs, time, toast, useAsync, useMemo, useState } from '../lib.js';
 
 /** Versions kept for one of the operator's files, newest first, each comparable with the editor. */
 export function History({ kind, current, onLoad, saved }) {
@@ -6,7 +6,7 @@ export function History({ kind, current, onLoad, saved }) {
   const list = useAsync(() => api(`/api/history/${kind}`), [kind, saved]);
   const [open, setOpen] = useState(null);
   const view = async item => { try { setOpen({ ...item, text: (await api(`/api/history/${kind}/${item.id}`)).text }); } catch (error) { failed(error); } };
-  return html`<${Card} title=${t('Versions', '历史版本')} actions=${html`<button class="ghost tiny" onClick=${list.reload}>↻</button>`}>
+  return html`<${Card} title=${t('Versions', '历史版本')} actions=${html`<button class="ghost tiny" aria-label=${t('Refresh versions', '刷新历史版本')} onClick=${list.reload}>↻</button>`}>
     ${list.data?.length ? html`<ul class="versions">${list.data.map((item, index) => html`<li><button class="link" onClick=${() => view(item)}>${time(item.at)}</button>${index === 0 ? html` <${Badge}>${t('latest', '最新')}<//>` : null}<span class="muted small"> ${item.size} B</span></li>`)}</ul>`
       : html`<p class="muted small">${t('Each save keeps the version before and after it.', '每次保存都会保留修改前后的版本。')}</p>`}
     ${open ? html`<${Modal} wide title=${`${t('Version', '版本')} ${time(open.at)}`} onClose=${() => setOpen(null)}
@@ -17,7 +17,7 @@ export function History({ kind, current, onLoad, saved }) {
   <//>`;
 }
 
-function PersonaFile() {
+function PersonaFile({ tab, onEdit }) {
   const file = useAsync(() => api('/api/persona'));
   const [text, setText] = useState(null);
   const [review, setReview] = useState(false);
@@ -34,16 +34,25 @@ function PersonaFile() {
       toast(t('Persona saved. Restart the daemon to use it.', '人格已保存，重启常驻进程后生效。'), 'ok');
     } catch (error) { failed(error); } finally { setBusy(false); }
   };
-  return html`<div class="editor-layout">
-    <${Card} title=${html`${t('Persona file', '人格文件')} <span class="muted mono small">${file.data.path}</span>`}
-      actions=${html`<span class="muted small">${t(`${[...value].length} characters`, `${[...value].length} 字`)}</span>
-        <button class="ghost" disabled=${!dirty} onClick=${() => setText(null)}>${t('Discard', '放弃')}</button>
-        <button class="primary" disabled=${!dirty || !value.trim()} onClick=${() => setReview(true)}>${t('Review and save…', '检查并保存…')}</button>`}>
-      <p class="muted small">${t('The core persona is yours to set (ADR-0003, ADR-0012); she does not edit it, and it takes precedence over her own habits. It is part of the system prompt, so a change starts a fresh working context at the next start.', '核心人格由你设定（ADR-0003、ADR-0012）；她不会修改它，它优先于她自己的习惯。人格是系统提示词的一部分，修改后下次启动时工作上下文会重新开始。')}</p>
+  return html`<div class=${tab === 'history' ? '' : 'editor-layout'}>
+    <div hidden=${tab === 'history'} class="stack">
+      <${Card} class="editor-surface" title=${html`<span class="mono">${file.data.path}</span>`}>
+        <textarea class="editor" aria-label=${t('Core persona editor', '核心人格编辑器')} spellcheck="false" value=${value} onInput=${event => setText(event.currentTarget.value)}></textarea>
+        <div class="editor-status"><span>Markdown · UTF-8</span><span>${t(`${[...value].length} characters`, `${[...value].length} 字`)}</span></div>
+        <div class="editor-actions"><span class="muted small spacer">${dirty ? t('Unsaved changes', '有未保存的修改') : t('No unsaved changes', '没有未保存的修改')}</span>
+          <button class="ghost" disabled=${!dirty} onClick=${() => setText(null)}>${t('Discard', '放弃')}</button>
+          <button class="primary" disabled=${!dirty || !value.trim()} onClick=${() => setReview(true)}>${t('Review and save…', '检查并保存…')}</button>
+        </div>
+      <//>
       ${result ? html`<${ContextNote} context=${result.context} />` : null}
-      <textarea class="editor" spellcheck="false" value=${value} onInput=${event => setText(event.currentTarget.value)}></textarea>
-    <//>
-    <${History} kind="persona" current=${value} onLoad=${setText} saved=${file.data.hash} />
+    </div>
+    <aside class="stack">
+      <div hidden=${tab === 'history'}><${Card} title=${t('About the core persona', '关于核心人格')}>
+        <p class="muted small">${t('You set her identity, background and core values. Her own habits develop through experience without overriding this file.', '她的身份、背景和核心价值观由你设定。她从经历中形成自己的习惯，但不会覆盖这里的设定。')}</p>
+        <h3>${t('After saving', '修改如何生效')}</h3><p class="muted small">${t('Restart to apply. The working context starts afresh; memories, development and continuing state are kept.', '重启后生效，工作上下文会重新开始；记忆、发展和持续状态都保留。')}</p>
+      <//></div>
+      <${History} kind="persona" current=${value} onLoad=${text => { setText(text); onEdit(); }} saved=${file.data.hash} />
+    </aside>
     ${review ? html`<${Modal} wide title=${t('Save the persona', '保存人格')} onClose=${() => setReview(false)}
       footer=${html`<button class="ghost" onClick=${() => setReview(false)}>${t('Cancel', '取消')}</button><button class="primary" disabled=${busy} onClick=${save}>${t('Save', '保存')}</button>`}>
       <p class="note warn">${t('The next start begins a fresh working context. Memories, development, and continuing state are kept.', '下次启动时工作上下文会重新开始。记忆、发展和持续状态都保留。')}</p>
@@ -145,7 +154,8 @@ function Development() {
 export function PersonaPage() {
   const [tab, setTab] = useState('file');
   return html`
-    <header class="page-head"><h1>${t('Persona', '人格')}</h1></header>
-    <${Tabs} value=${tab} onChange=${setTab} tabs=${[['file', t('Persona file', '人格文件')], ['development', t('Her development', '她的发展')]]} />
-    ${tab === 'file' ? html`<${PersonaFile} />` : html`<${Development} />`}`;
+    <${PageHeader} title=${t('Persona & growth', '人格与成长')} eyebrow="PERSONA & DEVELOPMENT" description=${t('The persona you define, and what she learns through experience.', '你设定的核心人格，她从经历中形成的自己。')} />
+    <${Tabs} value=${tab} onChange=${setTab} tabs=${[['file', t('Core persona', '核心人格')], ['development', t('Her development', '她的发展')], ['history', t('Versions', '版本记录')]]} />
+    <div hidden=${tab === 'development'}><${PersonaFile} tab=${tab} onEdit=${() => setTab('file')} /></div>
+    <div hidden=${tab !== 'development'}><${Development} /></div>`;
 }

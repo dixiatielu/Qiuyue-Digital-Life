@@ -1,4 +1,4 @@
-import { api, Card, ConfigField, failed, html, Loading, SaveBar, t, Tabs, toast, useConfigDraft, useState } from '../lib.js';
+import { api, Card, ConfigField, failed, html, Loading, PageHeader, SaveBar, t, Tabs, toast, useConfigDraft, useState } from '../lib.js';
 
 /** The configuration sections that have no page of their own; models, plugins, and their endpoints live on theirs. */
 const sections = () => [
@@ -95,17 +95,19 @@ function RawEditor({ form }) {
 export function ConfigPage() {
   const form = useConfigDraft();
   const [tab, setTab] = useState('form');
+  const [section, setSection] = useState('life');
   if (!form.state.data) return html`<${Loading} state=${form.state} />`;
   const all = sections();
   return html`
-    <header class="page-head"><h1>${t('Configuration', '配置')}</h1><span class="muted small mono">config.json</span></header>
+    <${PageHeader} title=${t('Configuration', '运行配置')} eyebrow="CONFIGURATION" description=${t('Connections, daily rhythm and operating limits.', '把连接、生活节奏与运行边界，整理在一起。')} />
     ${form.error ? html`<p class="note error">${t('The configuration on disk does not load: ', '磁盘上的配置无法加载：')}${form.error}</p>` : null}
-    <p class="muted">${t('Saved changes take effect when the daemon restarts. Grey values are defaults; ↺ goes back to one.', '保存后在常驻进程重启时生效。灰色的值是默认值，↺ 恢复默认。')}
+    <p class="muted small">${t('Saved changes take effect when the daemon restarts. Grey values are defaults; ↺ goes back to one.', '保存后在常驻进程重启时生效。灰色的值是默认值，↺ 恢复默认。')}
       ${' '}${t('Models and endpoints are on the models page; plugins and QQ interface permissions on the plugins page.', '模型和各个端点在模型页；插件和 QQ 接口权限在插件页。')}</p>
-    <${Tabs} value=${form.raw ? tab : 'raw'} onChange=${setTab} tabs=${[['form', t('Form', '表单')], ['raw', t('Raw JSON', '原始 JSON')]]} />
-    ${form.raw && tab === 'form' ? html`<div class="config-layout">
-      <nav class="toc">${all.map(([id, title]) => html`<a href=${`#/config`} onClick=${event => { event.preventDefault(); document.getElementById(`section-${id}`)?.scrollIntoView({ behavior: 'smooth' }); }}>${title}</a>`)}</nav>
-      <div>${all.map(([id, title, fields]) => html`<section id=${`section-${id}`}><${Card} title=${title}><div class="fields">${fields.map(field => html`<${ConfigField} form=${form} ...${field} />`)}</div><//></section>`)}</div>
-    </div>` : html`<${RawEditor} form=${form} />`}
+    <${Tabs} value=${form.raw ? tab : 'raw'} onChange=${setTab} tabs=${[['form', t('Grouped settings', '分组配置')], ['raw', t('Raw JSON', '原始 JSON')]]} />
+    <div hidden=${!form.raw || tab !== 'form'} class="config-layout">
+      <nav class="toc" aria-label=${t('Configuration groups', '配置分类')}>${all.map(([id, title]) => html`<button key=${id} class=${section === id ? 'active' : ''} aria-pressed=${section === id} onClick=${() => setSection(id)}>${title}</button>`)}</nav>
+      <div>${all.map(([id, title, fields]) => html`<section key=${id} hidden=${section !== id}><${Card} title=${title}><div class="fields">${[...fields].sort((a, b) => Number(b.type === 'bool') - Number(a.type === 'bool')).map(field => html`<${ConfigField} key=${field.path} form=${form} ...${field} />`)}</div><//></section>`)}</div>
+    </div>
+    <div hidden=${Boolean(form.raw) && tab !== 'raw'}><${RawEditor} form=${form} /></div>
     <${SaveBar} form=${form} />`;
 }

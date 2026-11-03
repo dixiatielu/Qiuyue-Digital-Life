@@ -1,5 +1,7 @@
-import { render } from 'preact';
+import { Fragment, render } from 'preact';
 import { api, Badge, html, setLang, t, Toasts, useEffect, useState } from './lib.js';
+import { Appearance } from './appearance.js';
+import { Icon } from './icons.js';
 import { Overview } from './pages/overview.js';
 import { ConfigPage } from './pages/config.js';
 import { PluginsPage } from './pages/plugins.js';
@@ -8,12 +10,12 @@ import { PromptPage } from './pages/prompt.js';
 import { ModelsPage } from './pages/models.js';
 
 const pages = () => [
-  ['overview', t('Status', '状态'), Overview],
-  ['config', t('Configuration', '配置'), ConfigPage],
-  ['plugins', t('Plugins', '插件'), PluginsPage],
-  ['persona', t('Persona', '人格'), PersonaPage],
+  ['overview', t('Overview', '状态总览'), Overview],
+  ['config', t('Configuration', '运行配置'), ConfigPage],
+  ['plugins', t('Capabilities', '能力与插件'), PluginsPage],
+  ['persona', t('Persona & growth', '人格与成长'), PersonaPage],
   ['prompt', t('System prompt', '系统提示词'), PromptPage],
-  ['models', t('Models', '模型'), ModelsPage],
+  ['models', t('Models & connections', '模型与连接'), ModelsPage],
 ];
 const route = () => location.hash.replace(/^#\/?/, '').split('/')[0] || 'overview';
 
@@ -52,18 +54,28 @@ function App({ initial }) {
   const daemon = overview.daemon;
   const pending = daemon.running && daemon.changed.length > 0;
   return html`<div class="shell">
-    <nav class="side">
-      <div class="brand">${t('Qiuyue', '洛秋月')}<span class="muted small">${t('management', '管理')}</span></div>
-      ${pages().map(([id, label]) => html`<a href=${`#/${id}`} class=${id === entry[0] ? 'active' : ''}>${label}</a>`)}
+    <aside class="side">
+      <a class="brand" href="#/overview"><span class="brand-moon" aria-hidden="true"></span><span>${t('Qiuyue', '洛秋月')}<small>A CONTINUING LIFE</small></span></a>
+      <nav aria-label=${t('Main navigation', '主导航')}>
+        ${pages().map(([id, label], index) => html`<${Fragment} key=${id}>
+          ${index < 2 ? html`<div class="nav-label">${index === 0 ? t('DAY TO DAY', '日常与观察') : t('SETTINGS', '设定与管理')}</div>` : null}
+          <a href=${`#/${id}`} class=${id === entry[0] ? 'active' : ''} aria-current=${id === entry[0] ? 'page' : undefined}><${Icon} name=${id} />${label}</a>
+        <//>`)}
+      </nav>
       <div class="side-foot">
-        <div class="row"><span class=${`dot ${daemon.running ? (live.connected ? 'ok' : 'warn') : 'bad'}`}></span>${daemon.running ? t('Daemon running', '常驻进程运行中') : t('Daemon stopped', '常驻进程未运行')}</div>
+        <div class="row"><span class=${`dot ${daemon.running ? (live.connected ? 'ok' : 'warn') : 'bad'}`}></span>${daemon.running ? t('Service running', '服务运行中') : t('Service stopped', '服务未运行')}</div>
+        <span class="side-muted">${live.connected ? t('Live updates connected', '实时动态已连接') : t('Live updates disconnected', '实时动态未连接')}</span>
         ${pending ? html`<a href="#/overview"><${Badge} kind="warn">${t('Restart needed', '待重启')}<//></a>` : null}
         ${!overview.config.valid ? html`<a href="#/config"><${Badge} kind="bad">${t('Config invalid', '配置无效')}<//></a>` : null}
+        <div class="operator"><span class="operator-mark">Q</span><span>${t('Operator space', '管理者空间')}<small>${t('Digital life management', '数字生命管理')}</small></span></div>
       </div>
-    </nav>
-    <main class="content">
-      <${Page} overview=${overview} live=${live} refresh=${refresh} />
-    </main>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div class="breadcrumb"><span>${t('Qiuyue’s space', '秋月的管理空间')}</span><span>/</span><strong>${entry[1]}</strong></div>
+        <div class="row wrap"><${Badge} kind=${live.connected ? 'ok' : 'warn'}>${live.connected ? t('Live', '实时连接') : t('Disconnected', '连接中断')}<//><${Appearance} /></div>
+      </header>
+      <main class="content"><${Page} overview=${overview} live=${live} refresh=${refresh} /></main>
+    </div>
     <${Toasts} />
   </div>`;
 }

@@ -1,4 +1,4 @@
-import { api, Badge, Card, ConfigField, failed, html, Loading, Modal, SaveBar, t, toast, useAsync, useConfigDraft, useState } from '../lib.js';
+import { api, Badge, Card, ConfigField, failed, html, Loading, PageHeader, Modal, SaveBar, Tabs, t, toast, useAsync, useConfigDraft, useState } from '../lib.js';
 
 const apis = [['openai-completions', 'OpenAI Chat Completions'], ['openai-responses', 'OpenAI Responses'], ['anthropic-messages', 'Anthropic Messages']];
 const thinking = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -163,16 +163,20 @@ function Secrets({ secrets }) {
 }
 
 export function ModelsPage() {
+  const [tab, setTab] = useState('main');
   const form = useConfigDraft();
   const profiles = useAsync(() => api('/api/providers'));
   const secrets = useAsync(() => api('/api/secrets'));
   if (!form.state.data || !profiles.data || !secrets.data) return html`<${Loading} state=${!form.state.data ? form.state : !profiles.data ? profiles : secrets} />`;
   if (!form.raw) return html`<p class="note error">${t('config.json is not valid JSON; repair it on the configuration page first.', 'config.json 不是有效的 JSON，请先在配置页修复。')}</p>`;
+  if (!form.draft) return html`<${Loading} state=${form.state} />`;
   const list = profiles.data.providers;
   return html`
-    <header class="page-head"><h1>${t('Models', '模型')}</h1></header>
-    <${Providers} profiles=${profiles} secrets=${secrets.data} form=${form} />
-    <${MainModel} form=${form} profiles=${list} />
+    <${PageHeader} title=${t('Models & connections', '模型与连接')} eyebrow="MODELS & PROVIDERS" description=${t('Configure thinking, recall and drawing in one place.', '为思考、回忆和创作，选择合适的模型。')} />
+    <${Tabs} value=${tab} onChange=${setTab} tabs=${[['main', t('Main model', '主模型')], ['embedding', 'Embedding'], ['drawing', t('Drawing', '画图模型')], ['providers', t('Providers', '供应商')], ['credentials', t('Credentials', '凭据')]]} />
+    <div hidden=${tab !== 'providers'}><${Providers} profiles=${profiles} secrets=${secrets.data} form=${form} /></div>
+    <div hidden=${tab !== 'main'}><${MainModel} form=${form} profiles=${list} /></div>
+    <div hidden=${tab !== 'embedding'}>
     <${Endpoint} form=${form} profiles=${list} section="embedding" testable title=${t('Embedding (recall by meaning)', 'Embedding（按语义想起）')}
       help=${t('An OpenAI-compatible /embeddings endpoint. Each threshold belongs to the model and must be calibrated again for another; these were set for qwen3-vl-embedding.', '兼容 OpenAI 的 /embeddings 接口。每个阈值都取决于模型，换模型需要重新校准；当前默认值按 qwen3-vl-embedding 校准。')}
       fields=${[
@@ -184,9 +188,10 @@ export function ModelsPage() {
         { path: 'timeoutMs', type: 'ms', label: t('Timeout (ms)', '超时（毫秒）') },
         { path: 'selfNames', type: 'list', label: t('Names people call her', '别人对她的称呼'), help: t('One per line; these are left out when matching, so being named does not match every memory that names her.', '每行一个；匹配时会忽略这些称呼，避免消息因为提到她就匹配上所有提到她的记忆。') },
       ]} />
+    </div><div hidden=${tab !== 'drawing'}>
     <${Endpoint} form=${form} profiles=${list} section="drawing" title=${t('Drawing', '画画')}
       help=${t('An OpenAI-compatible /images/generations endpoint for the drawing plugin. Drawings take half a minute or more and are not limited in number; mind the endpoint quota.', '供画画插件使用的兼容 OpenAI 的 /images/generations 接口。画一张图要半分钟以上，次数不设上限，请留意接口额度。')}
       fields=${[{ path: 'timeoutMs', type: 'ms', label: t('Timeout (ms)', '超时（毫秒）') }, { path: 'dir', label: t('Folder for drawings', '保存目录') }]} />
-    <${Secrets} secrets=${secrets} />
+    </div><div hidden=${tab !== 'credentials'}><${Secrets} secrets=${secrets} /></div>
     <${SaveBar} form=${form} />`;
 }
