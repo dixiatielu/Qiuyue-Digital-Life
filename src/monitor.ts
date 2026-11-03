@@ -11,6 +11,7 @@ export interface DisplayItem {
   id: string; at: number;
   type: 'environment' | 'observation' | 'assistant' | 'tool' | 'action' | 'system' | 'run';
   title: string; text: string; state?: string; details?: string; source?: string;
+  sender?: string; actionKind?: string;
   quiet?: boolean; runId?: string;
   eventKind?: string; eventIds?: string[]; observationId?: string; receivedAt?: number;
   startedAt?: number; durationMs?: number; summary?: string;
@@ -160,7 +161,7 @@ export class Monitor {
     const previous = this.items.get(event.id);
     const sender = (event.payload.sender as { card?: string; nickname?: string } | undefined);
     const source = event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private chat ${event.actorId}`, `私聊 ${event.actorId}`) : ui('Environment', '环境');
-    this.put({ id: event.id, at: event.at, type: 'environment', source,
+    this.put({ id: event.id, at: event.at, type: 'environment', source, sender: sender?.card || sender?.nickname || (event.actorId === undefined ? undefined : String(event.actorId)),
       title: `${event.status === 'processed' ? ui('Recorded', '已记录') : ui('Received', '收到')} · ${source}${sender?.card || sender?.nickname ? ` · ${sender.card || sender.nickname}` : event.actorId ? ` · ${event.actorId}` : ''}`,
       text: event.text, state: event.status === 'processing' && previous?.state === 'accepted' ? 'accepted' : event.status,
       runId: event.status === 'pending' ? undefined : previous?.runId,
@@ -172,7 +173,7 @@ export class Monitor {
     const runId = this.items.get(action.id)?.runId ?? (this.runningTools.size ? this.runId : undefined);
     if (runId && runId === this.runId) this.runActions.set(action.id, action.status);
     this.put({ id: action.id, at: action.createdAt, type: 'action', title: ui(`Action · ${action.kind}`, `行动 · ${action.kind}`), state: action.status,
-      runId,
+      runId, actionKind: action.kind,
       text: this.describe(action.args), details: this.describe({ id: action.id, status: action.status, result: action.result }),
       source: action.args.group_id ? ui(`Group ${action.args.group_id}`, `群 ${action.args.group_id}`) : action.args.user_id ? ui(`Private chat ${action.args.user_id}`, `私聊 ${action.args.user_id}`) : undefined,
     }, live);

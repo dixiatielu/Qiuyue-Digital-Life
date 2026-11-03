@@ -62,9 +62,9 @@ npm start -- tui --config config.json
 
 Exiting the live view does not stop the daemon.
 
-The live view uses a compact timeline: each run shows its triggering observation, tools appear as single-line summaries, and completed runs, system notices, and heartbeats collapse by default. The activity area shows the current request or tool-stage duration, plus output chunk counts and time since the last output when streaming progress is available. Received events waiting to enter the model appear separately. Two minutes without output produces a “Waiting longer than usual” hint, not a confirmed-stall diagnosis.
+The live view puts conversations first: received messages and external actions remain visible after a run ends, while tool activity and model output expand on demand. Model output is labeled “not sent to QQ”; message actions distinguish sent, awaiting receipt, failed, and unknown outcomes. Long messages preview eight lines and expand to the full text. Connection and pause status stay at the top; current activity and context usage stay at the bottom. Accents adapt to the terminal's light or dark background. Received events waiting to enter the model appear separately. Two minutes without output produces a “Waiting longer than usual” hint, not a confirmed-stall diagnosis.
 
-Use `Alt↑↓` to select records, `Tab` to expand details, and `/details` to toggle full records. `/filter errors` shows failures and unknown outcomes; `/filter all` clears the filter. Restart both the daemon and live view after upgrading to receive the new request-progress fields.
+Use `Alt↑↓` to select records, `Tab` to expand details, and `/details` to view full records and streaming telemetry. `/filter errors` shows failures and unknown outcomes; `/filter all` clears the filter. Type `/` to browse management commands, use `↑↓` to select and `Tab` to fill the input, then press Enter to execute. `Esc` dismisses suggestions without clearing the input. `/status` shows call and action counts; `Esc` closes status or help. Rebuild and reopen the TUI to use the new layout; an updated daemon additionally supplies structured sender and action-kind fields.
 
 ## Management
 
