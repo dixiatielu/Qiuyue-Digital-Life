@@ -53,6 +53,52 @@ test('the page asks for its token, refuses foreign hosts and cross-site writes, 
   assert.equal((await call('/vendor/typebox/package.json')).status, 404);
 }));
 
+test('the login page loads its styling and appearance before authentication, without exposing management resources', () => page(async (call, dir, port) => {
+  const anonymous = { headers: { Authorization: '' } };
+  const login = await call('/', anonymous);
+  assert.equal(login.status, 401);
+  for (const path of ['/app/style.css', '/app/favicon.svg', '/app/login.js', '/app/theme.js']) {
+    const response = await fetch(`http://127.0.0.1:${port}${path}`);
+    assert.equal(response.status, 200, path);
+    assert.ok(!response.headers.get('content-type')?.includes('text/html'), path);
+    assert.ok(!(await response.text()).includes(token), path);
+  }
+  assert.match(login.body, /WEBUI_TOKEN/);
+  assert.match(login.body, /\.env/);
+  assert.ok(!login.body.includes(token), 'the real credential is never embedded in the login page');
+  for (const path of ['/app/main.js', '/app/pages/config.js', '/app/index.html', '/vendor/preact/package.json', '/api/config', '/api/secrets', '/api/live']) {
+    assert.equal((await call(path, anonymous)).status, 401, path);
+  }
+  assert.equal((await call('/app/style.css', { method: 'POST', ...anonymous })).status, 401);
+  const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...config, webui: { tokenEnv: 'MY_ADMIN_TOKEN' } }));
+  assert.match((await call('/login', anonymous)).body, /MY_ADMIN_TOKEN/);
+  writeFileSync(join(dir, 'config.json'), '{broken');
+  assert.equal((await call('/login', anonymous)).status, 401, 'login still works when config needs repair');
+}));
+
+test('the login form submits the token in its body and keeps startup login links working', () => page(async (_call, _dir, port) => {
+  const base = `http://127.0.0.1:${port}`;
+  assert.equal((await fetch(base)).headers.get('referrer-policy'), 'same-origin', 'native form submissions need their same-origin Origin header');
+  const submit = (value: string, origin = base) => fetch(`${base}/login`, {
+    method: 'POST', redirect: 'manual', headers: { Origin: origin }, body: new URLSearchParams({ token: value }),
+  });
+  const wrong = await submit('WEBUI_TOKEN');
+  assert.equal(wrong.status, 401);
+  assert.match(await wrong.text(), /aria-invalid="true"/);
+  assert.equal((await submit(token, 'http://attacker.example')).status, 403);
+  assert.equal((await submit(token, 'null')).status, 403);
+  assert.equal((await submit('a'.repeat(9000))).status, 413);
+  const signedIn = await submit(token);
+  assert.equal(signedIn.status, 303);
+  assert.equal(signedIn.headers.get('location'), '/');
+  const cookie = signedIn.headers.get('set-cookie')!;
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Strict/);
+  assert.equal((await fetch(`${base}/api/overview`, { headers: { Cookie: cookie.split(';')[0]! } })).status, 200);
+  assert.equal((await fetch(`${base}/login?token=${token}`, { redirect: 'manual' })).status, 303);
+}));
+
 test('a configuration is saved only whole, valid, and against the version it was read at, keeping unknown keys and earlier versions', () => page(async (call, dir) => {
   const loaded = await call('/api/config');
   assert.equal(loaded.status, 200);

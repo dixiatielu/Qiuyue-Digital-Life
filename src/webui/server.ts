@@ -15,12 +15,15 @@ import { ConflictError, OperatorFiles, hash, historyKinds, type HistoryKind } fr
 import { inspectConfig } from './inspect.js';
 import { ProviderProfiles, catalog, remoteModels, testEmbedding, testModel, type ProviderProfile } from './providers.js';
 import { LifeReader } from './reader.js';
+import { loginPage } from './login.js';
 
 const publicDir = resolve(fileURLToPath(new URL('./public/', import.meta.url)));
 const modulesDir = resolve(fileURLToPath(new URL('../../node_modules/', import.meta.url)));
 const vendored = new Set(['preact', 'htm']);
 const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const cookie = 'qiuyue_webui';
+// These contain presentation only. Management modules and every API still require authentication.
+const loginAssets = new Set(['/app/style.css', '/app/favicon.svg', '/app/login.js', '/app/theme.js']);
 const credentialFields: [string, string][] = [['model', 'apiKeyEnv'], ['snowluma', 'tokenEnv'], ['web', 'searchKeyEnv'], ['embedding', 'apiKeyEnv'], ['drawing', 'apiKeyEnv'], ['webui', 'tokenEnv']];
 const secretName = /key|token|secret|password|cookie|credential/i;
 
@@ -241,25 +244,44 @@ export class WebUi {
   async handle(request: IncomingMessage, response: ServerResponse, host: string) {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (!this.allowedHost(request, host)) return send(response, 421, 'Unknown host.', 'text/plain; charset=utf-8');
-    if (url.pathname === '/login') return this.login(url, response);
+    if (url.pathname === '/login') return this.login(request, url, response);
+    if (request.method === 'GET' && loginAssets.has(url.pathname)) return this.asset(url.pathname, response);
     if (!this.authorized(request)) {
       if (url.pathname.startsWith('/api/')) return send(response, 401, JSON.stringify({ error: 'Sign in with the access token first.' }));
-      return send(response, 401, this.loginPage(false), types['.html']);
+      return this.signInPage(response, false);
     }
     if (url.pathname.startsWith('/api/')) return this.api(request, response, url);
     if (request.method !== 'GET') return send(response, 405, 'Method not allowed.', 'text/plain; charset=utf-8');
     return this.asset(url.pathname, response);
   }
-  private login(url: URL, response: ServerResponse) {
-    const given = Buffer.from(url.searchParams.get('token') ?? '');
+  private async login(request: IncomingMessage, url: URL, response: ServerResponse) {
+    if (request.method !== 'GET' && request.method !== 'POST') return send(response, 405, 'Method not allowed.', 'text/plain; charset=utf-8');
+    let value = url.searchParams.get('token') ?? '';
+    if (request.method === 'POST') {
+      const origin = request.headers.origin;
+      if (origin && origin !== `http://${request.headers.host}` && origin !== `https://${request.headers.host}`) return send(response, 403, 'Cross-site requests are refused.', 'text/plain; charset=utf-8');
+      if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/x-www-form-urlencoded') return send(response, 415, 'Submit the login form.', 'text/plain; charset=utf-8');
+      const chunks: Buffer[] = []; let length = 0;
+      for await (const chunk of request) {
+        length += chunk.length;
+        if (length > 8192) { send(response, 413, 'The token is too long.', 'text/plain; charset=utf-8'); return; }
+        chunks.push(chunk);
+      }
+      value = new URLSearchParams(Buffer.concat(chunks).toString('utf8')).get('token') ?? '';
+    }
+    const given = Buffer.from(value);
     const expected = Buffer.from(this.token);
-    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return send(response, 401, this.loginPage(Boolean(url.searchParams.get('token'))), types['.html']);
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return this.signInPage(response, request.method === 'POST' || Boolean(value));
     send(response, 303, '', 'text/plain', { Location: '/', 'Set-Cookie': `${cookie}=${encodeURIComponent(this.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` });
   }
-  private loginPage(failed: boolean) {
-    return `<!doctype html><html lang="${ui('en', 'zh')}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${ui('Qiuyue management', '秋月管理')}</title><link rel="stylesheet" href="/app/style.css"></head>
-<body class="login"><form method="get" action="/login" class="card"><h1>${ui('Qiuyue management', '秋月管理')}</h1><p class="muted">${ui('Enter the access token printed when the page started, or the value of the token variable.', '输入网页启动时打印的访问令牌，或令牌环境变量的值。')}</p>
-${failed ? `<p class="error">${ui('The token is not right.', '令牌不正确。')}</p>` : ''}<input name="token" type="password" autocomplete="current-password" autofocus><button class="primary">${ui('Sign in', '登录')}</button></form></body></html>`;
+  private signInPage(response: ServerResponse, failed: boolean) {
+    let tokenEnv = 'WEBUI_TOKEN';
+    try { tokenEnv = webuiSettings(this.files.raw()).tokenEnv; } catch { /* The page must open even with broken configuration. */ }
+    return send(response, 401, loginPage(failed, tokenEnv), types['.html'], {
+      // Browsers send Origin: null for a form POST under no-referrer. Keep same-origin login verifiable.
+      'Referrer-Policy': 'same-origin',
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    });
   }
   private async api(request: IncomingMessage, response: ServerResponse, url: URL) {
     try {
