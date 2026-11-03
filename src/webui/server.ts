@@ -1,3 +1,4 @@
+import { inspectPluginManifests, pluginCredentialReferences } from '../plugin-manifest.js';
 import { CredentialConflictError } from '../credentials.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
@@ -178,7 +179,8 @@ export class WebUi {
       try { running = await callControl(this.paths.socket, { args: ['plugins', 'list'] }) as ReturnType<PluginManager['status']>; }
       catch (error) { runtimeError = errorText(error); }
       const discovered = config ? discoverPlugins(config.extensions.directory) : [];
-      return { ids: [...new Set([...pluginIds, ...discovered, ...running?.plugins.map(plugin => plugin.id) ?? []])], switches: raw.plugins ?? {}, inspected: config ? this.continuity(config) : null, error: error ?? null, running, runtimeError, directory: config?.extensions.directory };
+      const manifests = config ? inspectPluginManifests(config.extensions.directory) : { metadata: {}, errors: {} };
+      return { ids: [...new Set([...pluginIds, ...discovered, ...running?.plugins.map(plugin => plugin.id) ?? []])], ...manifests, builtinIds: pluginIds, switches: raw.plugins ?? {}, inspected: config ? this.continuity(config) : null, error: error ?? null, running, runtimeError, directory: config?.extensions.directory };
     });
     this.on('POST', '/api/plugins/reload', ({ body }) => {
       const id = body.id ?? 'all';
@@ -264,6 +266,7 @@ export class WebUi {
     const usedBy = new Map<string, string[]>();
     const use = (name: unknown, by: string) => { if (typeof name === 'string' && name) usedBy.set(name, [...usedBy.get(name) ?? [], by]); };
     for (const [section, field] of credentialFields) use((config as any)?.[section]?.[field] ?? raw[section]?.[field], section);
+    for (const { name, plugin } of pluginCredentialReferences(config?.extensions)) use(name, plugin);
     try { for (const profile of this.providers.list(raw)) use(profile.apiKeyEnv, `provider:${profile.name}`); } catch { /* unreadable providers add no names */ }
     const credentials = this.files.credentials();
     return { file: credentials.paths.file, revision: credentials.revision, entries: credentials.list([...usedBy.keys()]).map(item => ({ ...item, usedBy: usedBy.get(item.name) ?? [] })) };

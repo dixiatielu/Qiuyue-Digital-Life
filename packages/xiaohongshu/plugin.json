@@ -1,0 +1,68 @@
+{
+  "id": "xiaohongshu",
+  "apiVersion": 1,
+  "version": "0.2.0",
+  "name": "小红书",
+  "description": "通过已登录的 xiaohongshu-mcp 搜索、图文一起阅读，并执行账号原生收藏／取消收藏。",
+  "defaultEnabled": false,
+  "defaults": {
+    "timeoutMs": 60000,
+    "requestGapMs": 3000,
+    "requestsPerDay": 120,
+    "cooldownMs": 900000,
+    "baseUrl": "http://127.0.0.1:18060",
+    "tokenEnv": "XIAOHONGSHU_TOKEN"
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 1000,
+        "maximum": 120000,
+        "title": "请求超时（毫秒）"
+      },
+      "requestGapMs": {
+        "type": "integer",
+        "minimum": 500,
+        "maximum": 60000,
+        "title": "请求间隔（毫秒）"
+      },
+      "requestsPerDay": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2000,
+        "title": "每日请求上限（UTC）"
+      },
+      "cooldownMs": {
+        "type": "integer",
+        "minimum": 60000,
+        "maximum": 86400000,
+        "title": "平台限流后的冷却时间（毫秒）"
+      },
+      "baseUrl": {
+        "type": "string",
+        "minLength": 1,
+        "title": "小红书服务地址",
+        "description": "已部署并登录的 xpzouying/xiaohongshu-mcp HTTP 地址，支持本机服务。"
+      },
+      "tokenEnv": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+        "credential": true,
+        "title": "服务鉴权凭据名称",
+        "description": "对应服务的 AUTH_TOKEN；服务未开启鉴权时可不提供。此处不填写 Cookie。"
+      }
+    },
+    "required": [
+      "timeoutMs",
+      "requestGapMs",
+      "requestsPerDay",
+      "cooldownMs",
+      "baseUrl",
+      "tokenEnv"
+    ],
+    "additionalProperties": false
+  },
+  "contextVersion": "2"
+}

@@ -68,6 +68,8 @@ Use `Alt↑↓` to select records, `Tab` to expand details, and `/details` to vi
 
 ## Management
 
+Bilibili and Xiaohongshu can be part of autonomous life: discover and read content, receive Xiaohongshu text and images together, favorite items on the platform account, and resume reading later. Both are optional user plugins, built and installed separately from the core. They are off by default and can be configured and reloaded independently on the capabilities page. Bilibili favorites and some reads need a logged-in Cookie; Xiaohongshu needs a logged-in `xiaohongshu-mcp` service. See [online life setup and scope](docs/online-life.md).
+
 Use these commands with `npm start -- <command> --config config.json` after building:
 
 | Command | Purpose |

@@ -10,7 +10,7 @@ import { once } from 'node:events';
 import { loadConfig } from '../src/config.js';
 import { builtinSystemPrompt, systemInstructions } from '../src/prompts.js';
 import { WebUi } from '../src/webui/server.js';
-import { Credentials, credentialPaths } from '../src/credentials.js';
+import { Credentials, credentialPaths, credentialNames } from '../src/credentials.js';
 import { inspectConfig } from '../src/webui/inspect.js';
 import { ServiceJobs, type LiveMirror } from '../src/webui/daemon.js';
 import type { LifeReader } from '../src/webui/reader.js';
@@ -21,6 +21,8 @@ import { contextIdentity } from '../src/brain.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { Store } from '../src/store.js';
 import { handleControl, serveControl } from '../src/control.js';
+
+import { installPackagedPlugin } from './packaged-plugins.js';
 
 const token = 'test-token-0123456789';
 async function page(work: (call: (path: string, init?: { method?: string; body?: unknown; headers?: Record<string, string> }) => Promise<{ status: number; body: any }>, dir: string, port: number) => Promise<void>) {
@@ -45,6 +47,38 @@ async function page(work: (call: (path: string, init?: { method?: string; body?:
   try { await work(call, dir, port); }
   finally { app.close(); server.closeAllConnections(); server.close(); rmSync(dir, { recursive: true, force: true }); }
 }
+
+test('optional plugin forms and credentials come from manifests even offline, without importing user code', () => page(async (call, dir) => {
+  const absent = await call('/api/plugins');
+  assert.ok(!absent.body.ids.includes('bilibili')); assert.ok(!absent.body.ids.includes('xiaohongshu'));
+  assert.ok(!(await call('/api/secrets')).body.entries.some((entry: any) => entry.name === 'BILIBILI_COOKIE'));
+  await installPackagedPlugin(join(dir, 'plugins'), 'bilibili');
+  await installPackagedPlugin(join(dir, 'plugins'), 'xiaohongshu');
+  mkdirSync(join(dir, 'plugins/reading-room'), { recursive: true });
+  writeFileSync(join(dir, 'plugins/reading-room/index.mjs'), 'throw new Error("Must not execute for management metadata");');
+  writeFileSync(join(dir, 'plugins/reading-room/plugin.json'), JSON.stringify({
+    id: 'reading-room', apiVersion: 1, name: 'Reading room', defaultEnabled: false, defaults: { credentialName: 'READING_ROOM_KEY' },
+    configSchema: { type: 'object', properties: { credentialName: { type: 'string', credential: true } } },
+  }));
+  mkdirSync(join(dir, 'plugins/broken'), { recursive: true });
+  writeFileSync(join(dir, 'plugins/broken/plugin.json'), 'invalid JSON');
+  const plugins = await call('/api/plugins');
+  assert.equal(plugins.status, 200);
+  assert.equal(plugins.body.metadata.bilibili.defaults.cookieEnv, 'BILIBILI_COOKIE');
+  assert.equal(plugins.body.metadata.xiaohongshu.defaults.baseUrl, 'http://127.0.0.1:18060');
+  assert.equal(plugins.body.metadata['reading-room'].name, 'Reading room');
+  assert.ok(plugins.body.errors.broken); assert.ok(!plugins.body.builtinIds.includes('bilibili'));
+  const secrets = await call('/api/secrets');
+  for (const [name, plugin] of [['BILIBILI_COOKIE', 'bilibili'], ['XIAOHONGSHU_TOKEN', 'xiaohongshu'], ['READING_ROOM_KEY', 'reading-room']]) {
+    assert.ok(secrets.body.entries.some((entry: any) => entry.name === name && entry.usedBy.includes(plugin)));
+  }
+  const config = await call('/api/config');
+  const updated = { ...config.body.raw, extensions: { settings: { 'reading-room': { credentialName: 'MY_READING_KEY' } } } };
+  assert.equal((await call('/api/config', { method: 'PUT', body: { raw: updated, hash: config.body.hash } })).status, 200);
+  const names = credentialNames(loadConfig(join(dir, 'config.json')));
+  assert.ok(names.includes('MY_READING_KEY')); assert.ok(!names.includes('READING_ROOM_KEY'));
+  assert.ok((await call('/api/secrets')).body.entries.some((entry: any) => entry.name === 'MY_READING_KEY' && entry.usedBy.includes('reading-room')));
+}));
 
 test('the page asks for its token, refuses foreign hosts and cross-site writes, and signs in with a cookie', () => page(async (call, _dir, port) => {
   assert.equal((await call('/api/overview', { headers: { Authorization: '' } })).status, 401);

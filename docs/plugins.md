@@ -2,6 +2,8 @@
 
 A plugin supplies one capability, including its tools and the hooks needed to participate in the digital life's experiences. Built-in plugins are `gallery`, `drawing`, `web-search`, `web-reader`, `qzone-share`, `qq-stickers`, `qq-faces`, and `snowluma-tools`. User plugins live in `plugins/<id>/` beside `config.json` and load without editing or rebuilding the program. Plugin settings and user code can be reloaded while the daemon keeps receiving events.
 
+Bilibili and Xiaohongshu are optional user plugins in `packages/`, built separately with `npm run build:plugins` and installed into the user plugin directory. Neither is registered in the core. Both are opt-in (`plugins.bilibili: true`, `plugins.xiaohongshu: true`). Their settings are validated when loading a candidate and live in `extensions.settings` and have generated forms on the capabilities page, including while the daemon is offline. See [online life](online-life.md) for setup, reading progress, provenance, limits and current platform coverage.
+
 The public v1 interface is [`src/plugin-sdk.ts`](../src/plugin-sdk.ts). The internal interface and host live in `src/plugins.ts`; built-in implementations live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and shared execution rules remain built in. QQ native tool registration and platform-specific life hints live in `src/plugins/snowluma-tools.ts`; the SnowLuma connection and recovery adapter remains in `src/snowluma.ts`.
 
 ## Write a user plugin
@@ -40,6 +42,24 @@ export default {
 
 The ID must match the directory and use a lowercase letter followed by lowercase letters, numbers, or hyphens (at most 64 characters). `all` is reserved. Built-in IDs and existing tool names cannot be shadowed. `.mjs`, or `.js` with ES-module syntax, are supported; compile TypeScript to these formats before loading. The SDK declarations are exported as `qiuyue-digital-life/plugin-sdk` after `npm run build`. The plain-object form also works from a directory outside the checkout without resolving that package.
 
+An optional `plugin.json` beside the entry module supplies static metadata, validated against the same v1 interface. It contains the definition's metadata fields (including `id` and `apiVersion`) without `setup`; its fields are authoritative when loading that source snapshot. A sidecar makes the name, description, defaults, configuration form and credential references available while disabled or while the daemon is offline, without importing code. Existing inline-only definitions continue to work.
+
+Set `defaultEnabled: false` in the sidecar for opt-in plugins; an explicit `config.plugins[id]` overrides it. Mark a top-level string property of `configSchema.properties` with `credential: true` when its value is a credential **name**. The credential manager and redaction list discover these fields and merge their defaults with saved settings; do not place secret values in the manifest. For example:
+
+```json
+{
+  "id": "reading-room",
+  "apiVersion": 1,
+  "name": "Reading room",
+  "defaultEnabled": false,
+  "defaults": { "keyName": "READING_ROOM_KEY" },
+  "configSchema": {
+    "type": "object",
+    "properties": { "keyName": { "type": "string", "credential": true } }
+  }
+}
+```
+
 `setup(ctx)` declares tools and resources. Do not perform external actions, start unmanaged timers/listeners, or write files at module top level or during setup: candidates are prepared while the old version is still running. `ctx.every` starts only on activation; use `ctx.onDispose` for owned resources. Plugins run as trusted local Node code, with the daemon's privileges; the SDK is not a sandbox.
 
 Disabled user code is not imported. Disabling an existing plugin works even if its edited source no longer loads. After an initial settings error, the daemon retains the schema for the management form so the configuration can be repaired and reloaded. Read changing stored state when a tool or task runs rather than capturing it during setup, since the old version can still be finishing work then.
@@ -59,7 +79,12 @@ Disabled user code is not imported. Disabling an existing plugin works even if i
 | `ctx.onDispose(cleanup)` | Registers cleanup, awaited in reverse order after work settles |
 | `ctx.log(level, message)` | Writes a plugin-labelled trace entry; never log credential values |
 
-At execution time, a tool receives `call.signal`, `call.reviewing`, `call.record(kind, value)`, `call.snowluma.query(name, args)`, `call.snowluma.action(name, args)`, and `call.action(kind, args, dispatch)` for another platform's action. QQ queries accept only read-only native interfaces; all QQ calls obey native permissions. External actions share the host's action budget, attempt ledger and deduplication. A dispatched generic action whose callback throws has an **unknown** outcome and is not automatically replayed. `readOnly: true` forbids SDK actions; memory review receives only tools explicitly declaring both `readOnly: true` and `review: true`.
+A tool can declare `experienceKind: "reading"` to associate its activity with `call.record("reading", ...)`. Both map to `plugin:<id>:reading`; the next life wake can show the last actual experience without platform logic in the host.
+
+At execution time, a tool receives `call.signal`, `call.reviewing`, `call.record(kind, value)`, `call.snowluma.query(name, args)`, `call.snowluma.action(name, args)`, and `call.action(kind, args, dispatch)` for another platform's action. QQ queries accept only read-only native interfaces; all QQ calls obey native permissions. External actions share the host's action budget, attempt ledger and deduplication. A dispatched generic action whose callback throws has an **unknown** outcome and is not automatically replayed. `readOnly: true` forbids SDK actions; memory review receives only tools explicitly declaring both `readOnly: true` and `review: true`. `call.action` returns `{ outcome: { id, status, result }, reused }`; only a confirmed `success` may update local state to reflect an external write. Keep credentials out of action arguments and receipts.
+
+`await call.attachImages(sourceId, urls)` attaches actual images to the same tool result as its JSON output. The source must come from `call.record` in this invocation, and each URL must appear in its stored payload. The host handles public-address validation, redirects, cancellation, MIME checks, a 5 MB limit per image, a 12 MB total byte limit and at most `min(limits.maxImages, 20)` images per tool call. It returns `{ attached, failed, omitted }`; describe only delivered pictures as perceived. A failed download need not fail the text read. Images are attributed to the source in the tool result; their bytes are not added to the persisted experience. This is a generic SDK facility; platform URL selection and interpretation remain in the plugin.
+
 
 Keep `call` inside its invocation: after it returns, its methods cannot act or write experiences. For background computation or retrieval, use `ctx.background(async signal => { ...; ctx.publish(...) })`; publish generated work with `origin: 'self'`, and actual external evidence with `origin: 'external'`. The event joins the same Agent's next observation. Background tasks must respect cancellation and must not directly create an independent thinking loop or send messages.
 

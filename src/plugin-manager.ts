@@ -4,6 +4,7 @@ import { errorText } from './domain.js';
 import type { SemanticSource } from './embedding.js';
 import { discoverPlugins, loadUserPlugin, pluginSource, validPluginId } from './plugin-loader.js';
 import { waitFor } from './async.js';
+import { inspectPluginManifests, readPluginManifest } from './plugin-manifest.js';
 import type { PluginDefinition } from './plugin-sdk.js';
 import { PluginHost, type LifePlugin } from './plugins.js';
 import { createBuiltinPlugin, pluginIds, type BuiltinPluginId } from './plugins/index.js';
@@ -22,7 +23,7 @@ const builtin = (id: string): id is BuiltinPluginId => (pluginIds as readonly st
 const busy = (job?: PluginReloadJob) => job && !['done', 'failed'].includes(job.state);
 function fingerprint(id: string, config: Config): string {
   const enabled = config.plugins[id] ?? true;
-  if (!builtin(id)) return digest({ enabled, settings: config.extensions.settings[id] ?? {} });
+  if (!builtin(id)) return digest({ enabled: config.plugins[id], settings: config.extensions.settings[id] ?? {} });
   switch (id) {
     case 'drawing': return digest({ enabled, drawing: config.drawing });
     case 'gallery': return digest({ enabled, dir: config.drawing.dir, drawing: config.drawing.enabled, generator: config.plugins.drawing, embedding: config.embedding });
@@ -63,12 +64,14 @@ export class PluginManager {
   async start() {
     for (const id of discoverPlugins(this.config.extensions.directory)) {
       if (builtin(id)) { this.errors.set(id, 'A user plugin cannot replace a built-in plugin with the same ID.'); continue; }
-      if (this.config.plugins[id] === false) {
-        const disabled = this.disabled(id, this.config);
-        this.host.install([...this.host.installed(), disabled.plugin]); this.installed.set(id, disabled); continue;
-      }
       let loaded: Awaited<ReturnType<typeof loadUserPlugin>> | undefined;
       try {
+        const manifest = this.config.plugins[id] === false ? undefined : readPluginManifest(this.config.extensions.directory, id);
+        if (manifest) this.definitions.set(id, manifest);
+        if (!(this.config.plugins[id] ?? manifest?.defaultEnabled ?? true)) {
+          const disabled = this.disabled(id, this.config);
+          this.host.install([...this.host.installed(), disabled.plugin]); this.installed.set(id, disabled); continue;
+        }
         loaded = await loadUserPlugin(id, this.config, this.store, this.credential, AbortSignal.timeout(this.config.extensions.reloadTimeoutMs), definition => this.definitions.set(id, definition));
         this.host.install([...this.host.installed(), loaded.plugin]);
         this.installed.set(id, { ...loaded, source: 'user', metadata: loaded.definition, loadedAt: Date.now(), fingerprint: fingerprint(id, this.config) });
@@ -87,11 +90,14 @@ export class PluginManager {
     try { desired = this.readConfig(); } catch (error) { configError = errorText(error); }
     const discovered = discoverPlugins(this.config.extensions.directory);
     const ids = [...new Set([...pluginIds, ...discovered, ...this.installed.keys(), ...Object.keys(desired.plugins), ...this.errors.keys()])];
+    const manifests = inspectPluginManifests(this.config.extensions.directory);
     const plugins = ids.map(id => {
       const item = this.installed.get(id);
-      const definition = this.definitions.get(id) ?? item?.metadata;
+      const definition = manifests.metadata[id] ?? this.definitions.get(id) ?? item?.metadata;
       let changed = item?.fingerprint !== fingerprint(id, desired), sourceError: string | undefined;
-      if (!builtin(id) && desired.plugins[id] !== false) {
+      const desiredEnabled = desired.plugins[id] ?? definition?.defaultEnabled ?? true;
+      if (!builtin(id) && item && (item.plugin.enabled?.() ?? true) !== desiredEnabled) changed = true;
+      if (!builtin(id) && desiredEnabled) {
         try { changed ||= pluginSource(join(this.config.extensions.directory, id)).hash !== item?.sourceHash; }
         catch (error) { sourceError = errorText(error); changed = true; }
       }
@@ -99,7 +105,7 @@ export class PluginManager {
         id, source: builtin(id) ? 'builtin' : 'user', name: item?.metadata?.name ?? definition?.name ?? id, description: item?.metadata?.description ?? definition?.description ?? '', version: item?.metadata?.version ?? (builtin(id) ? 'built-in' : null),
         state: item ? (item.plugin.enabled?.() ?? true) ? 'running' : 'disabled' : this.errors.has(id) ? 'failed' : 'unloaded',
         loadedAt: item?.loadedAt ?? null, sourceHash: item?.sourceHash, pending: changed,
-        error: this.errors.get(id) ?? sourceError ?? null, configSchema: definition?.configSchema, defaults: definition?.defaults,
+        error: this.errors.get(id) ?? sourceError ?? null, configSchema: definition?.configSchema, defaults: definition?.defaults, defaultEnabled: definition?.defaultEnabled, manifestError: manifests.errors[id],
       };
     });
     const runningCore = core(this.config), savedCore = core(desired);
@@ -167,11 +173,14 @@ export class PluginManager {
         if (builtin(id)) {
           if (discovered.includes(id)) throw new Error(`User plugin ${id} conflicts with a built-in plugin.`);
           candidates.set(id, { plugin: createBuiltinPlugin(id, next, this.store, this.social, this.semantics, credential), source: 'builtin', loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
-        } else if (next.plugins[id] === false) {
-          candidates.set(id, this.disabled(id, next));
         } else if (discovered.includes(id)) {
-          const loaded = await loadUserPlugin(id, next, this.store, credential, signal, definition => this.definitions.set(id, definition));
-          candidates.set(id, { ...loaded, source: 'user', metadata: loaded.definition, loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
+          const manifest = next.plugins[id] === false ? undefined : readPluginManifest(next.extensions.directory, id);
+          if (manifest) this.definitions.set(id, manifest);
+          if (!(next.plugins[id] ?? manifest?.defaultEnabled ?? true)) candidates.set(id, this.disabled(id, next));
+          else {
+            const loaded = await loadUserPlugin(id, next, this.store, credential, signal, definition => this.definitions.set(id, definition));
+            candidates.set(id, { ...loaded, source: 'user', metadata: loaded.definition, loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
+          }
         }
       }
       const replacement = previous.flatMap(plugin => ids.has(plugin.id) ? candidates.has(plugin.id) ? [candidates.get(plugin.id)!.plugin] : [] : [plugin]);

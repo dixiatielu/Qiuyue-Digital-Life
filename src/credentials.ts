@@ -1,3 +1,4 @@
+import { pluginCredentialReferences } from './plugin-manifest.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -116,6 +117,7 @@ export class Credentials {
 }
 
 /** Every credential referenced by effective configuration, including defaults. */
-export function credentialNames(config: { model: { apiKeyEnv: string }; snowluma: { tokenEnv: string }; web: { searchKeyEnv: string }; embedding: { apiKeyEnv: string }; drawing: { apiKeyEnv: string }; webui: { tokenEnv: string } }) {
-  return [...new Set([config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv, config.webui.tokenEnv])];
+export function credentialNames(config: { model: { apiKeyEnv: string }; snowluma: { tokenEnv: string }; web: { searchKeyEnv: string }; embedding: { apiKeyEnv: string }; drawing: { apiKeyEnv: string }; webui: { tokenEnv: string }; extensions?: { directory: string; settings: Record<string, Record<string, unknown>> } }) {
+  const plugins = pluginCredentialReferences(config.extensions).map(item => item.name);
+  return [...new Set([config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv, config.webui.tokenEnv, ...plugins])];
 }

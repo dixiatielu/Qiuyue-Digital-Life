@@ -109,22 +109,25 @@ export function PluginsPage() {
     <${Tabs} value=${tab} onChange=${setTab} tabs=${[['installed', t('Installed plugins', '已安装插件')], ['permissions', t('QQ permissions', 'QQ 接口权限')], ['web', t('Web settings', '联网设置')]]} />
     <div hidden=${tab !== 'installed'} class="plugin-grid">${info.data.ids.map(id => {
       const live = running?.plugins.find(plugin => plugin.id === id);
-      const meta = live?.source === 'user' ? { name: live.name, text: live.description, needs: [] } : describe(id, value, allowed);
+      const schema = live?.configSchema ? live : info.data.metadata?.[id];
+      const user = !(info.data.builtinIds ?? []).includes(id);
+      const meta = user ? { name: schema?.name ?? live?.name ?? id, text: schema?.description ?? live?.description ?? '', needs: [] } : describe(id, value, allowed);
       const active = inspected?.plugins.includes(id);
-      const pluginForm = { ...form, effective: { ...form.effective, extensions: { ...form.effective.extensions, settings: { ...form.effective.extensions?.settings, [id]: { ...live?.defaults, ...form.effective.extensions?.settings?.[id] } } } } };
+      const pluginForm = { ...form, effective: { ...form.effective, extensions: { ...form.effective.extensions, settings: { ...form.effective.extensions?.settings, [id]: { ...schema?.defaults, ...form.effective.extensions?.settings?.[id] } } } } };
       return html`<${Card} key=${id} title=${html`<span class="plugin-name"><${Icon} name="plugins" /><span>${meta.name}<small class="muted mono">${id}</small></span></span>`} actions=${html`<${Tri} value=${form.get(`plugins.${id}`)} onChange=${next => form.set(`plugins.${id}`, next)} />`}>
         <p>${meta.text}</p>
         ${meta.warn && form.get(`plugins.${id}`) === false ? html`<p class="note error">${meta.warn}</p>` : null}
         <ul class="needs">${meta.needs.map(([ok, text]) => html`<li class=${ok === null ? '' : ok ? 'ok' : 'bad'}>${ok === null ? '·' : ok ? '✓' : '✗'} ${text}</li>`)}</ul>
-        <p class="small">${live?.source === 'user' ? t('User plugin', '用户插件') : t('Built-in', '内置插件')} ${live?.version ?? ''}
+        <p class="small">${user ? t('User plugin', '用户插件') : t('Built-in', '内置插件')} ${live?.version ?? schema?.version ?? ''}${schema?.defaultEnabled === false ? t(' · Off by default', ' · 默认关闭') : ''}
           ${live ? html` · <${Badge} kind=${live.state === 'running' ? 'ok' : ''}>${stateName(live.state)}<//>` : null}
           ${live?.pending ? html` · <${Badge}>${t('pending changes', '有待应用修改')}<//>` : null}
         </p>
-        ${live?.source === 'user' ? html`<div class="fields">${Object.entries(live.configSchema?.properties ?? {}).map(([key, schema]) => html`
-          <${ConfigField} key=${key} form=${pluginForm} path=${`extensions.settings.${id}.${key}`} label=${schema.title ?? key} help=${schema.description}
-            type=${schema.type === 'boolean' ? 'bool' : schema.type === 'integer' ? 'int' : schema.type === 'number' ? 'number' : schema.type === 'string' ? 'string' : 'json'}
-            placeholder=${live.defaults?.[key] === undefined ? '' : String(live.defaults[key])} min=${schema.minimum} max=${schema.maximum} />
+        ${schema?.configSchema ? html`<div class="fields">${Object.entries(schema.configSchema.properties ?? {}).map(([key, field]) => html`
+          <${ConfigField} key=${key} form=${pluginForm} path=${`extensions.settings.${id}.${key}`} label=${field.title ?? key} help=${field.description}
+            type=${field.type === 'boolean' ? 'bool' : field.type === 'integer' ? 'int' : field.type === 'number' ? 'number' : field.type === 'string' ? 'string' : 'json'}
+            placeholder=${schema.defaults?.[key] === undefined ? '' : String(schema.defaults[key])} min=${field.minimum} max=${field.maximum} />
         `)}</div>` : html`<p class="small">${t('Saved configuration: ', '已保存的配置下：')}${inspected ? active ? t('enabled', '已启用') : t('not enabled', '未启用') : '—'}</p>`}
+        ${info.data.errors?.[id] ? html`<p class="note error">${info.data.errors[id]}</p>` : null}
         ${live?.error ? html`<p class="note error">${live.error}</p>` : null}
         <div class="row wrap"><button class="ghost" disabled=${!running?.ready || busy || form.dirty} onClick=${() => reload(id)}>${t('Reload', '重载')}</button>
           ${live?.loadedAt ? html`<span class="muted small">${t('Loaded ', '加载于 ')}${time(live.loadedAt)}</span>` : null}

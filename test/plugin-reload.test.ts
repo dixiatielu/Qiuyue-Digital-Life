@@ -14,6 +14,7 @@ import { LifeRuntime } from '../src/runtime.js';
 import { contextIdentity } from '../src/brain.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
 import { Drawings, drawingPlugin } from '../src/plugins/drawing.js';
+import { installPackagedPlugin } from './packaged-plugins.js';
 import { deferred, event, fixture } from './helpers.js';
 
 function harness(readCredentials?: () => CredentialReader) {
@@ -54,6 +55,92 @@ async function waiting(manager: PluginManager) {
   while (manager.job?.state === 'preparing' && Date.now() < until) await turn();
   assert.equal(manager.job?.state, 'waiting');
 }
+
+test('manifest defaults disable arbitrary user code before import and broken metadata cannot prevent explicit disable', async () => {
+  const h = harness();
+  try {
+    h.write('reading-room', 'throw new Error("Must not import while disabled");');
+    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 1, name: 'Reading room', defaultEnabled: false }), 'plugin.json');
+    h.write('broken', '{bad json', 'plugin.json');
+    await h.manager.start();
+    const initial = h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')!;
+    assert.equal(initial.state, 'disabled'); assert.equal(initial.name, 'Reading room'); assert.equal(initial.error, null);
+    assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'broken')?.state, 'failed');
+    assert.ok(h.tools.current().some(tool => tool.name === 'remember'), 'a broken plugin does not prevent core startup');
+    h.saved.plugins['reading-room'] = true;
+    h.manager.request(['reload', 'reading-room']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'failed'); assert.match(h.manager.job?.error ?? '', /Must not import/);
+    h.write('reading-room', '{bad json', 'plugin.json');
+    h.saved.plugins['reading-room'] = false;
+    h.manager.request(['reload', 'reading-room']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done');
+    assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.state, 'disabled');
+    h.write('reading-room', 'export default { id: "reading-room", apiVersion: 1, setup() {} };');
+    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 1, defaultEnabled: true }), 'plugin.json');
+    delete h.saved.plugins['reading-room'];
+    h.manager.request(['reload', 'reading-room']); await h.manager.settled();
+    assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.state, 'running');
+    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 1, defaultEnabled: false }), 'plugin.json');
+    assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.pending, true);
+    h.manager.request(['reload', 'reading-room']); await h.manager.settled();
+    assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.state, 'disabled');
+  } finally { await h.close(); }
+});
+
+test('online reading plugins reload independently, retain progress and reject invalid candidates', async () => {
+  const h = harness();
+  try {
+    await installPackagedPlugin(h.cfg.extensions.directory, 'bilibili');
+    await installPackagedPlugin(h.cfg.extensions.directory, 'xiaohongshu');
+    await h.manager.start();
+    const initial = h.manager.status().plugins.find(plugin => plugin.id === 'bilibili')!;
+    assert.equal(initial.source, 'user'); assert.equal(initial.defaultEnabled, false);
+    assert.equal(initial.state, 'disabled'); assert.equal(initial.defaults?.cookieEnv, 'BILIBILI_COOKIE');
+    assert.ok(initial.configSchema?.properties);
+    h.saved.plugins.xiaohongshu = true;
+    h.manager.request(['reload', 'xiaohongshu']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done');
+    const xhs = h.tools.current().find(tool => tool.name === 'xhs_history')!;
+    h.saved.plugins.bilibili = true;
+    h.manager.request(['reload', 'bilibili']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done'); assert.equal(h.manager.job?.contextReset, true);
+    assert.ok(h.tools.current().some(tool => tool.name === 'bili_read'));
+    h.store.setSetting('plugin:bilibili:history', [{ id: 'BV1xx411c7mD', title: 'Clouds', url: 'https://www.bilibili.com/video/BV1xx411c7mD', author: 'Painter', discoveredAt: 1, saved: true, cursor: { part: 1, subtitleOffset: 80 } }]);
+    const identity = contextIdentity(h.cfg, h.tools);
+    h.saved.extensions.settings.bilibili = { requestsPerDay: 30 };
+    assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'bilibili')?.pending, true);
+    h.manager.request(['reload', 'bilibili']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done'); assert.equal(h.manager.job?.contextReset, false);
+    assert.equal(contextIdentity(h.cfg, h.tools), identity);
+    assert.equal((await h.execute('bili_history')).items[0].cursor.subtitleOffset, 80);
+    h.saved.extensions.settings.bilibili = { requestsPerDay: -1 };
+    h.manager.request(['reload', 'bilibili']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'failed'); assert.match(h.manager.job?.error ?? '', /Invalid settings/);
+    assert.equal((await h.execute('bili_history')).items.length, 1);
+    h.saved.plugins.bilibili = false;
+    h.manager.request(['reload', 'bilibili']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done', 'invalid settings do not prevent disabling a plugin');
+    assert.ok(!h.tools.current().some(tool => tool.name === 'bili_read'));
+    assert.equal(h.store.setting<any[]>('plugin:bilibili:history', [])[0]?.saved, true);
+    assert.equal(h.tools.current().find(tool => tool.name === 'xhs_history'), xhs, 'reloading one platform leaves the other instance alone');
+    assert.deepEqual((await h.execute('xhs_history')).items, []);
+    rmSync(join(h.cfg.extensions.directory, 'bilibili'), { recursive: true });
+    h.manager.request(['reload', 'bilibili']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done');
+    assert.ok(!h.plugins.installed().some(plugin => plugin.id === 'bilibili'));
+    assert.deepEqual((await h.execute('xhs_history')).items, []);
+    await installPackagedPlugin(h.cfg.extensions.directory, 'bilibili');
+    h.saved.extensions.settings.bilibili = {}; h.saved.plugins.bilibili = true;
+    h.manager.request(['reload', 'bilibili']); await h.manager.settled();
+    assert.equal((await h.execute('bili_history')).items[0].cursor.subtitleOffset, 80);
+    h.saved.extensions.settings.xiaohongshu = { baseUrl: 'http://user:secret@localhost:18060' };
+    h.manager.request(['reload', 'xiaohongshu']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'failed'); assert.match(h.manager.job?.error ?? '', /service URL/);
+    assert.deepEqual((await h.execute('xhs_history')).items, []);
+    assert.equal((await h.execute('bili_history')).items.length, 1);
+
+  } finally { await h.close(); }
+});
 
 test('user plugins load and refresh helper files in both brains, keep data and compatible working context, and revoke old tools', async () => {
   const h = harness();
@@ -350,5 +437,34 @@ test('gallery reload retains organized works and vectors, revokes old tools, and
     h.saved.plugins.gallery = true; h.manager.request(['reload', 'gallery']); await h.manager.settled();
     assert.equal((await h.execute('search_drawings', {})).items[0].id, key);
     assert.equal(h.cfg.drawing.enabled, false);
+  } finally { await h.close(); }
+});
+
+
+test('SDK image attachments require a current recorded source and reject late use after the call ends', async () => {
+  const h = harness();
+  try {
+    h.cfg.limits.maxImages = 0;
+    h.write('images', `
+      let previous, held;
+      export default { id: 'images', apiVersion: 1, setup(ctx) {
+        ctx.tool({ name: 'sample_images', description: 'Read images', readOnly: true,
+          parameters: { type: 'object', properties: { mode: { type: 'string' } } },
+          async execute({ mode }, call) {
+            const url = 'https://example.com/image.png';
+            if (mode === 'old') return call.attachImages(previous, [url]);
+            if (mode === 'late') return held(previous, [url]);
+            const recorded = call.record('reading', { nested: { images: [url] } });
+            previous = recorded.sourceId; held = call.attachImages;
+            return call.attachImages(recorded.sourceId, [mode === 'absent' ? 'https://example.com/missing.png' : url]);
+          }
+        });
+      } };
+    `);
+    await h.manager.start();
+    await assert.rejects(h.execute('sample_images', { mode: 'absent' }), /does not appear/);
+    assert.deepEqual(await h.execute('sample_images'), { attached: [], failed: [], omitted: ['https://example.com/image.png'] });
+    await assert.rejects(h.execute('sample_images', { mode: 'old' }), /recorded by this invocation/);
+    await assert.rejects(h.execute('sample_images', { mode: 'late' }), /call has ended/);
   } finally { await h.close(); }
 });

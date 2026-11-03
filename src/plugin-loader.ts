@@ -12,8 +12,11 @@ import type { PluginContext, PluginDefinition, UserTool } from './plugin-sdk.js'
 import { findSnowLumaAction } from './snowluma-catalog.js';
 import type { Store } from './store.js';
 import { waitFor } from './async.js';
+import { validateManifest, validPluginId } from './plugin-manifest.js';
+import { fetchImage } from './web.js';
+import { jsonResult } from './tool-runtime.js';
+export { discoverPlugins, validPluginId } from './plugin-manifest.js';
 
-export const validPluginId = (id: string) => id !== 'all' && /^[a-z][a-z0-9-]{0,63}$/.test(id);
 const skipped = new Set(['node_modules', '.qiuyue-cache', '.git']);
 function files(directory: string, prefix = ''): string[] {
   return readdirSync(join(directory, prefix), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap(entry => {
@@ -22,10 +25,6 @@ function files(directory: string, prefix = ''): string[] {
     if (entry.isSymbolicLink()) throw new Error(`Plugin sources must be regular files, not symbolic links: ${relative}`);
     return entry.isDirectory() ? files(directory, relative) : entry.isFile() ? [relative] : [];
   });
-}
-export function discoverPlugins(directory: string): string[] {
-  try { return readdirSync(directory, { withFileTypes: true }).filter(entry => entry.isDirectory() && validPluginId(entry.name)).map(entry => entry.name).sort(); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
 }
 /** Also fingerprints helper files and removals; no user code executes during inspection. */
 export function pluginSource(directory: string) {
@@ -74,6 +73,7 @@ class PluginScope {
         this.declare();
         if (!tool || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(tool.name) || typeof tool.description !== 'string' || !tool.description.trim() || typeof tool.execute !== 'function' || tool.parameters?.type !== 'object') throw new Error('Tools need a valid name, description, object parameters, and execute function.');
         if (tool.review && !tool.readOnly) throw new Error('Only read-only plugin tools may run during memory review.');
+        if (tool.experienceKind !== undefined && (typeof tool.experienceKind !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(tool.experienceKind))) throw new Error('A tool experienceKind must be a local event kind.');
         // Exercise the schema engine now so malformed schemas fail before activation.
         Check(tool.parameters as TSchema, {});
         this.tools.push({ ...tool, parameters: structuredClone(tool.parameters) });
@@ -125,30 +125,62 @@ class PluginScope {
     return {
       id: this.id, contextVersion: definition.contextVersion ?? '1', enabled: () => enabled,
       reviewTools: this.tools.filter(tool => tool.review).map(tool => tool.name),
+      experienceKinds: Object.fromEntries(this.tools.filter(tool => tool.experienceKind).map(tool => [tool.name, `plugin:${this.id}:${tool.experienceKind}`])),
       activities: this.activities,
       observation: events => this.observations.flatMap(provider => {
         try { const lines = provider(structuredClone(events)); if (!Array.isArray(lines) || lines.some(line => typeof line !== 'string')) throw new Error('observe must return strings.'); return lines; }
         catch (error) { this.log('error', errorText(error)); return []; }
       }),
-      tools: runtime => this.tools.map(tool => runtime.jsonTool(tool.name, tool.description, tool.parameters as TSchema, async (args, signal) => {
+      tools: runtime => this.tools.map(tool => runtime.tool(tool.name, tool.description, tool.parameters as TSchema, async (args, signal) => {
         this.active();
         if (!Check(tool.parameters as TSchema, args)) throw new Error(`Invalid arguments for ${tool.name}.`);
         const thought = runtime.context();
         const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
         let open = true;
+        const sources = new Set<string>();
+        const images: { type: 'image'; data: string; mimeType: string }[] = [];
+        const labels: string[] = [];
+        let imageSlots = Math.min(runtime.config.limits.maxImages, 20), imageBytes = 0;
         const check = () => { this.active(); if (!open || runtime.context() !== thought) throw new Error('This plugin tool call has ended.'); runtime.check(combined); };
         const write = () => { check(); if (thought.reviewing || tool.readOnly) throw new Error('This read-only tool cannot perform actions.'); };
         try {
           const result = await tool.execute(args, {
             signal: combined, reviewing: thought.reviewing ?? false,
-            record: (kind, value) => { check(); return runtime.record(`plugin:${this.id}:${kind}`, value); },
+            record: (kind, value) => { check(); const recorded = runtime.record(`plugin:${this.id}:${kind}`, value); sources.add(recorded.sourceId); return recorded; },
+            attachImages: async (sourceId, urls) => {
+              check();
+              if (!sources.has(sourceId) || !Array.isArray(urls) || urls.some(url => typeof url !== 'string') || urls.length > 100) throw new Error('Images need URLs from a source recorded by this invocation.');
+              const available = new Set<string>();
+              const collect = (value: unknown) => { if (typeof value === 'string') available.add(value); else if (value && typeof value === 'object') Object.values(value).forEach(collect); };
+              collect(this.store.event(sourceId)?.payload);
+              const unique = [...new Set(urls)];
+              if (unique.some(url => !available.has(url))) throw new Error('An image URL does not appear in the recorded source.');
+              const selected = unique.slice(0, imageSlots); imageSlots -= selected.length;
+              const delivery = { attached: [] as string[], failed: [] as { url: string; error: string }[], omitted: unique.slice(selected.length) };
+              const results = await Promise.all(selected.map(async url => {
+                try { return { url, image: await fetchImage(url, combined) }; }
+                catch { check(); return { url }; }
+              }));
+              check();
+              for (const { url, image } of results) {
+                if (!image) { delivery.failed.push({ url, error: 'Image unavailable; its appearance has not been perceived.' }); continue; }
+                if (imageBytes + image.data.length > 12_000_000) { delivery.omitted.push(url); continue; }
+                imageBytes += image.data.length;
+                delivery.attached.push(url); labels.push(`Image from ${sourceId}: ${url}`);
+                images.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.type });
+              }
+              return delivery;
+            },
             action: (kind, parameters, dispatch) => { write(); return runtime.externalAction(`plugin:${this.id}:${kind}`, parameters, () => dispatch(combined), combined); },
             snowluma: {
               query: (name, parameters) => { check(); if (!findSnowLumaAction(name).readOnly) throw new Error('Use snowluma.action for external writes.'); return runtime.query(name, parameters, combined); },
               action: (name, parameters) => { write(); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
             },
           });
-          check(); return result;
+          check();
+          const response = jsonResult(result);
+          for (const [index, image] of images.entries()) response.content.push({ type: 'text', text: labels[index]! }, image);
+          return response;
         } finally { open = false; }
       })),
       start: () => { if (this.state !== 'staged') throw new Error('Plugin already started or stopped.'); mkdirSync(dataDirectory, { recursive: true, mode: 0o700 }); this.state = 'active'; this.schedule(); },
@@ -171,11 +203,12 @@ export async function loadUserPlugin(id: string, config: Config, store: Store, c
     for (const { name, data } of source.entries) { const path = join(snapshot, name); mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, data); }
     if (!existsSync(join(snapshot, 'package.json'))) writeFileSync(join(snapshot, 'package.json'), '{"type":"module"}\n');
     const module = await waitFor(import(pathToFileURL(join(snapshot, entry)).href), signal);
-    const definition = module.default as PluginDefinition;
-    if (!definition || definition.id !== id || definition.apiVersion !== 1 || typeof definition.setup !== 'function') throw new Error(`Plugin ${id} must export { id: '${id}', apiVersion: 1, setup(ctx) }.`);
-    for (const key of ['name', 'version', 'description', 'contextVersion'] as const) if (definition[key] !== undefined && typeof definition[key] !== 'string') throw new Error(`Plugin ${id}.${key} must be a string.`);
-    if (definition.defaults !== undefined && (!definition.defaults || typeof definition.defaults !== 'object' || Array.isArray(definition.defaults))) throw new Error(`Plugin ${id}.defaults must be an object.`);
-    const metadata = structuredClone({ id, apiVersion: 1 as const, name: definition.name, version: definition.version, description: definition.description, contextVersion: definition.contextVersion, defaults: definition.defaults, configSchema: definition.configSchema });
+    const exported = module.default as PluginDefinition;
+    if (!exported || exported.id !== id || exported.apiVersion !== 1 || typeof exported.setup !== 'function') throw new Error(`Plugin ${id} must export { id: '${id}', apiVersion: 1, setup(ctx) }.`);
+    // Read the sidecar from the same snapshot as the code, not a newer directory revision.
+    const sidecar = source.entries.find(entry => entry.name === 'plugin.json');
+    const definition = { ...exported, ...(sidecar ? validateManifest(JSON.parse(sidecar.data.toString('utf8')), id) : {}) };
+    const metadata = validateManifest(definition, id);
     // Keep the form available even if settings fail validation; only the daemon imports this code.
     describe?.(metadata);
     const settings = { ...definition.defaults, ...config.extensions.settings[id] };
@@ -183,7 +216,7 @@ export async function loadUserPlugin(id: string, config: Config, store: Store, c
     const dataDirectory = join(config.extensions.dataDirectory, id);
     await waitFor(Promise.resolve(definition.setup(scope.context(settings, directory, dataDirectory))), signal);
     signal.throwIfAborted();
-    const plugin = scope.adapter(definition, config.plugins[id] !== false, dataDirectory);
+    const plugin = scope.adapter(definition, config.plugins[id] ?? definition.defaultEnabled ?? true, dataDirectory);
     plugin.stop = cleanup;
     return { plugin, definition: metadata, sourceHash: source.hash };
   } catch (error) { try { await waitFor(cleanup(), AbortSignal.timeout(5000)); } catch { /* preserve the loading error */ } throw error; }
