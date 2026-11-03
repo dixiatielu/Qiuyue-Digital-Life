@@ -108,6 +108,7 @@ export class Drawings {
     }
   }
   async stop() { this.stopping = true; for (const controller of this.running.values()) controller.abort(); await Promise.allSettled(this.work); }
+  async idle() { await Promise.allSettled(this.work); }
 }
 
 export function drawingEnabled(config: Config) { return config.drawing.enabled && config.plugins.drawing !== false; }
@@ -132,6 +133,6 @@ export function drawingPlugin(drawings: Drawings, enabled: () => boolean = () =>
       if (!picture) throw new Error(`Drawing ${value} does not exist or has been removed.`);
       return `base64://${picture.data.toString('base64')}`;
     },
-    start: () => drawings.recover(), stop: () => drawings.stop(),
+    start: () => drawings.recover(), stop: () => drawings.stop(), idle: () => drawings.idle(),
   };
 }

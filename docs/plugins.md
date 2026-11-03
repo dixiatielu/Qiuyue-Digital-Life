@@ -1,12 +1,103 @@
 # Plugin development
 
-A plugin supplies one capability, including its tools and the hooks needed to participate in the digital life's experiences. Installed plugins are `drawing`, `web-search`, `web-reader`, `qzone-share`, `qq-stickers`, `qq-faces`, and `snowluma-tools`. They are local TypeScript modules registered at startup; configuration changes take effect after a restart.
+A plugin supplies one capability, including its tools and the hooks needed to participate in the digital life's experiences. Built-in plugins are `drawing`, `web-search`, `web-reader`, `qzone-share`, `qq-stickers`, `qq-faces`, and `snowluma-tools`. User plugins live in `plugins/<id>/` beside `config.json` and load without editing or rebuilding the program. Plugin settings and user code can be reloaded while the daemon keeps receiving events.
 
-The interface and host live in `src/plugins.ts`. Implementations and their composition root live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and shared execution rules remain built in. QQ native tool registration and platform-specific life hints live in `src/plugins/snowluma-tools.ts`; the SnowLuma connection and recovery adapter remains in `src/snowluma.ts`.
+The public v1 interface is [`src/plugin-sdk.ts`](../src/plugin-sdk.ts). The internal interface and host live in `src/plugins.ts`; built-in implementations live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and shared execution rules remain built in. QQ native tool registration and platform-specific life hints live in `src/plugins/snowluma-tools.ts`; the SnowLuma connection and recovery adapter remains in `src/snowluma.ts`.
+
+## Write a user plugin
+
+Create `plugins/clock/index.mjs` (or copy [`examples/plugins/clock`](../examples/plugins/clock)). No SDK runtime import or dependency installation is needed:
+
+```js
+/** @type {import('qiuyue-digital-life/plugin-sdk').PluginDefinition} */
+export default {
+  id: 'clock',
+  apiVersion: 1,
+  name: 'Clock',
+  version: '1.0.0',
+  defaults: { timeZone: 'Asia/Shanghai' },
+  configSchema: {
+    type: 'object', additionalProperties: false,
+    properties: { timeZone: { type: 'string', title: 'Time zone' } },
+    required: ['timeZone'],
+  },
+  setup(ctx) {
+    // Validate configuration during preparation; a failure keeps the old version running.
+    const format = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: ctx.settings.timeZone, dateStyle: 'full', timeStyle: 'long',
+    });
+    ctx.tool({
+      name: 'clock_read', description: 'Read the current local date and time.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      readOnly: true, review: true,
+      execute(_args, call) {
+        return call.record('reading', { time: format.format(new Date()) });
+      },
+    });
+  },
+};
+```
+
+The ID must match the directory and use a lowercase letter followed by lowercase letters, numbers, or hyphens (at most 64 characters). `all` is reserved. Built-in IDs and existing tool names cannot be shadowed. `.mjs`, or `.js` with ES-module syntax, are supported; compile TypeScript to these formats before loading. The SDK declarations are exported as `qiuyue-digital-life/plugin-sdk` after `npm run build`. The plain-object form also works from a directory outside the checkout without resolving that package.
+
+`setup(ctx)` declares tools and resources. Do not perform external actions, start unmanaged timers/listeners, or write files at module top level or during setup: candidates are prepared while the old version is still running. `ctx.every` starts only on activation; use `ctx.onDispose` for owned resources. Plugins run as trusted local Node code, with the daemon's privileges; the SDK is not a sandbox.
+
+Disabled user code is not imported. Disabling an existing plugin works even if its edited source no longer loads. After an initial settings error, the daemon retains the schema for the management form so the configuration can be repaired and reloaded. Read changing stored state when a tool or task runs rather than capturing it during setup, since the old version can still be finishing work then.
+
+| Interface | Behavior |
+| --- | --- |
+| `ctx.settings` | Plugin defaults merged with `extensions.settings[id]`; checked against `configSchema` |
+| `ctx.tool(definition)` | Registers a JSON-result tool; parameters are validated on execution |
+| `ctx.observe(events => string[])` | Adds observation material; failures are logged without failing the thought |
+| `ctx.activity({activity, tools})` | Offers an activity at life wakes when its tools are available |
+| `ctx.storage.get(key, fallback?)`, `set(key, value)` | JSON state scoped to this plugin ID, retained across reload and disable; writes require activation |
+| `ctx.directory`, `ctx.dataDirectory` | Original source directory and persistent data directory; use the former for bundled data and the latter for files you write |
+| `ctx.credential(name)` | Reads a named credential; keep credential names, not secret values, in plugin settings |
+| `ctx.every(ms, work)` | Non-overlapping periodic work; suspended and drained before reload |
+| `ctx.background(work)` | Starts tracked work from a tool without holding the thought; receives a lifetime `AbortSignal` |
+| `ctx.publish({key, kind, text, origin, data?})` | Persists a normal environment event; keys and kinds are namespaced by plugin ID |
+| `ctx.onDispose(cleanup)` | Registers cleanup, awaited in reverse order after work settles |
+| `ctx.log(level, message)` | Writes a plugin-labelled trace entry; never log credential values |
+
+At execution time, a tool receives `call.signal`, `call.reviewing`, `call.record(kind, value)`, `call.snowluma.query(name, args)`, `call.snowluma.action(name, args)`, and `call.action(kind, args, dispatch)` for another platform's action. QQ queries accept only read-only native interfaces; all QQ calls obey native permissions. External actions share the host's action budget, attempt ledger and deduplication. A dispatched generic action whose callback throws has an **unknown** outcome and is not automatically replayed. `readOnly: true` forbids SDK actions; memory review receives only tools explicitly declaring both `readOnly: true` and `review: true`.
+
+Keep `call` inside its invocation: after it returns, its methods cannot act or write experiences. For background computation or retrieval, use `ctx.background(async signal => { ...; ctx.publish(...) })`; publish generated work with `origin: 'self'`, and actual external evidence with `origin: 'external'`. The event joins the same Agent's next observation. Background tasks must respect cancellation and must not directly create an independent thinking loop or send messages.
+
+## Reload and inspect
+
+```sh
+npm run dev -- plugins list --config config.json
+npm run dev -- plugins reload clock --config config.json
+npm run dev -- plugins reload all --config config.json
+```
+
+The CLI waits for completion and exits unsuccessfully on failure. The control socket returns a job immediately; `plugins status` reports `preparing`, `waiting`, `applying`, `done`, or `failed`. The capabilities page shows each loaded version, errors and pending edits, generates fields from user configuration schemas, and provides individual/all reload buttons. Save a draft before reloading. The page never imports or executes user plugins; exact user-tool context compatibility is decided by the daemon at load time.
+
+Preparation loads a complete source snapshot, validates settings, interface versions and tool-name conflicts, and leaves the running version intact if it fails. Dispatch of new thoughts, steering and memory reviews then pauses, while QQ perception continues saving events. Both brains and background work drain before candidates are activated and bindings switch together. Old SDK tool references are revoked; timers and cleanup belong to the old instance. A drain timeout retains the old version and configuration and resumes its timers. Cleanup errors after a successful commit are reported separately. An ongoing image generation completes before its plugin is replaced, rather than being reported as interrupted by a program restart.
+
+Only an implementation or settings change preserves working context when tool declarations and the plugin's `contextVersion` are unchanged. Added/removed tools, modified descriptions/parameters, and a changed `contextVersion` renew working context; memory, events, activities and commitments persist. Bump `contextVersion` when observation or activity semantics change without a tool-declaration change. A plugin's release `version` alone does not reset context.
+
+`reload ID` applies that plugin's saved switch and settings; `drawing` also applies its image endpoint settings, either web plugin applies shared `web` settings to both, and `snowluma-tools` applies native permissions together with dependent enhancements. `reload all` refreshes all plugins and these configuration groups. The default credential reader uses the daemon environment loaded at startup; editing those credentials still requires a restart. Core configuration (persona, model, database, QQ connection, plugin directories and drawing storage directory) still requires a restart and is reported separately. Built-in **source** updates still require a rebuild/restart; built-in **configuration** changes can reload.
+
+Optional configuration, with paths relative to `config.json`:
+
+```json
+{
+  "extensions": {
+    "directory": "plugins",
+    "dataDirectory": "data/plugins",
+    "reloadTimeoutMs": 120000,
+    "settings": { "clock": { "timeZone": "Asia/Shanghai" } }
+  },
+  "plugins": { "clock": true }
+}
+```
+
+Use explicit reload while developing. A unique snapshot under `<plugin>/.qiuyue-cache/` refreshes relative imports, including helpers and deleted files; it remains until disposal so lazy imports still work. `node_modules`, `.git`, and the snapshot directory are excluded. Install npm dependencies in the plugin's own directory. Changing npm dependencies can require a daemon restart because their paths remain cached by Node. Source snapshots are removed on disposal, but Node's in-process ESM cache is not unloadable; frequent long-running development can accumulate module instances. Isolated workers and automatic file watching are future extensions, not guarantees of this version.
 
 ## Configuration
 
-`plugins` is an optional object of boolean switches, keyed by those IDs. Unknown names and non-boolean values are rejected. An omitted switch preserves existing behavior. A `false` switch removes the plugin's tools, enhancements, and activities and prevents an already held tool from executing. Disabling an enhancement preserves the original native tools while `snowluma-tools` is on and permissions allow them.
+`plugins` is an optional object of boolean switches, keyed by built-in or user IDs. Invalid IDs and non-boolean values are rejected; missing user source is reported in plugin status. An omitted switch preserves existing behavior. After applying it by reload, a `false` switch removes the plugin's tools, enhancements, and activities and prevents an already held tool from executing. Disabling an enhancement preserves the original native tools while `snowluma-tools` is on and permissions allow them.
 
 The existing endpoint configuration is retained:
 
@@ -28,7 +119,7 @@ Turning off `qq-faces` removes `view_face`, face-name enhancement, and automatic
 
 Turning off `snowluma-tools` removes the native catalog's tools, `search_snowluma_tools`, `load_snowluma_tools`, and their platform-specific activity hints. It does not disconnect SnowLuma or stop incoming observations and recovery (ADR-0011). Other plugins can still use permitted native interfaces through the shared runtime, such as sharing a Qzone card. Sticker send suggestions are suppressed while the native send tool is absent.
 
-## Tools and thought state
+## Internal tools and thought state
 
 Implement `LifePlugin` with a unique `id` and `tools(runtime)`. Use `runtime.jsonTool` for JSON results or `runtime.tool` for content blocks and execution metadata. For example:
 
@@ -47,7 +138,7 @@ export function clockPlugin(): LifePlugin {
 }
 ```
 
-Add the factory and its configuration ID to `src/plugins/index.ts`. The host rejects duplicate plugin IDs and tool names, including conflicts with built-in tools. Preserve existing registration order when changing the composition root: tool declarations participate in the persisted working-context identity. A plugin tool can specify `insertBefore` with an existing tool name when retaining its historical position; `view_face` uses this during extraction from the built-in tool set.
+For built-in implementations, add the factory and its configuration ID to `src/plugins/index.ts`; user plugins use the SDK above. The host rejects duplicate plugin IDs and tool names, including conflicts with built-in tools. Preserve existing registration order when changing the composition root: tool declarations participate in the persisted working-context identity. A plugin tool can specify `insertBefore` with an existing tool name when retaining its historical position; `view_face` uses this during extraction from the built-in tool set.
 
 The daemon creates one host. The primary thinking process and memory review bind their own `ToolRuntime` to it. Resolve current thought state through `runtime.context()` at execution time; never capture a thought object during registration. Tool calls share pause, generation, life-mode, sequential-execution, and no-replay rules with built-in tools. Memory review retains its explicit tool allowlist; a new plugin tool is unavailable to review by default. Plugins can explicitly opt read-only tools into review with `reviewTools`, as `qq-faces` does for `view_face`.
 
@@ -67,7 +158,7 @@ The Qzone plugin demonstrates this: the model supplies a post reference, the plu
 
 ## Background work and pictures
 
-`start` runs once before live perception begins, after store recovery. Use it to recover interrupted work. `stop` must cancel and settle outstanding work before returning. The host waits for every stop hook, even if one fails, and calling stop again does not run hooks twice. Hooks must tolerate shutdown before startup completed.
+`start` runs once per instance, after store recovery at boot or after old work drains on reload. Use it to recover interrupted work. `quiesce` suspends new background work and returns a resume function for a failed reload; `idle` waits for existing work. `stop` cancels and settles outstanding work on shutdown and releases resources. Hooks must tolerate disposal before startup completed, including rejected candidates. Do not start work from constructors or tool binding.
 
 The drawing plugin persists unfinished work and its existing `drawing:<uuid>` references. Painting returns an ID immediately. Completion or failure enters the normal environment-event queue, so the same Agent decides what to do next. A plugin's own output must set `payload.origin` to `self`: it cannot alone support a personal habit or impression. Legacy drawing events retain that treatment too.
 

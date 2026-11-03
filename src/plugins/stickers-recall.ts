@@ -22,6 +22,7 @@ export class StickerRecall {
   private retry?: ReturnType<typeof setTimeout>;
   private unsubscribe?: () => void;
   private controller = new AbortController();
+  private suspended = false;
   constructor(private config: Config['embedding'], private saved: StickerStore, private semantics: SemanticSource) {}
   start() {
     this.saved.dropOtherVectors(this.semantics.model);
@@ -33,6 +34,10 @@ export class StickerRecall {
   }
   async stop() { this.unsubscribe?.(); clearTimeout(this.retry); this.controller.abort(); await this.indexing; }
   async idle() { while (this.indexing) await this.indexing; }
+  quiesce() {
+    this.suspended = true; clearTimeout(this.retry);
+    return () => { this.suspended = false; this.index(); };
+  }
   suggestions(events: EnvironmentEvent[], exclude: ReadonlySet<string> = new Set()): StickerSuggestion[] {
     const queries = this.semantics.queries(events);
     if (!queries.length) return [];
@@ -45,7 +50,7 @@ export class StickerRecall {
     return found.sort((a, b) => b.similarity - a.similarity).slice(0, this.config.stickerLimit);
   }
   private index() {
-    if (this.controller.signal.aborted) return;
+    if (this.controller.signal.aborted || this.suspended) return;
     if (this.indexing) { this.reindex = true; return; }
     this.indexing = this.indexStickers().finally(() => { this.indexing = undefined; if (this.reindex) { this.reindex = false; this.index(); } });
   }

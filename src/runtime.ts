@@ -3,6 +3,7 @@ import type { Brain } from './brain.js';
 import { Store, type PendingTiming } from './store.js';
 import { errorText, type EnvironmentEvent, type Wake } from './domain.js';
 import { recordTime } from './record.js';
+import { waitFor } from './async.js';
 
 export interface FreeTimeView { now: number; heardAt: number; quietMs: number; lifeWakes: { at: number; freeTime: boolean }[]; plans: Wake[] }
 /** A quiet stretch offers free time unless the digital life rests, another life wake is near, or the day's free time is spent (ADR-0015). */
@@ -23,6 +24,7 @@ export class LifeRuntime {
   private retryAfter = 0;
   private stopped = false;
   private started = false;
+  private maintenance = false;
   private nextRetention = 0;
   private nextFreeTime = 0;
   /** The quiet stretch being waited out: since when, and how long this one must last. */
@@ -40,7 +42,7 @@ export class LifeRuntime {
     void this.tick();
   }
   async tick() {
-    if (!this.started || this.stopped || this.ticking) return;
+    if (!this.started || this.stopped || this.ticking || this.maintenance) return;
     this.ticking = true;
     try {
       const settings = this.store.settings();
@@ -164,6 +166,13 @@ export class LifeRuntime {
     });
   }
   async idle() { await this.work; await this.steering; await this.reviewing; }
+  /** Perception writes directly to the store. Only dispatch pauses while both brains and housekeeping drain. */
+  async maintain<T>(signal: AbortSignal, change: () => Promise<T>): Promise<T> {
+    if (this.maintenance || this.stopped) throw new Error('The runtime is already in maintenance or stopping.');
+    this.maintenance = true;
+    try { await waitFor(this.idle(), signal); signal.throwIfAborted(); if (this.stopped) throw new Error('The runtime is stopping.'); return await change(); }
+    finally { this.maintenance = false; void this.tick(); }
+  }
   async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); this.reviewer?.abort(); await this.work; await this.steering; await this.reviewing; }
   control(command: string, value?: boolean) {
     this.store.transaction(() => {

@@ -55,6 +55,32 @@ test('a failed whole run releases its observations and waits thirty seconds befo
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const thought = () => ({ generation: 0, sources: new Set<string>(), triggers: new Set<string>(), lifeOnly: false });
 
+test('maintenance waits for the thought and parallel review, saves arrivals, and prevents new dispatch until commit', async () => {
+  const cfg = config(); cfg.memory.reflectionEveryEvents = 1;
+  const store = new Store(':memory:');
+  const thinking = deferred(), reviewing = deferred(), commit = deferred();
+  let thoughts = 0, reviews = 0, applying = false;
+  const brain: Brain = {
+    streaming: true, thought: thought(),
+    run: async observation => { thoughts++; await thinking.promise; store.acknowledge(observation.batchId); },
+    review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
+  };
+  const reviewer: Brain = { ...brain, review: async () => { reviews++; await reviewing.promise; } };
+  const runtime = new LifeRuntime(cfg, store, brain, reviewer);
+  try {
+    for (let i = 0; i < 3; i++) event(store);
+    store.acknowledge(store.claim(10)!.batchId);
+    event(store); runtime.start(); assert.equal(thoughts, 1); assert.equal(reviews, 1);
+    const maintenance = runtime.maintain(new AbortController().signal, async () => { applying = true; await commit.promise; });
+    const received = event(store, 'During maintenance');
+    thinking.resolve(); await flush(); assert.equal(applying, false, 'the parallel review still owns old bindings');
+    await runtime.tick(); assert.equal(thoughts, 1); assert.ok(store.event(received.id));
+    reviewing.resolve(); await flush(); assert.equal(applying, true);
+    await runtime.tick(); assert.equal(thoughts, 1, 'dispatch stays closed while the change is committed');
+    commit.resolve(); await maintenance; await runtime.idle(); assert.equal(thoughts, 2);
+  } finally { thinking.resolve(); reviewing.resolve(); commit.resolve(); await runtime.stop(); store.close(); }
+});
+
 test('a burst starts one thought after the environment goes quiet, and a busy environment after maxDelayMs', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const cfg = config(); cfg.limits.debounceMs = 1000; cfg.limits.maxDelayMs = 3000;

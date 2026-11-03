@@ -171,6 +171,7 @@ export function Loading({ state }) {
 /** What saving means for the working context: kept across the restart, or begun afresh (persona, prompt, model, tools, and account make up its identity). */
 export function ContextNote({ context }) {
   if (!context) return null;
+  if (context.unknown) return html`<p class="note">${t('User plugin declarations are checked by the daemon when loaded. Reload reports whether the working context was kept; memories and continuing state are retained.', '用户插件的工具声明由常驻进程在加载时校验。重载结果会说明是否保留工作上下文；记忆和持续状态会保留。')}</p>`;
   if (context.continues) return html`<p class="note ok">${t('After a restart, the current working context continues.', '重启后会延续当前的工作上下文。')}</p>`;
   if (!context.saved) return html`<p class="note">${t('There is no saved working context yet; the next start begins one.', '目前没有保存的工作上下文，下次启动会新建。')}</p>`;
   return html`<p class="note warn">${t('After a restart, the working context starts afresh: the persona, system prompt, model, tool set, or account differs from the one it was saved with. Memories and continuing state are kept.', '重启后工作上下文会重新开始：人格、系统提示词、模型、工具集或账号与保存时不同。记忆和持续状态不受影响。')}</p>`;
@@ -238,7 +239,7 @@ export function useConfigDraft() {
     reload: state.reload,
   };
 }
-export function SaveBar({ form, onSaved }) {
+export function SaveBar({ form, onSaved, savedMessage }) {
   const [review, setReview] = useState(null);
   const [busy, setBusy] = useState(false);
   if (!form.dirty && !review) return null;
@@ -251,7 +252,7 @@ export function SaveBar({ form, onSaved }) {
     setBusy(true);
     try {
       const result = await api('/api/config', { method: 'PUT', body: { raw: form.draft, hash: form.hash } });
-      toast(t('Saved. Restart the daemon to use it.', '已保存，重启常驻进程后生效。'), 'ok');
+      toast(savedMessage ?? t('Saved. Apply plugin settings on the capabilities page; core settings take effect after a restart.', '已保存。插件设置可在能力页重载应用；核心设置在重启后生效。'), 'ok');
       setReview(null); await form.reload(); onSaved?.(result);
     } catch (error) { failed(error); if (error.status === 409) setReview(null); }
     finally { setBusy(false); }

@@ -50,7 +50,8 @@ export interface Brain {
 
 /** What a persisted working context belongs to: when any of it changes, the next start begins a fresh one. */
 export function contextIdentity(config: Config, tools: ToolSet, legacy = false) {
-  return digest({ instructions: systemInstructions(config, legacy), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration) });
+  const contracts = tools.plugins.installed().filter(plugin => plugin.contextVersion !== undefined && (plugin.enabled?.() ?? true)).map(plugin => [plugin.id, plugin.contextVersion]);
+  return digest({ instructions: systemInstructions(config, legacy), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
 }
 
 export class PiBrain implements Brain {
@@ -64,8 +65,8 @@ export class PiBrain implements Brain {
   private contextGeneration = -1;
   private runtimeSnapshot?: RuntimeSnapshot;
   private readonly meter = new TokenMeter();
-  private readonly identity: string;
-  private readonly legacyIdentity: string;
+  private identity: string;
+  private legacyIdentity: string;
   private pendingRequest: AgentMessage[] = [];
   private pendingRoute = '';
   private compactions: Record<string, unknown>[] = [];
@@ -275,6 +276,16 @@ export class PiBrain implements Brain {
     this.agent.reset(); this.agent.state.tools = this.tools.current();
     this.agent.state.messages = [createInitialSystemMessage(this.instructions(), this.tools.current().map(toToolDeclaration))!];
     this.meter.reset(); this.thought.sources.clear(); this.runtimeSnapshot = undefined;
+  }
+  /** Called only while the runtime has stopped dispatch and drained both brains. */
+  refreshTools(): boolean {
+    if (this.phase !== 'idle') throw new Error('Cannot replace tools during a thought.');
+    const identity = contextIdentity(this.config, this.tools);
+    const changed = identity !== this.identity;
+    this.identity = identity; this.legacyIdentity = contextIdentity(this.config, this.tools, true);
+    this.agent.state.tools = this.tools.current();
+    if (changed) { this.resetContext(); this.contextGeneration = -1; }
+    return changed;
   }
   private checkpoint(): ContextCheckpoint {
     return { identity: this.identity, generation: this.contextGeneration, messages: this.agent.state.messages.slice(), sources: [...this.thought.sources], anchor: this.meter.anchor };

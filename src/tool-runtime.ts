@@ -48,6 +48,17 @@ export class ToolRuntime {
     this.check(signal);
     return result;
   }
+  /** Non-QQ actions use the same ledger and budget; a dispatched failure cannot be assumed safe to repeat. */
+  async externalAction(name: string, args: Record<string, unknown>, dispatch: () => Promise<unknown>, signal?: AbortSignal) {
+    this.check(signal);
+    const attempt = this.store.beginAction(`${name}:${crypto.randomUUID()}`, name, args, [...this.context().sources], [...this.context().triggers], this.config.limits.actionsPerHour);
+    if (attempt.fresh) {
+      let dispatched = false;
+      try { this.check(signal); dispatched = true; this.store.finishAction(attempt.action.id, 'success', await dispatch()); }
+      catch (error) { this.store.finishAction(attempt.action.id, dispatched ? 'unknown' : 'failed', errorResult(error)); }
+    }
+    return { outcome: this.store.actionById(attempt.action.id)!, reused: !attempt.fresh };
+  }
   /** Preparation may read through query; only dispatch can perform the recorded external action. */
   async action(name: string, args: Record<string, unknown>, perform: (dispatch: (name: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>, signal?: AbortSignal, failure = errorResult) {
     this.check(signal);

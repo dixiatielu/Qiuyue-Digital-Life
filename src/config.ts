@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { findSnowLumaAction, type SnowLumaPermissions } from './snowluma-catalog.js';
 import { validateModelConfig, type ModelConfig } from './model.js';
-import { pluginIds } from './plugins/index.js';
 import { checkSystemPrompt } from './prompts.js';
 
 export interface Config {
@@ -14,7 +13,8 @@ export interface Config {
   /** The management web page, a process apart from the daemon (ADR-0020); service is the systemd user unit it may restart, or null. */
   webui: { host: string; port: number; tokenEnv: string; service: string | null };
   /** Optional per-plugin switches; drawing.enabled and web.enabled still govern their capabilities. */
-  plugins: Partial<Record<typeof pluginIds[number], boolean>>;
+  plugins: Record<string, boolean>;
+  extensions: { directory: string; dataDirectory: string; settings: Record<string, Record<string, unknown>>; reloadTimeoutMs: number };
   model: ModelConfig;
   snowluma: { url: string; tokenEnv: string; selfId: number; groups: number[]; tools: SnowLumaPermissions; maxStreamBytes: number };
   /** freeTime: a quiet stretch, drawn between quietMinMs and quietMaxMs each time, offers a life wake at least gapMs from any other, at most perDay a day (ADR-0015). */
@@ -43,6 +43,11 @@ export function loadConfig(path: string): Config {
     ...(raw.systemPromptFile === undefined ? {} : { systemPrompt: readFileSync(resolve(base, raw.systemPromptFile), 'utf8') }),
     webui: webuiSettings(raw),
     plugins: raw.plugins ?? {},
+    extensions: {
+      directory: resolve(base, raw.extensions?.directory ?? 'plugins'),
+      dataDirectory: resolve(base, raw.extensions?.dataDirectory ?? 'data/plugins'),
+      settings: raw.extensions?.settings ?? {}, reloadTimeoutMs: raw.extensions?.reloadTimeoutMs ?? 120_000,
+    },
     model: { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...raw.model },
     snowluma: { url: 'ws://127.0.0.1:3001', tokenEnv: 'SNOWLUMA_TOKEN', selfId: 0, groups: [], maxStreamBytes: 32_000_000, ...raw.snowluma, tools: { allow: '*', deny: [], ...raw.snowluma?.tools } },
     life: { enabled: false, allowFiction: false, minWakeMs: 60_000, ...raw.life, freeTime: { enabled: true, quietMinMs: 600_000, quietMaxMs: 1_200_000, gapMs: 3_600_000, perDay: 8, ...raw.life?.freeTime } },
@@ -58,9 +63,15 @@ export function loadConfig(path: string): Config {
   if (config.systemPrompt !== undefined) checkSystemPrompt(config.systemPrompt);
   if (raw.plugins !== undefined && (!raw.plugins || typeof raw.plugins !== 'object' || Array.isArray(raw.plugins))) throw new Error('plugins must be an object of plugin IDs and boolean switches.');
   for (const [id, enabled] of Object.entries(config.plugins)) {
-    if (!(pluginIds as readonly string[]).includes(id)) throw new Error(`Unknown plugin: ${id}`);
+    if (id === 'all' || !/^[a-z][a-z0-9-]{0,63}$/.test(id)) throw new Error(`Invalid plugin ID: ${id}`);
     if (typeof enabled !== 'boolean') throw new Error(`plugins.${id} must be boolean.`);
   }
+  if (raw.extensions !== undefined && (!raw.extensions || typeof raw.extensions !== 'object' || Array.isArray(raw.extensions))) throw new Error('extensions must be an object.');
+  if (!config.extensions.settings || typeof config.extensions.settings !== 'object' || Array.isArray(config.extensions.settings)) throw new Error('extensions.settings must be an object.');
+  for (const [id, value] of Object.entries(config.extensions.settings)) {
+    if (id === 'all' || !/^[a-z][a-z0-9-]{0,63}$/.test(id) || !value || typeof value !== 'object' || Array.isArray(value)) throw new Error('extensions.settings must map plugin IDs to setting objects.');
+  }
+  if (!Number.isSafeInteger(config.extensions.reloadTimeoutMs) || config.extensions.reloadTimeoutMs < 100 || config.extensions.reloadTimeoutMs > 900_000) throw new Error('extensions.reloadTimeoutMs must be between 100 and 900000.');
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
   validateModelConfig(config.model);
   for (const name of [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');

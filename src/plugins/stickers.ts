@@ -69,5 +69,6 @@ export function stickersPlugin(config: Config, saved: StickerStore, recall?: Sti
     },
     endsThought: (tool, details) => tool === 'add_custom_face' && (details as { described?: { outcome?: unknown } } | undefined)?.described?.outcome === 'success',
     start: () => recall?.start(), stop: () => recall?.stop(),
+    idle: () => recall?.idle() ?? Promise.resolve(), quiesce: () => recall?.quiesce() ?? (() => {}),
   };
 }

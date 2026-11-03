@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { ui } from './ui-language.js';
 import { parseArgs } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
@@ -18,6 +19,7 @@ import { followDisplay } from './display-client.js';
 import { EmbeddingClient, SemanticRecall } from './recall.js';
 import { createPlugins, pluginCredentials } from './plugins/index.js';
 import type { PluginHost } from './plugins.js';
+import { PluginManager, type PluginReloadJob } from './plugin-manager.js';
 
 async function main() {
   process.umask(0o077);
@@ -26,7 +28,7 @@ async function main() {
   const envFile = resolve(dirname(configPath), '.env'); if (existsSync(envFile)) process.loadEnvFile(envFile);
   const command = positionals[0] ?? 'help';
   if (command === 'help') {
-    console.log(ui(`qiuyue-digital-life\n\n  npm run dev -- <command> --config config.json\n\n  run                     Start the single daemon\n  validate                Check configuration, model, and credentials (without connecting to QQ)\n  models [provider]       List Pi models and image support\n  status | logs           Inspect continuing state or logs\n  tui                     Connect to the live terminal (exiting does not stop the daemon)\n  webui                   Serve the management web page (a process apart from the daemon)\n  logs --follow           Subscribe to live NDJSON display events\n  pause | resume          Pause or resume the digital life\n  life on | life off      Enable or disable autonomous life\n  memory search <query>   Search memories and personal notes\n  memory show <ID>        Inspect a memory and its sources\n  memory correct <ID> <content>  Correct a memory while retaining versions\n  memory forget <ID>      Preview deletion; add --yes to proceed\n\nRestart after changing core configuration. The dailyCalls budget follows the Asia/Shanghai calendar day.`, `qiuyue-digital-life\n\n  npm run dev -- <命令> --config config.json\n\n  run                     启动唯一常驻主体\n  validate                检查配置、模型和凭据是否就绪（不连接QQ）\n  models [provider]       列出Pi模型及图片能力\n  status | logs           查看持续状态或运行记录\n  tui                     连接实时终端（退出不停止主体）\n  webui                   启动管理网页（独立于常驻进程）\n  logs --follow           订阅实时 NDJSON 展示事件\n  pause | resume          整体暂停/恢复\n  life on | life off      开关自主生活\n  memory search <查询>    检索记忆及个人笔记\n  memory show <ID>        查看记忆及来源\n  memory correct <ID> <内容>  修正并保留版本\n  memory forget <ID>      预览删除范围；追加 --yes 执行\n\n核心配置修改后重启。dailyCalls 预算按 Asia/Shanghai 的自然日计算。`));
+    console.log(ui(`qiuyue-digital-life\n\n  npm run dev -- <command> --config config.json\n\n  run                     Start the single daemon\n  validate                Check configuration, model, and credentials (without connecting to QQ)\n  models [provider]       List Pi models and image support\n  status | logs           Inspect continuing state or logs\n  plugins list            Inspect loaded plugins and pending changes\n  plugins reload [ID|all]  Reload plugins without restarting the daemon\n  tui                     Connect to the live terminal (exiting does not stop the daemon)\n  webui                   Serve the management web page (a process apart from the daemon)\n  logs --follow           Subscribe to live NDJSON display events\n  pause | resume          Pause or resume the digital life\n  life on | life off      Enable or disable autonomous life\n  memory search <query>   Search memories and personal notes\n  memory show <ID>        Inspect a memory and its sources\n  memory correct <ID> <content>  Correct a memory while retaining versions\n  memory forget <ID>      Preview deletion; add --yes to proceed\n\nRestart after changing core configuration. The dailyCalls budget follows the Asia/Shanghai calendar day.`, `qiuyue-digital-life\n\n  npm run dev -- <命令> --config config.json\n\n  run                     启动唯一常驻主体\n  validate                检查配置、模型和凭据是否就绪（不连接QQ）\n  models [provider]       列出Pi模型及图片能力\n  status | logs           查看持续状态或运行记录\n  plugins list            查看插件运行状态与待应用修改\n  plugins reload [ID|all]  重载插件，无需重启常驻进程\n  tui                     连接实时终端（退出不停止主体）\n  webui                   启动管理网页（独立于常驻进程）\n  logs --follow           订阅实时 NDJSON 展示事件\n  pause | resume          整体暂停/恢复\n  life on | life off      开关自主生活\n  memory search <查询>    检索记忆及个人笔记\n  memory show <ID>        查看记忆及来源\n  memory correct <ID> <内容>  修正并保留版本\n  memory forget <ID>      预览删除范围；追加 --yes 执行\n\n核心配置修改后重启。dailyCalls 预算按 Asia/Shanghai 的自然日计算。`));
     return;
   }
   if (command === 'models') {
@@ -48,6 +50,21 @@ async function main() {
     process.once('SIGINT', finish); process.once('SIGTERM', finish); process.stdout.on('error', onOutputError);
     return;
   }
+  if (command !== 'run' && command !== 'validate') {
+    let result = await requestControl(config, { args: positionals, yes: values.yes });
+    if (command === 'plugins' && positionals[1] === 'reload') {
+      let job = result as PluginReloadJob;
+      while (job.state !== 'done' && job.state !== 'failed') {
+        await delay(250);
+        const status = await requestControl(config, { args: ['plugins', 'status'] }) as { job: PluginReloadJob | null };
+        if (status.job?.id !== job.id) throw new Error(`Reload ${job.id} is no longer available; inspect plugins status for the latest result.`);
+        job = status.job;
+      }
+      result = job;
+      if (job.state === 'failed') process.exitCode = 1;
+    }
+    console.log(JSON.stringify(result, null, 2)); return;
+  }
   if (command === 'validate') {
     const problems = []; const warnings = [];
     try {
@@ -61,7 +78,6 @@ async function main() {
     console.log(JSON.stringify({ valid: problems.length === 0, problems, warnings, runtime: process.version, snowlumaConfigured: Boolean(config.snowluma.selfId) }, null, 2));
     if (problems.length) process.exitCode = 1; return;
   }
-  if (command !== 'run') { console.log(JSON.stringify(await requestControl(config, { args: positionals, yes: values.yes }), null, 2)); return; }
   if (!process.env[config.model.apiKeyEnv]) throw new Error(`Set ${config.model.apiKeyEnv} in the environment first.`);
   const store = new Store(config.database, config.life.enabled);
   const release = store.acquireDaemon();
@@ -73,8 +89,10 @@ async function main() {
   let plugins: PluginHost;
   const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding), () => plugins.knownEmojiNames()) : undefined;
   plugins = createPlugins(config, store, social, recall);
+  const pluginManager = new PluginManager(config, plugins, store, social, () => loadConfig(configPath), name => process.env[name], recall);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   const stopServices = async () => {
+    await Promise.all([pluginManager.stop(), runtime?.stop()]);
     const results = await Promise.allSettled([social.close(), runtime?.stop(), recall?.stop(), plugins.stop()]);
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
     if (errors.length) throw new AggregateError(errors, errors.map(errorText).join('; '));
@@ -85,9 +103,10 @@ async function main() {
     // Review runs beside the thoughts with tools of its own; the live view follows the thoughts, and review shows there through its trace (ADR-0012).
     reviewer = new PiBrain(config, store, forReview(createTools(config, store, social, () => reviewer.thought, recall, plugins)), undefined, undefined, recall);
     runtime = new LifeRuntime(config, store, brain, reviewer);
-    server = await serveControl(config.socket, request => handleControl(store, request, runtime), monitor);
+    pluginManager.connect(runtime, () => { const changed = brain.refreshTools(); reviewer.refreshTools(); return changed; });
+    server = await serveControl(config.socket, request => handleControl(store, request, runtime, pluginManager), monitor);
     // Recovery must precede live collection; perception keeps running even if paused.
-    store.recover(); await plugins.start();
+    store.recover(); await pluginManager.start();
     // Messages are embedded as they arrive, so recall starts listening before perception does.
     recall?.start();
     await social.connect();

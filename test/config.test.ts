@@ -15,7 +15,8 @@ test('plugin overrides are optional and validate names and independent boolean s
     assert.deepEqual(load().plugins, {});
     assert.deepEqual(load({ 'web-search': false, 'web-reader': true, 'qzone-share': false, drawing: false, 'qq-stickers': false, 'qq-faces': false, 'snowluma-tools': false }).plugins, { 'web-search': false, 'web-reader': true, 'qzone-share': false, drawing: false, 'qq-stickers': false, 'qq-faces': false, 'snowluma-tools': false });
     for (const plugins of [null, [], 'drawing', false]) assert.throws(() => load(plugins), /plugins must be an object/);
-    assert.throws(() => load({ 'web-serach': true }), /Unknown plugin/);
+    assert.equal(load({ 'my-weather': true }).plugins['my-weather'], true, 'user plugin IDs need no source registration');
+    assert.throws(() => load({ '../weather': true }), /Invalid plugin ID/);
     assert.throws(() => load({ drawing: 'yes' }), /must be boolean/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -90,7 +90,7 @@ npm start -- webui --config config.json
 
 - **访问：** 监听 `webui.host`:`webui.port`（默认 `127.0.0.1:8848`）；从其他机器访问请用 SSH 隧道，例如 `ssh -L 8848:127.0.0.1:8848 <服务器>`。打开 `config.json` 同目录下的 `.env`，将 `WEBUI_TOKEN=` 后面的值（不含两侧引号）粘贴到登录框；变量名由 `webui.tokenEnv` 指定，变量名本身不是令牌。如果 `.env` 和服务环境里都未配置令牌，每次启动会在终端或服务日志中打印本次启动的登录链接，请打开最近一次的链接。
 - **界面：** 六个主标签页按活动、配置、能力、人格、提示词和模型分区。右上角「主题色」支持六组预设、自定义 HEX，以及浅色、深色、跟随系统；偏好自动保存在当前浏览器，立即生效，无需重启。配置中的时间可切换毫秒、秒、分钟、小时显示，保存时统一换算为毫秒。
-- **保存：** 每次保存都按常驻进程的方式校验配置；如果文件在网页读取后被其他地方改过，会拒绝保存；历史版本保存在 `data/webui/history`。修改在常驻进程重启后生效。网页会提示重启后是否延续当前的工作上下文：修改人格、系统提示词、模型或工具集会让工作上下文重新开始。
+- **保存：** 每次保存都按常驻进程的方式校验配置；如果文件在网页读取后被其他地方改过，会拒绝保存；历史版本保存在 `data/webui/history`。插件设置可在能力页通过重载应用，核心设置仍在重启后生效。网页显示实际插件版本与重载结果，并提示是否延续工作上下文：修改人格、系统提示词、模型或工具集会让工作上下文重新开始。
 - **系统提示词：** 保存时写入 `config.json` 旁的 `system-prompt.md`（不在 git 中），并设置 `systemPromptFile`；不设置时使用内置提示词。内置提示词在你保存之后有更新时，网页会提示。
 - **重启：** 把 `webui.service` 设为常驻进程的 systemd 用户服务名（例如 `qiuyue-digital-life.service`），就能在网页上启动、停止和重启它。重启可以等到没有思考和记忆整理在进行时再执行。
 - **供应商：** 网页把供应商端点保存在 `data/webui/providers.json`；选用某个供应商时，会把它的地址、API 和密钥变量复制到 `model`、`embedding` 或 `drawing`。常驻进程只读 `config.json`。
@@ -126,7 +126,7 @@ QQ 原生工具、画画、网页搜索、网页阅读、空间卡片分享、�
 }
 ```
 
-省略开关时保持原有行为。`drawing` 插件还需开启 `drawing.enabled`，搜索和阅读还需开启 `web.enabled`；空间分享仍受 `snowluma.tools` 的接口权限限制。修改配置后重启常驻进程。开发接入方式见[插件说明](docs/plugins.md)。
+省略开关时保持原有行为。`drawing` 插件还需开启 `drawing.enabled`，搜索和阅读还需开启 `web.enabled`；空间分享仍受 `snowluma.tools` 的接口权限限制。保存配置后，在能力页点击“重载插件”，或执行 `npm run dev -- plugins reload all --config config.json`。用户插件放在配置旁的 `plugins/<id>/index.mjs`，执行 `plugins reload <id>` 即可加载，无需修改秋月源码。`plugins list` 显示实际运行版本和待应用修改。公开接口与生命周期约定见[插件说明](docs/plugins.md)和[时钟示例](examples/plugins/clock/index.mjs)。
 
 `qq-stickers` 默认开启，负责收藏时附带描述、识别已收藏图片，以及根据聊天内容推荐表情。推荐复用 `embedding` 的消息向量，阈值和数量仍由 `embedding.stickerThreshold`、`embedding.stickerLimit` 控制；不开 embedding 也能使用其余增强。设为 `false` 会关闭这些增强和表情索引，原生收藏、描述、删除和发送接口继续按权限开放，已有收藏记录与向量保留。
 

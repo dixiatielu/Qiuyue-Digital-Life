@@ -10,8 +10,12 @@ import type { DisplayCursor, Monitor } from './monitor.js';
 
 export interface ControlRequest { args: string[]; yes?: boolean; cursor?: DisplayCursor }
 export type ControlServer = Server & { closeClients(): void };
-export function handleControl(store: Store, request: ControlRequest, runtime?: LifeRuntime): unknown {
+export function handleControl(store: Store, request: ControlRequest, runtime?: LifeRuntime, plugins?: { request(args: string[]): unknown }): unknown {
   const [command, sub, ...rest] = request.args;
+  if (command === 'plugins') {
+    if (!plugins) throw new Error('Plugin management requires a running daemon with plugin reload support.');
+    return plugins.request(request.args.slice(1));
+  }
   if (command === 'status') return store.status();
   if (command === 'logs') return store.logs();
   if (command === 'pause' || command === 'resume' || command === 'life') {
@@ -75,7 +79,10 @@ export async function serveControl(path: string, handler: (request: ControlReque
           });
           return;
         }
-        socket.end(JSON.stringify({ ok: true, result: handler(request) }) + '\n');
+        Promise.resolve(handler(request)).then(
+          result => socket.end(JSON.stringify({ ok: true, result }) + '\n'),
+          error => socket.end(JSON.stringify({ ok: false, error: errorText(error) }) + '\n'),
+        );
       } catch (error) { socket.end(JSON.stringify({ ok: false, error: errorText(error) }) + '\n'); }
     });
   });

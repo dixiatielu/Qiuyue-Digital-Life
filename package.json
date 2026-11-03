@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./plugin-sdk": { "types": "./dist/plugin-sdk.d.ts", "default": "./dist/plugin-sdk.js" }
+  },
   "engines": {
     "node": "^24.22.1 || >=26.12.1"
   },

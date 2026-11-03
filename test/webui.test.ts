@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -12,6 +12,13 @@ import { setEnvText } from '../src/webui/files.js';
 import { inspectConfig } from '../src/webui/inspect.js';
 import { ServiceJobs, type LiveMirror } from '../src/webui/daemon.js';
 import type { LifeReader } from '../src/webui/reader.js';
+import { PluginManager } from '../src/plugin-manager.js';
+import { createPlugins } from '../src/plugins/index.js';
+import { createTools } from '../src/tools.js';
+import { contextIdentity } from '../src/brain.js';
+import { LifeRuntime } from '../src/runtime.js';
+import { Store } from '../src/store.js';
+import { handleControl, serveControl } from '../src/control.js';
 
 const token = 'test-token-0123456789';
 async function page(work: (call: (path: string, init?: { method?: string; body?: unknown; headers?: Record<string, string> }) => Promise<{ status: number; body: any }>, dir: string, port: number) => Promise<void>) {
@@ -236,3 +243,46 @@ test('a restart waits until no thought or review is under way, and gives up at i
   assert.equal(jobs.start('life.service', 'stop', false).state, 'running', 'without waiting, it acts at once');
   jobs.close();
 });
+
+test('the capabilities page discovers user plugins without importing them in the web process', () => page(async (call, dir) => {
+  const path = join(dir, 'plugins', 'unloaded'); mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, 'index.mjs'), 'throw new Error("The web page must never execute this module");');
+  const result = await call('/api/plugins');
+  assert.equal(result.status, 200); assert.ok(result.body.ids.includes('unloaded'));
+  assert.equal(result.body.running, null); assert.equal(result.body.inspected.unknown, true);
+  assert.equal((await call('/api/plugins/reload', { method: 'POST', body: { id: 'unloaded' }, headers: { Authorization: '' } })).status, 401);
+  assert.equal((await call('/api/plugins/reload', { method: 'POST', body: { id: '../unloaded' } })).status, 400);
+}));
+
+test('capabilities show daemon versions and schema, and apply saved settings through a tracked reload', () => page(async (call, dir) => {
+  const path = join(dir, 'config.json'), cfg = loadConfig(path), store = new Store(cfg.database);
+  const social = { execute: async () => ({}) }, host = createPlugins(cfg, store, social);
+  const thought = { generation: 0, sources: new Set<string>(), triggers: new Set<string>(), lifeOnly: false };
+  const tools = createTools(cfg, store, social, () => thought, undefined, host);
+  let identity = contextIdentity(cfg, tools);
+  const brain = { thought, streaming: false, run: async () => {}, review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {} };
+  const runtime = new LifeRuntime(cfg, store, brain, brain);
+  const manager = new PluginManager(cfg, host, store, social, () => loadConfig(path), () => undefined);
+  manager.connect(runtime, () => { const next = contextIdentity(cfg, tools), changed = next !== identity; identity = next; return changed; });
+  mkdirSync(join(dir, 'plugins/clock'), { recursive: true });
+  writeFileSync(join(dir, 'plugins/clock/index.mjs'), readFileSync(new URL('../examples/plugins/clock/index.mjs', import.meta.url)));
+  const server = await serveControl(cfg.socket, request => handleControl(store, request, runtime, manager));
+  try {
+    await manager.start();
+    const listed = await call('/api/plugins');
+    const clock = listed.body.running.plugins.find((item: any) => item.id === 'clock');
+    assert.equal(clock.state, 'running'); assert.equal(clock.version, '1.0.0');
+    assert.equal(clock.configSchema.properties.timeZone.type, 'string');
+    const config = await call('/api/config');
+    assert.equal((await call('/api/config', { method: 'PUT', body: { raw: { ...config.body.raw, plugins: { clock: false } }, hash: config.body.hash } })).status, 200);
+    const pending = await call('/api/plugins');
+    assert.equal(pending.body.running.plugins.find((item: any) => item.id === 'clock').pending, true);
+    const reload = await call('/api/plugins/reload', { method: 'POST', body: { id: 'clock' } });
+    assert.equal(reload.status, 200); assert.ok(['preparing', 'waiting', 'applying', 'done'].includes(reload.body.state));
+    await manager.settled();
+    const after = await call('/api/plugins');
+    assert.equal(after.body.running.job.state, 'done'); assert.equal(after.body.running.job.contextReset, true);
+    assert.equal(after.body.running.plugins.find((item: any) => item.id === 'clock').state, 'disabled');
+    assert.ok(!tools.current().some(tool => tool.name === 'clock_read'));
+  } finally { await manager.stop(); await runtime.stop(); await host.stop(); server.closeClients(); await new Promise<void>(resolve => server.close(() => resolve())); store.close(); }
+}));

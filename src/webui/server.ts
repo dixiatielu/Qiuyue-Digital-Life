@@ -7,6 +7,8 @@ import { loadConfig, webuiSettings, type Config } from '../config.js';
 import { callControl, requestControl } from '../control.js';
 import { errorText } from '../domain.js';
 import { pluginIds } from '../plugins/index.js';
+import { discoverPlugins } from '../plugin-loader.js';
+import type { PluginManager } from '../plugin-manager.js';
 import { systemInstructions } from '../prompts.js';
 import { snowlumaCatalog, snowlumaCatalogSource } from '../snowluma-catalog.js';
 import { ui } from '../ui-language.js';
@@ -97,7 +99,8 @@ export class WebUi {
     const key = hash(JSON.stringify(config));
     if (this.inspected?.key !== key) this.inspected = { key, result: inspectConfig(config) };
     const result = this.inspected.result;
-    return { continues: Boolean(saved?.current && result.identities.includes(saved.identity)), saved: saved ? { at: saved.updatedAt, current: saved.current } : null, plugins: result.plugins, tools: result.tools.length, credentials: result.credentials };
+    const userPlugins = discoverPlugins(config.extensions.directory).some(id => !(pluginIds as readonly string[]).includes(id) && config.plugins[id] !== false);
+    return { continues: userPlugins ? null : Boolean(saved?.current && result.identities.includes(saved.identity)), unknown: userPlugins, saved: saved ? { at: saved.updatedAt, current: saved.current } : null, plugins: result.plugins, tools: result.tools.length, credentials: result.credentials };
   }
   private on(method: string, path: string, handler: Handler) {
     this.routes.push({ method, pattern: new RegExp(`^${path.replace(/:\w+/g, '([^/]+)')}$`), handler });
@@ -168,9 +171,18 @@ export class WebUi {
       return { text, chars: text.length };
     });
 
-    this.on('GET', '/api/plugins', () => {
+    this.on('GET', '/api/plugins', async () => {
       const { raw, config, error } = this.current();
-      return { ids: pluginIds, switches: raw.plugins ?? {}, inspected: config ? this.continuity(config) : null, error: error ?? null };
+      let running: ReturnType<PluginManager['status']> | null = null, runtimeError: string | undefined;
+      try { running = await callControl(this.paths.socket, { args: ['plugins', 'list'] }) as ReturnType<PluginManager['status']>; }
+      catch (error) { runtimeError = errorText(error); }
+      const discovered = config ? discoverPlugins(config.extensions.directory) : [];
+      return { ids: [...new Set([...pluginIds, ...discovered, ...running?.plugins.map(plugin => plugin.id) ?? []])], switches: raw.plugins ?? {}, inspected: config ? this.continuity(config) : null, error: error ?? null, running, runtimeError, directory: config?.extensions.directory };
+    });
+    this.on('POST', '/api/plugins/reload', ({ body }) => {
+      const id = body.id ?? 'all';
+      if (typeof id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(id)) throw new HttpError(400, 'Invalid plugin ID.');
+      return callControl(this.paths.socket, { args: ['plugins', 'reload', id] });
     });
     this.on('GET', '/api/snowluma', () => ({ source: snowlumaCatalogSource, actions: snowlumaCatalog.map(action => ({ name: action.name, category: action.category, summary: action.summary, readOnly: action.readOnly })) }));
 

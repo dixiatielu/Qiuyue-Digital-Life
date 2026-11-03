@@ -1,6 +1,7 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
 import type { ThoughtContext, ToolRuntime } from './tool-runtime.js';
+import { waitFor } from './async.js';
 
 export interface OnlineActivity {
   activity: string;
@@ -21,6 +22,8 @@ export interface PluginImage {
 /** One complete capability: tools and the hooks required to take part in the digital life's experiences. */
 export interface LifePlugin {
   id: string;
+  /** User plugins bump this when their observation/meaning contract changes without changing tool declarations. */
+  contextVersion?: string;
   enabled?(): boolean;
   tools(runtime: ToolRuntime): PluginTool[];
   reviewTools?: string[];
@@ -44,11 +47,15 @@ export interface LifePlugin {
   resolveMedia?(value: string): string | undefined;
   start?(): void | Promise<void>;
   stop?(): void | Promise<void>;
+  /** Stop scheduling background work while a replacement is prepared; return a resume function. */
+  quiesce?(): () => void;
+  idle?(): Promise<void>;
 }
 
 export class PluginHost {
   private started = false;
   private stopping?: Promise<void>;
+  private validators: ((plugins: readonly LifePlugin[]) => void)[] = [];
   constructor(private plugins: readonly LifePlugin[] = []) {
     const ids = new Set<string>();
     for (const plugin of plugins) {
@@ -57,18 +64,38 @@ export class PluginHost {
     }
   }
   private enabled(plugin: LifePlugin) { return plugin.enabled?.() ?? true; }
+  installed(): readonly LifePlugin[] { return this.plugins; }
+  validate(plugins: readonly LifePlugin[]) {
+    const ids = new Set<string>();
+    for (const plugin of plugins) {
+      if (ids.has(plugin.id)) throw new Error(`Duplicate plugin ID: ${plugin.id}`);
+      ids.add(plugin.id);
+    }
+    for (const validate of this.validators) validate(plugins);
+  }
+  /** The caller has drained both brains and started the candidates before this synchronous commit. */
+  install(plugins: readonly LifePlugin[]) { this.validate(plugins); this.plugins = plugins; }
   enabledIds(): string[] { return this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.id); }
   /** Bind once per thinking process; the primary process and review share plugin lifetimes, not thought state. */
   bind(runtime: ToolRuntime): (builtins: AgentTool[], following?: AgentTool[]) => AgentTool[] {
-    const registered = this.plugins.map(plugin => ({ plugin, tools: plugin.tools(runtime).map(tool => ({ ...tool, execute: async (...args: Parameters<AgentTool['execute']>) => {
-      runtime.check(args[2]);
-      if (this.stopping) throw new Error('The program is shutting down; plugin tools are unavailable.');
-      if (!this.enabled(plugin)) throw new Error(`Plugin ${plugin.id} is disabled or its required interfaces are unavailable.`);
-      if (tool.available && !tool.available()) throw new Error('The operator has not enabled this tool.');
-      return tool.execute(...args);
-    } })) }));
+    const cache = new WeakMap<LifePlugin, PluginTool[]>();
+    const register = (plugin: LifePlugin) => {
+      let tools = cache.get(plugin);
+      if (tools) return { plugin, tools };
+      tools = plugin.tools(runtime).map(tool => ({ ...tool, execute: async (...args: Parameters<AgentTool['execute']>) => {
+        runtime.check(args[2]);
+        if (this.stopping) throw new Error('The program is shutting down; plugin tools are unavailable.');
+        if (!this.plugins.includes(plugin)) throw new Error(`Plugin ${plugin.id} was reloaded; this tool belongs to an old version.`);
+        if (!this.enabled(plugin)) throw new Error(`Plugin ${plugin.id} is disabled or its required interfaces are unavailable.`);
+        if (tool.available && !tool.available()) throw new Error('The operator has not enabled this tool.');
+        return tool.execute(...args);
+      } }));
+      cache.set(plugin, tools);
+      return { plugin, tools };
+    };
     // Reject conflicts even when a plugin is disabled, before any tool can execute.
-    return (builtins, following = []) => {
+    const build = (plugins: readonly LifePlugin[], builtins: AgentTool[], following: AgentTool[]) => {
+      const registered = plugins.map(register);
       const names = new Set<string>();
       for (const tool of [...builtins, ...registered.flatMap(item => item.tools), ...following]) {
         if (names.has(tool.name)) throw new Error(`Duplicate tool name: ${tool.name}`);
@@ -80,18 +107,21 @@ export class PluginHost {
         ordered.splice(ordered.findIndex(item => item === tool), 1);
         ordered.splice(ordered.findIndex(item => item.name === tool.insertBefore), 0, tool);
       }
-      return ordered.map(tool => this.decorate(tool, runtime));
+      return ordered.map(tool => this.decorate(tool, runtime, plugins));
     };
+    let base: AgentTool[] = [], after: AgentTool[] = [];
+    this.validators.push(plugins => { build(plugins, base, after); });
+    return (builtins, following = []) => { base = builtins; after = following; return build(this.plugins, builtins, following); };
   }
-  decorate(original: AgentTool, runtime: ToolRuntime): AgentTool {
+  decorate(original: AgentTool, runtime: ToolRuntime, plugins = this.plugins): AgentTool {
     let result = original;
-    for (const plugin of this.plugins) if (this.enabled(plugin) && plugin.decorateTool) {
+    for (const plugin of plugins) if (this.enabled(plugin) && plugin.decorateTool) {
       const decorated = plugin.decorateTool(result, runtime);
       if (decorated.name !== result.name) throw new Error(`Plugin ${plugin.id} cannot rename tool ${result.name}.`);
       if (decorated === result) continue;
       result = { ...decorated, execute: async (...args: Parameters<AgentTool['execute']>) => {
         runtime.check(args[2]);
-        if (this.stopping || !this.enabled(plugin)) throw new Error(`Plugin ${plugin.id} is disabled or stopping.`);
+        if (this.stopping || !this.plugins.includes(plugin) || !this.enabled(plugin)) throw new Error(`Plugin ${plugin.id} is disabled, reloaded, or stopping.`);
         return decorated.execute(...args);
       } };
     }
@@ -142,10 +172,18 @@ export class PluginHost {
     if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.resolveMedia(item)]));
     return value;
   }
-  async start() {
+  async start(onError?: (plugin: LifePlugin, error: unknown) => void) {
     if (this.started || this.stopping) throw new Error('The plugins have already started or stopped.');
     this.started = true;
-    for (const plugin of this.plugins) if (this.enabled(plugin)) await plugin.start?.();
+    for (const plugin of [...this.plugins]) if (this.enabled(plugin)) {
+      try { await plugin.start?.(); }
+      catch (error) {
+        if (!onError) throw error;
+        this.plugins = this.plugins.filter(item => item !== plugin);
+        try { await waitFor(Promise.resolve(plugin.stop?.()), AbortSignal.timeout(5000)); } catch { /* the original startup error is reported */ }
+        onError(plugin, error);
+      }
+    }
   }
   stop(): Promise<void> { return this.stopping ??= this.stopAll(); }
   private async stopAll() {
