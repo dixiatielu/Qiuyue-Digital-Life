@@ -8,9 +8,11 @@ import { PluginsPage } from './pages/plugins.js';
 import { PersonaPage } from './pages/persona.js';
 import { PromptPage } from './pages/prompt.js';
 import { ModelsPage } from './pages/models.js';
+import { GalleryPage } from './pages/gallery.js';
 
 const pages = () => [
   ['overview', t('Overview', '状态总览'), Overview],
+  ['gallery', t('Gallery', '作品库'), GalleryPage],
   ['config', t('Configuration', '运行配置'), ConfigPage],
   ['plugins', t('Capabilities', '能力与插件'), PluginsPage],
   ['persona', t('Persona & growth', '人格与成长'), PersonaPage],
@@ -58,7 +60,7 @@ function App({ initial }) {
       <a class="brand" href="#/overview"><span class="brand-moon" aria-hidden="true"></span><span>${t('Qiuyue', '洛秋月')}<small>A CONTINUING LIFE</small></span></a>
       <nav aria-label=${t('Main navigation', '主导航')}>
         ${pages().map(([id, label], index) => html`<${Fragment} key=${id}>
-          ${index < 2 ? html`<div class="nav-label">${index === 0 ? t('DAY TO DAY', '日常与观察') : t('SETTINGS', '设定与管理')}</div>` : null}
+          ${index === 0 || id === 'config' ? html`<div class="nav-label">${index === 0 ? t('DAY TO DAY', '日常与观察') : t('SETTINGS', '设定与管理')}</div>` : null}
           <a href=${`#/${id}`} class=${id === entry[0] ? 'active' : ''} aria-current=${id === entry[0] ? 'page' : undefined}><${Icon} name=${id} />${label}</a>
         <//>`)}
       </nav>

@@ -8,6 +8,8 @@ import type { SemanticRecall } from '../src/recall.js';
 import { PluginHost, type LifePlugin } from '../src/plugins.js';
 import { createPlugins } from '../src/plugins/index.js';
 import { snowlumaToolsPlugin } from '../src/plugins/snowluma-tools.js';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 export function config() {
   const value = loadConfig(new URL('../config.example.json', import.meta.url).pathname);
@@ -25,6 +27,7 @@ export function deferred<T = void>() {
 }
 export function fixture(social?: SocialAdapter, existingStore?: Store, recall?: SemanticRecall, extensions?: (store: Store, cfg: ReturnType<typeof config>) => LifePlugin[]) {
   const cfg = config(); const store = existingStore ?? new Store(':memory:');
+  cfg.drawing.dir = join(tmpdir(), `qiuyue-fixture-images-${crypto.randomUUID()}`);
   const sent: { kind: string; args: Record<string, unknown> }[] = [];
   const adapter = social ?? { execute: async (kind: string, args: Record<string, unknown>) => { sent.push({ kind, args }); return kind === 'get_msg' ? { group_id: 100, message_type: 'group', message_id: -42 } : { message_id: -42 }; } };
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);

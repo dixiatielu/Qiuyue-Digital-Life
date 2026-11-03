@@ -19,6 +19,7 @@ import { inspectConfig } from './inspect.js';
 import { ProviderProfiles, catalog, remoteModels, testEmbedding, testModel, type ProviderProfile } from './providers.js';
 import { LifeReader } from './reader.js';
 import { loginPage } from './login.js';
+import { drawingIdPattern, validateDrawingPatch, validateDrawingQuery, type DrawingQuery } from '../plugins/gallery-store.js';
 
 const publicDir = resolve(fileURLToPath(new URL('./public/', import.meta.url)));
 const modulesDir = resolve(fileURLToPath(new URL('../../node_modules/', import.meta.url)));
@@ -186,6 +187,27 @@ export class WebUi {
     });
     this.on('GET', '/api/snowluma', () => ({ source: snowlumaCatalogSource, actions: snowlumaCatalog.map(action => ({ name: action.name, category: action.category, summary: action.summary, readOnly: action.readOnly })) }));
 
+    this.on('GET', '/api/gallery', ({ url }) => {
+      const query: DrawingQuery = { limit: 24 };
+      for (const key of ['query', 'from', 'to', 'person', 'conversation'] as const) if (url.searchParams.has(key)) query[key] = url.searchParams.get(key)!;
+      for (const key of ['favorite', 'archived', 'includeArchived', 'includeDeleted', 'needsDescription'] as const) if (url.searchParams.has(key)) {
+        const value = url.searchParams.get(key); if (value !== 'true' && value !== 'false') throw new HttpError(400, `Invalid ${key}.`); query[key] = value === 'true';
+      }
+      for (const key of ['limit', 'offset'] as const) if (url.searchParams.has(key)) query[key] = Number(url.searchParams.get(key));
+      if (url.searchParams.has('tag')) query.tags = url.searchParams.getAll('tag');
+      validateDrawingQuery(query);
+      return this.reader.drawings(this.drawingDirectory(), query);
+    });
+    this.on('GET', '/api/gallery/:id', ({ params }) => {
+      const item = this.reader.drawing(this.drawingDirectory(), decodeURIComponent(params[0]!));
+      if (!item) throw new HttpError(404, 'Drawing not found.'); return item;
+    });
+    this.on('PUT', '/api/gallery/:id', ({ params, body }) => {
+      validateDrawingPatch(body.changes);
+      return this.manageDrawing('update', decodeURIComponent(params[0]!), body);
+    });
+    this.on('DELETE', '/api/gallery/:id', ({ params, body }) => this.manageDrawing('delete', decodeURIComponent(params[0]!), body));
+
     this.on('GET', '/api/development', () => this.reader.development());
     this.on('GET', '/api/memory/:id', ({ params }) => this.reader.memory(decodeURIComponent(params[0]!)) ?? null);
     this.on('POST', '/api/memory/:id/correct', ({ params, body }) => {
@@ -215,6 +237,19 @@ export class WebUi {
   private kind(value: string): HistoryKind {
     if (!(historyKinds as string[]).includes(value)) throw new HttpError(404, 'Unknown history.');
     return value as HistoryKind;
+  }
+  private drawingDirectory() {
+    let dir = 'data/drawings'; try { dir = this.files.raw().drawing?.dir ?? dir; } catch { /* saved runtime directory remains readable */ }
+    return resolve(dirname(this.files.configPath), dir);
+  }
+  private async manageDrawing(command: string, id: string, body: any) {
+    if (!drawingIdPattern.test(id) || !Number.isSafeInteger(body.revision)) throw new HttpError(400, 'A drawing ID and revision are required.');
+    try { return await callControl(this.paths.socket, { args: ['plugins', 'manage', 'gallery', command, JSON.stringify({ id, revision: body.revision, changes: body.changes })] }); }
+    catch (error) {
+      if (/drawing changed/i.test(errorText(error))) throw new HttpError(409, errorText(error));
+      if (['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) throw new HttpError(409, 'Start the daemon with the gallery plugin to organize works. Browsing remains available.');
+      throw error;
+    }
   }
   /** What a saved persona or prompt means for the next start. */
   private after() {
@@ -301,6 +336,15 @@ export class WebUi {
         if (origin && new URL(origin).host !== request.headers.host) throw new HttpError(403, 'Cross-site requests are refused.');
       }
       if (url.pathname === '/api/live' && method === 'GET') return this.live(request, response);
+      const drawingImage = /^\/api\/gallery\/([^/]+)\/image$/.exec(url.pathname);
+      if (drawingImage && method === 'GET') {
+        const id = decodeURIComponent(drawingImage[1]!);
+        if (!drawingIdPattern.test(id)) throw new HttpError(404, 'Drawing not found.');
+        const picture = this.reader.drawingImage(this.drawingDirectory(), id, url.searchParams.get('thumbnail') === 'true');
+        if (!picture) throw new HttpError(404, 'The image is missing or deleted.');
+        const extension = picture.mimeType === 'image/jpeg' ? 'jpg' : picture.mimeType === 'image/webp' ? 'webp' : 'png';
+        return send(response, 200, picture.data, picture.mimeType, url.searchParams.get('download') === 'true' ? { 'Content-Disposition': `attachment; filename="${id.slice(8)}.${extension}"` } : {});
+      }
       for (const route of this.routes) {
         const match = route.method === method && route.pattern.exec(url.pathname);
         if (!match) continue;

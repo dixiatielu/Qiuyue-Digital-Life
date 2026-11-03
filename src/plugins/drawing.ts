@@ -1,12 +1,11 @@
 import { environmentCredential, type CredentialReader } from '../credentials.js';
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { Type } from 'typebox';
 import type { Config } from '../config.js';
 import { errorText } from '../domain.js';
 import { eventRef, type Store } from '../store.js';
 import type { LifePlugin } from '../plugins.js';
 import { ui } from '../ui-language.js';
+import { DrawingLibrary, type DrawingSource } from './gallery-store.js';
 
 /** Paints one picture from a description. */
 export interface Painter { readonly model: string; paint(prompt: string, signal?: AbortSignal): Promise<Buffer> }
@@ -43,7 +42,7 @@ export function imageType(data: Buffer): string | undefined {
   if (data.subarray(0, 4).toString('latin1') === 'RIFF' && data.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
 }
 const drawingId = /^drawing:([0-9a-f-]{36})$/;
-type UnderWay = Record<string, { prompt: string; startedAt: number }>;
+type UnderWay = Record<string, { prompt: string; startedAt: number; model?: string; sources?: string[]; context?: DrawingSource[] }>;
 
 /**
  * Drawings (ADR-0018): each is painted apart from the thought that started it, since painting takes half a minute or more, and comes back
@@ -53,25 +52,26 @@ export class Drawings {
   private running = new Map<string, AbortController>();
   private work = new Set<Promise<void>>();
   private stopping = false;
-  constructor(private store: Store, private painter: Painter, private dir: string, private retentionDays: number) {}
+  private library: DrawingLibrary;
+  constructor(private store: Store, private painter: Painter, dir: string) { this.library = new DrawingLibrary(store.db, dir); }
   start(prompt: string, sources: string[]) {
     if (this.stopping) throw new Error('The program is shutting down; drawing is unavailable.');
     const id = `drawing:${crypto.randomUUID()}`; const startedAt = Date.now();
+    const context = this.library.sources(sources);
     // Kept until it finishes, so a drawing a restart cut short is reported rather than awaited forever.
-    this.store.setSetting('drawingsUnderWay', { ...this.store.setting<UnderWay>('drawingsUnderWay', {}), [id]: { prompt, startedAt } });
+    this.store.setSetting('drawingsUnderWay', { ...this.store.setting<UnderWay>('drawingsUnderWay', {}), [id]: { prompt, startedAt, model: this.painter.model, sources, context } });
     const controller = new AbortController(); this.running.set(id, controller);
-    const work = this.paint(id, prompt, startedAt, sources, controller.signal).finally(() => { this.running.delete(id); this.work.delete(work); });
+    const work = this.paint(id, prompt, startedAt, sources, context, controller.signal).finally(() => { this.running.delete(id); this.work.delete(work); });
     this.work.add(work);
     return { drawingId: id, status: 'drawing' };
   }
-  private async paint(id: string, prompt: string, startedAt: number, sources: string[], signal: AbortSignal) {
+  private async paint(id: string, prompt: string, startedAt: number, sources: string[], context: DrawingSource[], signal: AbortSignal) {
     let failure: string | undefined;
     try {
       const data = await this.painter.paint(prompt, signal);
       const type = imageType(data);
       if (!type) throw new Error('The image endpoint returned data that is not a PNG, JPEG, or WebP image.');
-      mkdirSync(this.dir, { recursive: true });
-      writeFileSync(join(this.dir, `${drawingId.exec(id)![1]}.${extensions[type]}`), data);
+      await this.library.save(id, data, extensions[type]!, { prompt, model: this.painter.model, createdAt: Date.now(), sources: context });
     } catch (error) {
       // Cut short by shutdown, it stays under way and is reported at the next start.
       if (this.stopping) return;
@@ -87,27 +87,25 @@ export class Drawings {
     const text = failure === undefined
       ? `Your drawing ${id} is finished; it follows as an image. Its description was: ${prompt}\nTo send or use it, put ${id} where an image file goes: the file of an image segment in send_group_msg or send_private_msg, an entry of images in send_qzone_msg, or the file of add_custom_face.`
       : `Your drawing ${id} could not be finished: ${failure}\nIts description was: ${prompt}`;
-    this.store.receive({ key: id, kind: 'drawing', at: Date.now(), text, payload: { origin: 'self', drawingId: id, prompt, startedAt, sources, ...(failure !== undefined ? { error: failure } : {}) } });
+    this.store.receive({ key: id, kind: 'drawing', at: Date.now(), text, payload: { origin: 'self', drawingId: id, prompt, model: this.library.get(id)?.model, startedAt, sources, ...(failure !== undefined ? { error: failure } : {}) } });
   }
-  /** Report drawings a restart cut short, and remove files older than retention, whose events are gone. */
-  recover() {
+  /** Keep completed images across event retention, and reconcile interrupted work with durable files. */
+  async recover() {
+    this.library.initialize();
     const underWay = this.store.setting<UnderWay>('drawingsUnderWay', {});
+    for (const [id, item] of Object.entries(underWay)) {
+      const picture = this.library.image(id);
+      if (picture && !this.library.get(id)) await this.library.save(id, picture.data, extensions[picture.mimeType]!, {
+        prompt: item.prompt, model: item.model ?? '', createdAt: item.startedAt, sources: item.context ?? this.library.sources(item.sources ?? []),
+      });
+    }
     this.store.transaction(() => {
-      for (const [id, { prompt, startedAt }] of Object.entries(underWay)) this.finish(id, prompt, startedAt, [], 'The program restarted while it was being painted.');
+      for (const [id, { prompt, startedAt, sources }] of Object.entries(underWay)) this.finish(id, prompt, startedAt, sources ?? [], this.library.image(id) ? undefined : 'The program restarted while it was being painted.');
       this.store.setSetting('drawingsUnderWay', {});
     });
-    let names: string[] = [];
-    try { names = readdirSync(this.dir); } catch { return; }
-    const before = Date.now() - this.retentionDays * 86_400_000;
-    for (const name of names) { const path = join(this.dir, name); if (statSync(path).mtimeMs < before) rmSync(path, { force: true }); }
   }
-  image(id: string): { data: Buffer; mimeType: string } | undefined {
-    const uuid = drawingId.exec(id)?.[1];
-    if (!uuid) return;
-    for (const [mimeType, extension] of Object.entries(extensions)) {
-      try { return { data: readFileSync(join(this.dir, `${uuid}.${extension}`)), mimeType }; } catch {}
-    }
-  }
+  image(id: string) { return this.library.image(id); }
+  markSeen(id: string) { this.library.markSeen(id); }
   async stop() { this.stopping = true; for (const controller of this.running.values()) controller.abort(); await Promise.allSettled(this.work); }
   async idle() { await Promise.allSettled(this.work); }
 }
@@ -126,7 +124,7 @@ export function drawingPlugin(drawings: Drawings, enabled: () => boolean = () =>
     images: event => {
       if (event.kind !== 'drawing') return [];
       const id = String(event.payload.drawingId); const ref = eventRef(event.id);
-      return [{ label: `The following is your drawing ${id} from ${ref}`, unavailable: `The drawing has no picture, or its file has been removed: ${id}.`, deferred: `Your drawing ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.`, autoView: event.payload.error === undefined, load: () => drawings.image(id) }];
+      return [{ label: `The following is your drawing ${id} from ${ref}`, unavailable: `The drawing has no picture, or its file has been removed: ${id}.`, deferred: `Your drawing ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.`, autoView: event.payload.error === undefined, load: () => drawings.image(id), onShown: () => drawings.markSeen(id) }];
     },
     resolveMedia: value => {
       if (!drawingId.test(value)) return;

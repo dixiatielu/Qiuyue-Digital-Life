@@ -1,3 +1,4 @@
+import { DrawingLibrary } from '../src/plugins/gallery-store.js';
 import type { CredentialReader } from '../src/credentials.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -195,7 +196,7 @@ test('image generation finishes before disabling its plugin, without being repor
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-reload-drawing-')), painting = deferred<Buffer>();
   const f = fixture(undefined, undefined, undefined, (store, cfg) => {
     cfg.drawing = { ...cfg.drawing, enabled: true, dir, baseUrl: 'https://images.example/v1', model: 'test' };
-    return [drawingPlugin(new Drawings(store, { model: 'test', paint: () => painting.promise }, dir, 90), () => true)];
+    return [drawingPlugin(new Drawings(store, { model: 'test', paint: () => painting.promise }, dir), () => true)];
   });
   f.cfg.extensions.directory = join(dir, 'plugins');
   const saved = structuredClone(f.cfg); saved.plugins.drawing = false;
@@ -323,5 +324,31 @@ test('reloading a plugin refreshes its credential snapshot without changing core
     await h.manager.start(); assert.equal((await h.execute('key_check')).changed, false);
     key = 'rotated-test-key'; h.manager.request(['reload', 'key-check']); await h.manager.settled();
     assert.equal(h.manager.job?.contextReset, false); assert.equal((await h.execute('key_check')).changed, true);
+  } finally { await h.close(); }
+});
+
+test('gallery reload retains organized works and vectors, revokes old tools, and survives generation being disabled', async () => {
+  const h = harness();
+  h.cfg.drawing.dir = join(h.dir, 'images'); h.saved.drawing.dir = h.cfg.drawing.dir;
+  try {
+    await h.manager.start();
+    h.manager.request(['reload', 'gallery']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done');
+    const library = new DrawingLibrary(h.store.db, h.cfg.drawing.dir), key = `drawing:${crypto.randomUUID()}`;
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+    await library.save(key, png, 'png', { prompt: '雨夜', model: 'test', createdAt: Date.now(), sources: [] });
+    library.update(key, { title: '雨夜街景', tags: ['夜景'] });
+    library.saveVector(library.get(key)!, 'test-vectors', new Float32Array([1, 0]));
+    const old = h.tools.current().find(tool => tool.name === 'search_drawings')!;
+    h.manager.request(['reload', 'gallery']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done'); assert.equal(h.manager.job?.contextReset, false);
+    assert.equal((await h.execute('search_drawings', { query: '雨夜' })).items[0].id, key);
+    assert.equal(library.similar('test-vectors', new Float32Array([1, 0]), 0.7).size, 1);
+    await assert.rejects(old.execute('stale', {}), /old version|reloaded/);
+    h.saved.plugins.gallery = false; h.manager.request(['reload', 'gallery']); await h.manager.settled();
+    assert.ok(!h.tools.current().some(tool => tool.name === 'view_drawing')); assert.deepEqual(library.image(key)?.data, png);
+    h.saved.plugins.gallery = true; h.manager.request(['reload', 'gallery']); await h.manager.settled();
+    assert.equal((await h.execute('search_drawings', {})).items[0].id, key);
+    assert.equal(h.cfg.drawing.enabled, false);
   } finally { await h.close(); }
 });

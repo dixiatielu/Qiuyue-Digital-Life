@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import type { Memory } from '../domain.js';
 import { developmentKinds } from '../domain.js';
+import { DrawingLibrary, type DrawingQuery } from '../plugins/gallery-store.js';
 
 type Row = Record<string, any>;
 const parse = (value: unknown) => JSON.parse(String(value));
@@ -25,6 +26,16 @@ export class LifeReader {
     try { db.exec('PRAGMA busy_timeout=2000'); return work(db); } finally { db.close(); }
   }
   private setting(db: DatabaseSync, key: string) { const row = db.prepare('SELECT value FROM settings WHERE key=?').get(key); return row ? parse(row.value) : undefined; }
+  private gallery<T>(dir: string, work: (library: DrawingLibrary) => T, fallback: T) {
+    return this.read(db => work(new DrawingLibrary(db, this.setting(db, 'galleryDirectory') ?? dir)), fallback);
+  }
+  drawings(dir: string, query: DrawingQuery) {
+    return this.gallery(dir, library => ({ ...library.search(query), stats: library.stats() }), { items: [], total: 0, nextOffset: null, stats: { total: 0, bytes: 0, archived: 0, missing: 0, needsDescription: 0 } });
+  }
+  drawing(dir: string, id: string) { return this.gallery(dir, library => library.detail(id), undefined); }
+  drawingImage(dir: string, id: string, thumbnail = false) {
+    return this.gallery(dir, library => library.get(id) ? library.image(id, thumbnail) : undefined, undefined);
+  }
   daemon(): { pid: number } | undefined { return this.read(db => this.setting(db, 'daemon'), undefined); }
   /** The working context the next start would continue, if its identity and the current management generation still match. */
   workingContext(): { identity: string; generation: number; current: boolean; updatedAt: number } | undefined {

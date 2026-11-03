@@ -24,7 +24,8 @@ function fingerprint(id: string, config: Config): string {
   const enabled = config.plugins[id] ?? true;
   if (!builtin(id)) return digest({ enabled, settings: config.extensions.settings[id] ?? {} });
   switch (id) {
-    case 'drawing': return digest({ enabled, drawing: config.drawing, retention: config.memory.retentionDays });
+    case 'drawing': return digest({ enabled, drawing: config.drawing });
+    case 'gallery': return digest({ enabled, dir: config.drawing.dir, drawing: config.drawing.enabled, generator: config.plugins.drawing, embedding: config.embedding });
     case 'web-reader': case 'web-search': return digest({ enabled, web: config.web });
     case 'qq-stickers': return digest({ enabled, native: config.plugins['snowluma-tools'] ?? true, permissions: config.snowluma.tools, embedding: config.embedding });
     default: return digest({ enabled, permissions: config.snowluma.tools });
@@ -107,6 +108,12 @@ export class PluginManager {
   }
   request(args: string[]) {
     if (args.length === 0 || (args.length === 1 && ['list', 'status'].includes(args[0]!))) return this.status();
+    if (args[0] === 'manage' && args.length === 4) {
+      if (!this.ready || this.stopped || this.operation) throw new Error('Plugin management is unavailable while starting, stopping, or reloading.');
+      const input = JSON.parse(args[3]!);
+      if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Plugin command arguments must be an object.');
+      return this.host.manage(args[1]!, args[2]!, input);
+    }
     if (args[0] !== 'reload' || args.length > 2) throw new Error('Usage: plugins list | plugins reload [ID|all]');
     const target = args[1] ?? 'all';
     if (target !== 'all' && !validPluginId(target)) throw new Error('Invalid plugin ID.');

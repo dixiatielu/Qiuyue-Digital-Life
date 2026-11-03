@@ -14,6 +14,8 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   // The faux provider's usage omits tool schemas. Keep this pressure fixture
   // small and test the complete catalog separately at the actual request seam.
   f.cfg.snowluma.tools = { allow: ['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'get_group_member_info'], deny: [] };
+  // This fixed-size pressure scenario exercises core exchanges, independently of optional gallery tools.
+  f.cfg.plugins.gallery = false;
   f.restart();
   // Leaves the same headroom after the fixed instructions and tools grew by about 730 tokens with development (ADR-0012)
   // and 60 more when view_event_image learned to read URLs in tool results, and 430 more with pursuits: 620 more window, since idle compaction starts at 0.7 of the budget.

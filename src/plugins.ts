@@ -50,6 +50,8 @@ export interface LifePlugin {
   /** Stop scheduling background work while a replacement is prepared; return a resume function. */
   quiesce?(): () => void;
   idle?(): Promise<void>;
+  /** Operator-only commands, dispatched by the daemon; never exposed as model tools. */
+  manage?(command: string, args: Record<string, any>): unknown;
 }
 
 export class PluginHost {
@@ -76,6 +78,11 @@ export class PluginHost {
   /** The caller has drained both brains and started the candidates before this synchronous commit. */
   install(plugins: readonly LifePlugin[]) { this.validate(plugins); this.plugins = plugins; }
   enabledIds(): string[] { return this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.id); }
+  manage(id: string, command: string, args: Record<string, any>) {
+    const plugin = this.plugins.find(plugin => plugin.id === id);
+    if (this.stopping || !plugin || !this.enabled(plugin) || !plugin.manage) throw new Error(`Plugin ${id} is unavailable for management.`);
+    return plugin.manage(command, args);
+  }
   /** Bind once per thinking process; the primary process and review share plugin lifetimes, not thought state. */
   bind(runtime: ToolRuntime): (builtins: AgentTool[], following?: AgentTool[]) => AgentTool[] {
     const cache = new WeakMap<LifePlugin, PluginTool[]>();

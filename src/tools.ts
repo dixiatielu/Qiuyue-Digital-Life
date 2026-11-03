@@ -45,6 +45,7 @@ export function createTools(config: Config, store: Store, social: SocialAdapter,
           if (!picture) throw new Error(provided.unavailable);
           ensureCurrent(store, context(), signal);
           context().sources.add(event.id);
+          provided.onShown?.();
           return { content: [{ type: 'text', text: provided.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType }], details: {} };
         }
         let url: unknown;

@@ -1,3 +1,4 @@
+import { DrawingLibrary } from '../src/plugins/gallery-store.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -331,4 +332,41 @@ test('capabilities show daemon versions and schema, and apply saved settings thr
     assert.equal(after.body.running.plugins.find((item: any) => item.id === 'clock').state, 'disabled');
     assert.ok(!tools.current().some(tool => tool.name === 'clock_read'));
   } finally { await manager.stop(); await runtime.stop(); await host.stop(); server.closeClients(); await new Promise<void>(resolve => server.close(() => resolve())); store.close(); }
+}));
+
+test('gallery APIs browse offline, authenticate images, and send versioned edits only through the active plugin', () => page(async (call, dir, port) => {
+  const path = join(dir, 'config.json'), cfg = loadConfig(path), store = new Store(cfg.database);
+  const social = { execute: async () => ({}) }, host = createPlugins(cfg, store, social);
+  const brain = { thought: { generation: 0, sources: new Set<string>(), triggers: new Set<string>(), lifeOnly: false }, streaming: false, run: async () => {}, review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {} };
+  const runtime = new LifeRuntime(cfg, store, brain, brain);
+  const manager = new PluginManager(cfg, host, store, social, () => loadConfig(path), () => undefined); manager.connect(runtime, () => false);
+  const library = new DrawingLibrary(store.db, cfg.drawing.dir), key = `drawing:${crypto.randomUUID()}`;
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+  await library.save(key, png, 'png', { prompt: '猫咪', model: 'test', createdAt: Date.now(), sources: [] });
+  const route = `/api/gallery/${encodeURIComponent(key)}`;
+  let server: Awaited<ReturnType<typeof serveControl>> | undefined;
+  try {
+    assert.equal((await call('/api/gallery')).body.total, 1);
+    assert.equal((await call('/api/gallery?offset=-1')).status, 400);
+    assert.equal((await call(route + '/image', { headers: { Authorization: '' } })).status, 401);
+    const image = await fetch(`http://127.0.0.1:${port}${route}/image?download=true`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(image.status, 200); assert.match(image.headers.get('content-disposition')!, /attachment/); assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
+    assert.equal((await call(route, { method: 'PUT', body: { revision: 1, changes: { title: 'offline' } } })).status, 409);
+    assert.equal(library.get(key)?.title, '');
+    server = await serveControl(cfg.socket, request => handleControl(store, request, runtime, manager)); await manager.start();
+    assert.equal((await call(route, { method: 'PUT', body: { revision: 1, changes: { title: '橘猫', tags: ['水彩'] } }, headers: { Origin: 'http://foreign.example' } })).status, 403);
+    assert.equal((await call(route, { method: 'PUT', body: { revision: 1, changes: { title: '橘猫', tags: ['水彩'] } } })).status, 200);
+    assert.equal((await call('/api/gallery?query=橘猫&tag=水彩')).body.items[0].id, key);
+    assert.equal((await call(route, { method: 'PUT', body: { revision: 1, changes: { title: 'stale' } } })).status, 409);
+    assert.equal((await call(route, { method: 'DELETE', body: { revision: 1 } })).status, 409);
+    assert.equal((await call(route, { method: 'DELETE', body: { revision: 2 } })).status, 200);
+    assert.equal((await call(route + '/image')).status, 404);
+    assert.equal((await call('/api/gallery')).body.total, 0);
+    assert.ok((await call(route)).body.deletedAt);
+    const other = `drawing:${crypto.randomUUID()}`; await library.save(other, png, 'png', { prompt: 'next', model: 'test', createdAt: Date.now(), sources: [] });
+    cfg.plugins.gallery = false;
+    assert.equal((await call(`/api/gallery/${encodeURIComponent(other)}`, { method: 'PUT', body: { revision: 1, changes: { title: 'disabled' } } })).status, 400);
+    assert.equal(library.get(other)?.title, '');
+    assert.equal((await call('/api/gallery')).body.total, 1, 'operator can still browse disabled gallery');
+  } finally { await manager.stop(); await runtime.stop(); await host.stop(); server?.closeClients(); if (server) await new Promise<void>(resolve => server!.close(() => resolve())); store.close(); }
 }));

@@ -148,6 +148,10 @@ _Avoid_: quiet hours fixed by the operator, Agent pause
 A picture the digital life paints from its own description, as it likes or because someone asked and it chose to. It is painted apart from the thought that started it and comes back as an environment event with the picture, which the digital life sees before deciding whether to send, post, or keep it.
 _Avoid_: an image-generation service for group members, an automatic reply
 
+**Gallery**:
+The digital life's lasting collection of its own generated images, with their creation context, its descriptions and notes, and where it has used them. Archiving a work keeps it in the collection while setting it aside from ordinary browsing.
+_Avoid_: a collection of other people's images, a separate gallery identity for each group, temporary chat attachments
+
 **Action**:
 An external behavior autonomously selected by the digital life, including sending messages, reacting with emoji, and poking someone.
 _Avoid_: a mandatory reply

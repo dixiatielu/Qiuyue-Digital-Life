@@ -8,6 +8,7 @@ function describe(id, value, allowed) {
   const has = path => value(path);
   const web = has('web.enabled');
   return ({
+    gallery: { name: t('Gallery', '作品库'), text: t('Keeps generated images for the long term. Search by description, view originals, organize and reuse them. Available even when image generation is off.', '长期保存自己创作的图片，按内容检索、看图、整理和复用。关闭新图生成后仍然可用。'), needs: [[null, t('Embedding is optional; keyword search works without it.', '语义检索可选；未开启 embedding 时仍可按关键词查找。')]] },
     drawing: { name: t('Drawing', '画画'), text: t('Draws through an OpenAI-compatible /images/generations endpoint; a finished drawing comes back to her as an observation, and she sends it by its ID.', '通过兼容 OpenAI 的 /images/generations 接口作画；画好后作为观察回到她那里，再按 ID 发送。'),
       needs: [[has('drawing.enabled'), t('drawing.enabled on the models page', '模型页开启 drawing.enabled')], [Boolean(has('drawing.baseUrl') && has('drawing.model')), t('an image endpoint and model', '图像接口地址和模型')]] },
     'web-search': { name: t('Web search', '联网搜索'), text: t('Searches the web for public information through the configured search endpoint.', '通过配置的搜索接口检索公开信息。'),

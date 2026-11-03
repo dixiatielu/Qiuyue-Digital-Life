@@ -13,15 +13,17 @@ import { stickersPlugin } from './stickers.js';
 import type { SocialAdapter } from '../snowluma.js';
 import { FaceCatalog, qqFacesPlugin } from './faces.js';
 import { snowlumaToolsPlugin } from './snowluma-tools.js';
+import { galleryPlugin } from './gallery.js';
 
-export const pluginIds = ['drawing', 'web-search', 'web-reader', 'qzone-share', 'qq-stickers', 'qq-faces', 'snowluma-tools'] as const;
+export const pluginIds = ['drawing', 'web-search', 'web-reader', 'qzone-share', 'qq-stickers', 'qq-faces', 'snowluma-tools', 'gallery'] as const;
 export type BuiltinPluginId = typeof pluginIds[number];
 // Retain the historical tool order: it participates in working-context identity.
-const pluginOrder: BuiltinPluginId[] = ['qzone-share', 'drawing', 'web-reader', 'web-search', 'qq-stickers', 'qq-faces', 'snowluma-tools'];
+const pluginOrder: BuiltinPluginId[] = ['qzone-share', 'drawing', 'web-reader', 'web-search', 'qq-stickers', 'qq-faces', 'snowluma-tools', 'gallery'];
 export function createBuiltinPlugin(id: BuiltinPluginId, config: Config, store: Store, social: SocialAdapter, semantics?: SemanticSource, credential: CredentialReader = environmentCredential) {
   switch (id) {
     case 'qzone-share': return qzoneSharePlugin(config);
-    case 'drawing': return drawingPlugin(new Drawings(store, new ImageClient(config.drawing, fetch, credential), config.drawing.dir, config.memory.retentionDays), () => drawingEnabled(config));
+    case 'drawing': return drawingPlugin(new Drawings(store, new ImageClient(config.drawing, fetch, credential), config.drawing.dir), () => drawingEnabled(config));
+    case 'gallery': return galleryPlugin(config, store, semantics);
     case 'web-reader': return webReaderPlugin(config);
     case 'web-search': return webSearchPlugin(config, credential);
     case 'qq-stickers': {

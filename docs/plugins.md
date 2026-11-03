@@ -1,6 +1,6 @@
 # Plugin development
 
-A plugin supplies one capability, including its tools and the hooks needed to participate in the digital life's experiences. Built-in plugins are `drawing`, `web-search`, `web-reader`, `qzone-share`, `qq-stickers`, `qq-faces`, and `snowluma-tools`. User plugins live in `plugins/<id>/` beside `config.json` and load without editing or rebuilding the program. Plugin settings and user code can be reloaded while the daemon keeps receiving events.
+A plugin supplies one capability, including its tools and the hooks needed to participate in the digital life's experiences. Built-in plugins are `gallery`, `drawing`, `web-search`, `web-reader`, `qzone-share`, `qq-stickers`, `qq-faces`, and `snowluma-tools`. User plugins live in `plugins/<id>/` beside `config.json` and load without editing or rebuilding the program. Plugin settings and user code can be reloaded while the daemon keeps receiving events.
 
 The public v1 interface is [`src/plugin-sdk.ts`](../src/plugin-sdk.ts). The internal interface and host live in `src/plugins.ts`; built-in implementations live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and shared execution rules remain built in. QQ native tool registration and platform-specific life hints live in `src/plugins/snowluma-tools.ts`; the SnowLuma connection and recovery adapter remains in `src/snowluma.ts`.
 
@@ -103,6 +103,7 @@ The existing endpoint configuration is retained:
 
 | Plugin | Additional requirements |
 | --- | --- |
+| `gallery` | Defaults on; independent of generation. Embedding is optional for meaning-based search |
 | `drawing` | `drawing.enabled`, an image endpoint and model |
 | `web-search` | `web.enabled`, a search endpoint and its credential |
 | `web-reader` | `web.enabled`; no search credential required |
@@ -181,3 +182,11 @@ The sticker plugin owns its collection queries and vector table in `stickers-sto
 `chatActions` and `chatTarget(tool, args)` identify the chat engaged by a tool call, allowing new addressed messages there to influence the ongoing thought. `staleActions` selects calls that should be skipped if a newer addressed message arrived in their target chat before execution. `endsThought` identifies successful social actions that need no follow-up call. The QQ plugin supplies these rules for its native sends, reactions, and pokes; the brain performs the generic steering and interruption logic. These declarations do not create another Agent or an independent focus of attention.
 
 Use `test/plugins.test.ts` for examples of exercising a new plugin through its tools, observations, media references, and life wakes without adding capability-specific branches to the brain.
+
+## Gallery lifecycle
+
+`gallery` owns `search_drawings`, `view_drawing`, `update_drawing`, its catalog and vector tables, legacy migration, and background indexing. Its constructor and tool binding do not write state or start work. Activation migrates old files and events; `quiesce` suspends indexing, `idle` drains the active request, failed reload resumes it, and `stop` cancels it and releases subscriptions. A late vector cannot restore a deleted work or overwrite an edited description. Indexing reuses `SemanticSource`; no separate embedding credentials or service is introduced.
+
+The generator writes durable gallery records even when gallery tools are disabled. Turning off `drawing` or `drawing.enabled` leaves `gallery` and its media resolution available; turning off `gallery` keeps its records and files. Completion images are supplied once, by the generator when active and otherwise by the gallery. `onShown` marks actual observation or explicit viewing, not a deferred image.
+
+Built-in plugins may expose an operator-only `manage(command, args)` hook. `plugins manage ID COMMAND JSON` dispatches through the active host and rejects requests while reload or shutdown is under way. These are not model tools or part of the public user SDK v1. The gallery accepts revision-checked `update` and `delete` commands; the webpage reads through `LifeReader` and never falls back to direct database writes.

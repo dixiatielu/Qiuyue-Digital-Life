@@ -1,6 +1,7 @@
 import { html } from './lib.js';
 const paths = {
   overview: 'M3 10l9-7 9 7M5 9v11h14V9M9 20v-7h6v7',
+  gallery: 'M3 3h18v18H3zM3 16l5-5 5 5 3-3 5 5M15 7h.01',
   config: 'M4 7h9m4 0h3M4 17h3m4 0h9M13 4v6M7 14v6',
   plugins: 'M9 3h6v4a3 3 0 1 1 4 4h2v10h-9v-3a3 3 0 1 0-6 0v3H3V11h3V7h3z',
   persona: 'M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0M5 21v-3a7 7 0 0 1 14 0v3',

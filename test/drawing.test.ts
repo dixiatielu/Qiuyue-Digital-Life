@@ -24,7 +24,7 @@ function painter() {
 function setup(social?: Parameters<typeof fixture>[0]) {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-drawings-'));
   const paint = painter(); let drawings!: Drawings;
-  const f = fixture(social, undefined, undefined, store => [drawingPlugin(drawings = new Drawings(store, paint.value, dir, 90))]);
+  const f = fixture(social, undefined, undefined, store => [drawingPlugin(drawings = new Drawings(store, paint.value, dir))]);
   f.brain.thought.lifeOnly = false;
   const run = (name: string, args: Record<string, unknown>) => f.tools.current().find(tool => tool.name === name)!.execute('call', args);
   const done = () => new Promise<void>(resolve => { const stop = f.store.subscribe(notice => { if (notice.kind === 'environment' && notice.event.kind === 'drawing') { stop(); resolve(); } }); });
@@ -112,12 +112,12 @@ test('a drawing is sent by its ID: what is sent carries the picture, and the act
   } finally { close(); }
 });
 
-test('a drawing a restart cut short is reported at the next start, and files past retention are removed', async () => {
+test('a drawing a restart cut short is reported at the next start, and old works remain available', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-drawings-recover-'));
   const store = new Store(':memory:');
   try {
     const paint = painter();
-    const first = new Drawings(store, paint.value, dir, 90);
+    const first = new Drawings(store, paint.value, dir);
     const firstHost = new PluginHost([drawingPlugin(first)]); await firstHost.start();
     const { drawingId } = first.start('A long painting', []);
     await firstHost.stop();
@@ -128,13 +128,13 @@ test('a drawing a restart cut short is reported at the next start, and files pas
     const old = join(dir, '11111111-1111-4111-8111-111111111111.png'); const recent = join(dir, '22222222-2222-4222-8222-222222222222.png');
     writeFileSync(old, png); writeFileSync(recent, png);
     const longAgo = new Date(Date.now() - 91 * 86_400_000); utimesSync(old, longAgo, longAgo);
-    const restarted = new PluginHost([drawingPlugin(new Drawings(store, paint.value, dir, 90))]);
+    const restarted = new PluginHost([drawingPlugin(new Drawings(store, paint.value, dir))]);
     await restarted.start();
     const event = store.claim(20)!.events[0]!;
     assert.deepEqual([event.kind, event.payload.drawingId], ['drawing', drawingId]);
     assert.match(String(event.payload.error), /restarted/);
     assert.deepEqual(store.setting('drawingsUnderWay'), {});
-    assert.equal(existsSync(old), false); assert.deepEqual(readFileSync(recent), png);
+    assert.deepEqual(readFileSync(old), png); assert.deepEqual(readFileSync(recent), png);
     await restarted.stop();
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
