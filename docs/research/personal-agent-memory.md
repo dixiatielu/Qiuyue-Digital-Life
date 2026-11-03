@@ -2,6 +2,8 @@
 
 Reviewed: 2026-10-27. This is research into public sources, not an implementation specification; no memory benchmarks or deployments of these products were run. Current product documentation and historical papers are identified separately, and do not establish that every installed version has the same capabilities. Memory behavior confirmed in subsequent interviews is recorded in [ADR-0006](../adr/0006-experience-understanding-and-continuing-state.md); the storage and retrieval implementation had not yet been selected.
 
+Status: historical research. The recommendation below to run memory review inside the primary thinking process was superseded by the 2026-11-02 revision of [ADR-0012](../adr/0012-self-maintained-development-alongside-the-operator-persona.md). Review now runs in its own working context with the same identity and evidence rules, while the primary process handles conversations.
+
 ## Verified mechanisms
 
 ### OpenAI Dots: continuing its own notes across channels
@@ -38,7 +40,7 @@ These mechanisms are useful references, but memory should center on the digital 
 | Long-term understanding | Preserves relationships, preferences, lessons, and impressions formed from experience | Impressions are revisable judgments and cannot overwrite the experiences supporting them |
 | Current context | Collects state and relevant memories needed for the current thought | Limited working material, not the entire life history |
 
-The recommended approach is for the same Agent to consolidate memory in its own primary thinking process, with ordinary programs handling persistence, indexing, and retrieval. Directly copying the background cognitive sub-agents of Dots, Letta, or OpenClaw would affect the [existing decision on a single primary thinking process](../adr/0002-single-attention-with-continuous-perception.md). Consolidation while resting can be the digital life's own activity, without adding another subject with independent judgment.
+The original recommendation was for the same Agent to consolidate memory in its primary thinking process, with ordinary programs handling persistence, indexing, and retrieval. The later [ADR-0012 revision](../adr/0012-self-maintained-development-alongside-the-operator-persona.md) moved review to its own working context while preserving the Agent's identity and restricting conversation Actions to the primary process. The research establishes the need for explicit identity and evidence rules; it does not prescribe the current scheduling implementation.
 
 The recommendation is to distinguish first-hand perception, others' statements, the Agent's own inferences, and fictional life narratives, while preserving time, people, social context, and evidence. Conflicts may lead to new judgments and mark old ones as revised; repeatedly retrieving an impression should not count as new independent evidence. Actual tool execution results should retain their factual status, preventing life narratives from contaminating action records. These are design recommendations based on this project's constraints, not guarantees shared by the products above.
 
@@ -46,6 +48,6 @@ These sources do not require an immediate choice of database, vector store, or g
 
 ## Decision boundaries after the research
 
-Q13–Q17 confirmed separate experience records and long-term understanding, importance judgments and consolidation by the same Agent, preservation of revisions to understanding, combined spontaneous and deliberate recall, and the rule that fading does not expire unfinished commitments. ADR-0006 governs accepted behavior; these decisions do not turn the discussion above into claims about external products' internal implementations.
+ADR-0006 records separate experience records and long-term understanding, importance judgments and consolidation by the same Agent, preservation of revisions to understanding, combined spontaneous and deliberate recall, and the rule that fading does not expire unfinished commitments. These decisions do not turn the discussion above into claims about external products' internal implementations.
 
-Subsequent Q22–Q23 also confirmed that processed raw events are retained for 90 days by default, important experiences and necessary sources are retained long term, and unprocessed events are not deleted due to that period. The management interface supports inspection, correction, and explicit deletion; deletion must also address related indexes, summaries, and dependent long-term understanding. Storage, retrieval, and acceptance criteria are selected separately.
+ADR-0006 also specifies that processed raw events are retained for 90 days by default, important experiences and necessary sources are retained long term, and unprocessed events are not deleted due to that period. The management interface supports inspection, correction, and explicit deletion; deletion must also address related indexes, summaries, and dependent long-term understanding. Storage, retrieval, and acceptance criteria are selected separately.

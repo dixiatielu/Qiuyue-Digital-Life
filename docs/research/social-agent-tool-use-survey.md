@@ -3,6 +3,8 @@
 Research date: 2026-10-28. This document records an investigation of primary documentation and source code. It is not an accepted implementation plan; no deployment, QQ login, or actual publishing was performed.
 Source-code findings are pinned to the inspected commits. Product documentation and examples do not establish the actual behavior of every current version. The sections below distinguish built-in framework capabilities, third-party plugins, and design recommendations.
 
+Status: historical research from 2026-10-28. The local gaps and proposed work below describe that snapshot. Current image access and plugin capabilities are documented in the [README](../../README.md) and [plugin guide](../plugins.md); this document is not a current list of missing features.
+
 ## Findings
 
 These projects do not share a single "digital life skills architecture." The common approach supported by the evidence is:
@@ -151,11 +153,11 @@ The following findings come from primary documentation and source checks; they d
 
 ## Luo Qiuyue's current implementation: tools exist, skill integration is missing
 
-The following is only a static workspace review dated 2026-10-28. It did not read production chats or call traces, so it cannot identify the sole cause of any particular inability to use a tool. `src/tools.ts` and `test/snowluma-tools.test.ts` already had uncommitted changes at review time; this investigation preserved them.
+The following is a static implementation review dated 2026-10-28. It did not use production chats or call traces, so it cannot identify the sole cause of any particular inability to use a tool. Local implementation observations belong to that research snapshot.
 
 | Observation | Code evidence | Implication |
 | --- | --- | --- |
-| The pinned catalog contains 209 native SnowLuma interfaces; default permissions are `allow: '*'`, and configuration determines actual availability | [Catalog](../../src/generated/snowluma-catalog.json), [Configuration](../../src/config.ts), [Tools](../../src/tools.ts) | Broad execution capability exists; interface count alone does not establish correct selection |
+| The pinned catalog contains 209 native SnowLuma interfaces; default permissions are `allow: '*'`, and configuration determines actual availability | [Catalog](../../src/snowluma-catalog.ts), [Configuration](../../src/config.ts), [Tools](../../src/tools.ts) | Broad execution capability exists; interface count alone does not establish correct selection |
 | All enabled tools and their complete parameters are provided directly to the model; common interfaces have longer descriptions | [Tools](../../src/tools.ts), [Brain](../../src/brain.ts), [ADR-0010](../adr/0010-expose-native-snowluma-actions.md) | Tool detail lookup and skill loading serve different purposes |
 | `search_snowluma_tools` searches the catalog, and `load_snowluma_tools` returns parameters, results, examples, and other details; neither changes the available tool set | [Tools](../../src/tools.ts) | The existing load operation is neither a skill loader nor dynamic tool unlocking |
 | Meme and Qzone interfaces already have some usage guidance, including annotation after collection, actual IDs, visibility, and handling unknown outcomes | [Tools](../../src/tools.ts) | The problem cannot simply be attributed to a complete lack of call instructions; cross-step workflows and selection criteria should be completed |
@@ -166,7 +168,7 @@ The following is only a static workspace review dated 2026-10-28. It did not rea
 
 Current message observations download images from `event.payload.message` as model image inputs; `view_event_image` also reads only that location. Native tool results are serialized as text and stored in `payload.result`; URLs within them do not automatically become image inputs. [Brain](../../src/brain.ts), [Tools](../../src/tools.ts).
 
-Consequently, when `fetch_custom_face_detail` returns a `url` with an empty `desc`, the current general tool pipeline lacks an entry point for directly viewing that saved image. The same issue applies to post-body images returned by Qzone interfaces. An image previously seen in a message or accompanied by a trustworthy description can still be selected on that basis; this does not mean every meme send fails. [Native interface result structures](../../src/generated/snowluma-catalog.json).
+Consequently, when `fetch_custom_face_detail` returns a `url` with an empty `desc`, the current general tool pipeline lacks an entry point for directly viewing that saved image. The same issue applies to post-body images returned by Qzone interfaces. An image previously seen in a message or accompanied by a trustworthy description can still be selected on that basis; this does not mean every meme send fails. [Native interface result structures](../../src/snowluma-catalog.ts).
 
 **Recommendation:** add image viewing based on real source results, for example using `sourceId + image index/resource identifier` to select images from meme library or Qzone results and return actual image content. Retain the existing address and size restrictions on image reading. A skill should guide when to view and how to describe; the runtime supplies working perception capabilities.
 
