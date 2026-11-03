@@ -1,6 +1,6 @@
 # Qiuyue Digital Life
 
-A digital life with a persistent identity and memory, built with Pi Agent. It observes QQ chats through SnowLuma and decides when to participate, act, or stay silent.
+A digital life with a persistent identity and memory, built with Pi Agent. Platform adapters expose complete native APIs as tools; one Agent observes QQ and other social environments and decides when to participate, act, or stay silent.
 
 English | [简体中文](README.zh.md)
 
@@ -11,9 +11,15 @@ English | [简体中文](README.zh.md)
 - **Independent participation.** The Agent chooses whether to respond and can pursue its own activities when autonomous life is enabled.
 - **Local control.** Use the terminal to inspect status and memories, pause or resume the Agent, and configure its available actions.
 
+## Platform adapters
+
+Use named SnowLuma adapters or provide another platform through the plugin SDK. All permitted native APIs are independently callable by the same Agent. Existing QQ configuration remains compatible. See [configuration, migration, coverage, and the adapter SDK](docs/platform-adapters.md).
+
 ## Quick start
 
 ### 1. Prepare the environment
+
+The project's original code is MIT-licensed. The SnowLuma adapter uses the official SDK as an npm dependency; the SDK and API catalog retain their upstream licenses. Users install and run SnowLuma separately. See [Third-party licensing](THIRD_PARTY_NOTICES.md) for sources and distribution terms.
 
 Install Node.js **24.22.1** (specified in [`.nvmrc`](.nvmrc)), then install dependencies:
 
@@ -21,7 +27,10 @@ Install Node.js **24.22.1** (specified in [`.nvmrc`](.nvmrc)), then install depe
 nvm install
 nvm use
 npm ci
+npm run sync:snowluma
 ```
+
+The sync command prepares the pinned API catalog and its license in `.qiuyue-cache/snowluma/`, outside Git. Run it again after changing the SDK or source version. Development commands, tests, and the compiled program read this local catalog; `QIUYUE_SNOWLUMA_CATALOG` can name a separately prepared catalog. Build output does not include it.
 
 Start and log in to [SnowLuma](https://snowluma.github.io/en/docs/sdk) separately, and enable its forward OneBot WebSocket service. You also need credentials for a model that supports image input.
 
@@ -103,18 +112,19 @@ A web page for the same work: live status and timeline, pause and life switches,
 ```mermaid
 flowchart LR
   QQ[QQ chats and events] --> SL[SnowLuma]
-  SL --> DB[(SQLite)]
+  SL --> AP[Platform adapters]
+  AP --> DB[(SQLite)]
   DB --> RT[Perception and scheduling]
   RT --> PI[Single Pi Agent]
   PI -->|Memory and continuing state| DB
   PI --> Tools[Actions and receipts]
-  Tools --> SL
+  Tools --> AP
   CLI[Local management] --> RT
 ```
 
-The TypeScript service keeps receiving events while the Agent thinks. Enabled SnowLuma APIs are exposed with their original names and parameters; `snowluma.tools` controls which are available. The Agent can search the catalog with `search_snowluma_tools` and retrieve details with `load_snowluma_tools`.
+The TypeScript service keeps receiving events while the Agent thinks. Named adapters expose all permitted APIs as `instance__operation` tools. Legacy SnowLuma APIs are exposed with their original names and parameters; `snowluma.tools` controls which are available. The Agent can search the catalog with `search_snowluma_tools` and retrieve details with `load_snowluma_tools`.
 
-Shared system instructions live in [`src/prompts/system.md`](src/prompts/system.md), maintained with the runtime and separate from the operator's `personaFile`. They are read once at startup; `npm run build` copies them into `dist`. After editing them, rebuild and restart the daemon (development runs only need a restart).
+System instructions use [`src/prompts/system.md`](src/prompts/system.md) for legacy QQ configuration and [`src/prompts/platform.md`](src/prompts/platform.md) for named adapters, maintained with the runtime and separate from the operator's `personaFile`. They are read once at startup; `npm run build` copies them into `dist`. After editing them, rebuild and restart the daemon (development runs only need a restart).
 
 QQ native tools, drawing, web search, webpage reading, Qzone card sharing, saved-sticker enhancement, and QQ system faces are plugins. Plugins can supply tools or enhance existing ones, with observation hints, background work, and pictures as needed. Existing `drawing` and `web` configuration continues to work; optional switches in `config.json` control each plugin independently:
 
@@ -141,7 +151,7 @@ For the domain vocabulary and design decisions, see the [glossary](GLOSSARY.md) 
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) for this project's original code. The SnowLuma SDK and locally prepared API catalog retain their [upstream licenses](THIRD_PARTY_NOTICES.md).
 
 ### Gallery
 

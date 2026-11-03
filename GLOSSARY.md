@@ -179,3 +179,11 @@ _Avoid_: disabling autonomous life mode, deleting memory, leaving a group
 **Social Request**:
 A request made by someone in a group or private chat that the digital life decides how to handle, including the operator's ordinary statements in those settings.
 _Avoid_: an automatically effective management command
+
+**Platform Account**:
+An identity through which the Agent participates in a platform. One Agent may use several platform accounts while retaining one persona, memory, and continuing state.
+_Avoid_: a separate Agent per account, transport identity
+
+**Conversation**:
+A social setting in which messages and other interactions take place, identified within a platform account. A conversation can be a private chat, group, channel, or thread; changing the program used to access it does not create a new social setting.
+_Avoid_: model session, adapter instance

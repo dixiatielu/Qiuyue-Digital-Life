@@ -7,9 +7,9 @@ import { waitFor } from './async.js';
 import { inspectPluginManifests, readPluginManifest } from './plugin-manifest.js';
 import type { PluginDefinition } from './plugin-sdk.js';
 import { PluginHost, type LifePlugin } from './plugins.js';
-import { createBuiltinPlugin, pluginIds, type BuiltinPluginId } from './plugins/index.js';
+import { createBuiltinPlugin, activePluginIds, pluginIds, type BuiltinPluginId } from './plugins/index.js';
 import type { LifeRuntime } from './runtime.js';
-import type { SocialAdapter } from './snowluma.js';
+import type { SocialAdapter } from './platform.js';
 import { digest, type Store } from './store.js';
 import { join } from 'node:path';
 
@@ -63,7 +63,7 @@ export class PluginManager {
   }
   async start() {
     for (const id of discoverPlugins(this.config.extensions.directory)) {
-      if (builtin(id)) { this.errors.set(id, 'A user plugin cannot replace a built-in plugin with the same ID.'); continue; }
+      if (builtin(id) || this.installed.get(id)?.source === 'builtin') { this.errors.set(id, 'A user plugin cannot replace a built-in plugin with the same ID.'); continue; }
       let loaded: Awaited<ReturnType<typeof loadUserPlugin>> | undefined;
       try {
         const manifest = this.config.plugins[id] === false ? undefined : readPluginManifest(this.config.extensions.directory, id);
@@ -89,27 +89,29 @@ export class PluginManager {
     let desired = this.config, configError: string | undefined;
     try { desired = this.readConfig(); } catch (error) { configError = errorText(error); }
     const discovered = discoverPlugins(this.config.extensions.directory);
-    const ids = [...new Set([...pluginIds, ...discovered, ...this.installed.keys(), ...Object.keys(desired.plugins), ...this.errors.keys()])];
+    const ids = [...new Set([...activePluginIds(this.config), ...discovered, ...this.installed.keys(), ...Object.keys(desired.plugins), ...this.errors.keys()])];
     const manifests = inspectPluginManifests(this.config.extensions.directory);
     const plugins = ids.map(id => {
       const item = this.installed.get(id);
+      const builtIn = builtin(id) || item?.source === 'builtin';
       const definition = manifests.metadata[id] ?? this.definitions.get(id) ?? item?.metadata;
       let changed = item?.fingerprint !== fingerprint(id, desired), sourceError: string | undefined;
       const desiredEnabled = desired.plugins[id] ?? definition?.defaultEnabled ?? true;
-      if (!builtin(id) && item && (item.plugin.enabled?.() ?? true) !== desiredEnabled) changed = true;
-      if (!builtin(id) && desiredEnabled) {
+      if (!builtIn && item && (item.plugin.enabled?.() ?? true) !== desiredEnabled) changed = true;
+      if (!builtIn && desiredEnabled) {
         try { changed ||= pluginSource(join(this.config.extensions.directory, id)).hash !== item?.sourceHash; }
         catch (error) { sourceError = errorText(error); changed = true; }
       }
       return {
-        id, source: builtin(id) ? 'builtin' : 'user', name: item?.metadata?.name ?? definition?.name ?? id, description: item?.metadata?.description ?? definition?.description ?? '', version: item?.metadata?.version ?? (builtin(id) ? 'built-in' : null),
+        id, source: builtIn ? 'builtin' : 'user', name: item?.metadata?.name ?? definition?.name ?? id, description: item?.metadata?.description ?? definition?.description ?? '', version: item?.metadata?.version ?? (builtIn ? 'built-in' : null),
         state: item ? (item.plugin.enabled?.() ?? true) ? 'running' : 'disabled' : this.errors.has(id) ? 'failed' : 'unloaded',
-        loadedAt: item?.loadedAt ?? null, sourceHash: item?.sourceHash, pending: changed,
+        restartRequired: item?.plugin.requiresRestart ?? (builtIn && !builtin(id)), loadedAt: item?.loadedAt ?? null, sourceHash: item?.sourceHash, pending: changed,
         error: this.errors.get(id) ?? sourceError ?? null, configSchema: definition?.configSchema, defaults: definition?.defaults, defaultEnabled: definition?.defaultEnabled, manifestError: manifests.errors[id],
       };
     });
     const runningCore = core(this.config), savedCore = core(desired);
     const restartRequired = Object.keys(savedCore).filter(key => digest(savedCore[key as keyof typeof savedCore]) !== digest(runningCore[key as keyof typeof runningCore]));
+    if ([...this.installed].some(([id, item]) => item.source === 'builtin' && !builtin(id) && desired.plugins[id] !== this.config.plugins[id])) restartRequired.push('adapter switches');
     return { plugins, job: this.job ?? null, ready: this.ready && !this.stopped, directory: this.config.extensions.directory, dataDirectory: this.config.extensions.dataDirectory, configError, restartRequired };
   }
   request(args: string[]) {
@@ -149,6 +151,7 @@ export class PluginManager {
       if (target === 'web-reader' || target === 'web-search') next.web = desired.web;
       if (target === 'snowluma-tools') next.snowluma.tools = desired.snowluma.tools;
     }
+    for (const [id, item] of this.installed) if (item.plugin.requiresRestart || item.source === 'builtin' && !builtin(id)) { delete next.extensions.settings[id]; if (this.config.extensions.settings[id]) next.extensions.settings[id] = this.config.extensions.settings[id]!; delete next.plugins[id]; if (this.config.plugins[id] !== undefined) next.plugins[id] = this.config.plugins[id]!; }
     return next;
   }
   private applyConfig(next: Config) {
@@ -157,13 +160,16 @@ export class PluginManager {
     this.config.web = next.web; this.config.drawing = next.drawing; this.config.snowluma.tools = next.snowluma.tools;
   }
   private async reload(target: string, job: PluginReloadJob, signal: AbortSignal) {
+    if (target !== 'all' && this.installed.get(target)?.plugin.requiresRestart) throw new Error('Native adapter plugins require a daemon restart to avoid overlapping event consumers.');
+    if (target !== 'all' && !builtin(target) && this.installed.get(target)?.source === 'builtin') throw new Error('Named platform adapter changes require a daemon restart.');
     const next = this.selected(target, this.readConfig());
     const credential = this.readCredentials();
     const discovered = discoverPlugins(next.extensions.directory);
     if (target !== 'all' && !builtin(target) && !discovered.includes(target) && !this.installed.has(target)) throw new Error(`Plugin ${target} is not installed.`);
-    const ids = new Set<string>(pluginIds.filter(id => target === 'all' || id === target || !this.installed.has(id) || this.installed.get(id)!.fingerprint !== fingerprint(id, next)));
-    if (target === 'all') for (const id of [...discovered, ...this.installed.keys()]) { if (!builtin(id)) ids.add(id); }
+    const ids = new Set<string>(activePluginIds(this.config).filter(id => target === 'all' || id === target || !this.installed.has(id) || this.installed.get(id)!.fingerprint !== fingerprint(id, next)));
+    if (target === 'all') for (const id of [...discovered, ...this.installed.keys()]) { if (!builtin(id) && this.installed.get(id)?.source !== 'builtin') ids.add(id); }
     else if (!builtin(target)) ids.add(target);
+    for (const [id, item] of this.installed) if (item.plugin.requiresRestart) ids.delete(id);
     const candidates = new Map<string, Installed>();
     const previous = [...this.host.installed()];
     let committed = false;

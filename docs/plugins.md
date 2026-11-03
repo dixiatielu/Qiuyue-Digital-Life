@@ -4,7 +4,7 @@ A plugin supplies one capability, including its tools and the hooks needed to pa
 
 Bilibili and Xiaohongshu are optional user plugins in `packages/`, built separately with `npm run build:plugins` and installed into the user plugin directory. Neither is registered in the core. Both are opt-in (`plugins.bilibili: true`, `plugins.xiaohongshu: true`). Their settings are validated when loading a candidate and live in `extensions.settings` and have generated forms on the capabilities page, including while the daemon is offline. See [online life](online-life.md) for setup, reading progress, provenance, limits and current platform coverage.
 
-The public v1 interface is [`src/plugin-sdk.ts`](../src/plugin-sdk.ts). The internal interface and host live in `src/plugins.ts`; built-in implementations live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and shared execution rules remain built in. QQ native tool registration and platform-specific life hints live in `src/plugins/snowluma-tools.ts`; the SnowLuma connection and recovery adapter remains in `src/snowluma.ts`.
+The public v1 interface is [`src/plugin-sdk.ts`](../src/plugin-sdk.ts). The internal interface and host live in `src/plugins.ts`; built-in implementations live in `src/plugins/`. Memory, continuing state, perception scheduling, working context, and shared execution rules remain built in. QQ native tool registration and platform-specific life hints live in `src/plugins/snowluma-tools.ts`; platform transports and native catalog adapters live in `src/adapters/`; `src/snowluma.ts` is a compatibility export.
 
 ## Write a user plugin
 
@@ -80,6 +80,8 @@ Disabled user code is not imported. Disabling an existing plugin works even if i
 | `ctx.log(level, message)` | Writes a plugin-labelled trace entry; never log credential values |
 
 A tool can declare `experienceKind: "reading"` to associate its activity with `call.record("reading", ...)`. Both map to `plugin:<id>:reading`; the next life wake can show the last actual experience without platform logic in the host.
+
+Platform plugins can register complete native catalogs with `ctx.adapter`; see [platform adapters](platform-adapters.md) for the contract, account identity, and migration. Plugins can call `call.adapters.query(instance, operation, args)` and `call.adapters.action(instance, operation, args)` through the shared runtime. Connection plugins require restart to avoid overlapping event consumers; ordinary capability plugins retain hot reload.
 
 At execution time, a tool receives `call.signal`, `call.reviewing`, `call.record(kind, value)`, `call.snowluma.query(name, args)`, `call.snowluma.action(name, args)`, and `call.action(kind, args, dispatch)` for another platform's action. QQ queries accept only read-only native interfaces; all QQ calls obey native permissions. External actions share the host's action budget, attempt ledger and deduplication. A dispatched generic action whose callback throws has an **unknown** outcome and is not automatically replayed. `readOnly: true` forbids SDK actions; memory review receives only tools explicitly declaring both `readOnly: true` and `review: true`. `call.action` returns `{ outcome: { id, status, result }, reused }`; only a confirmed `success` may update local state to reflect an external write. Keep credentials out of action arguments and receipts.
 

@@ -8,7 +8,7 @@ import { dirname, resolve } from 'node:path';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { loadConfig } from './config.js';
 import { Store } from './store.js';
-import { SnowLumaAdapter } from './snowluma.js';
+import { createLegacyConnection } from './adapters/index.js';
 import { createTools, forReview } from './tools.js';
 import { PiBrain } from './brain.js';
 import { LifeRuntime } from './runtime.js';
@@ -98,7 +98,7 @@ async function main() {
   let runtime: LifeRuntime | undefined;
   let brain: PiBrain;
   let reviewer: PiBrain;
-  const social = new SnowLumaAdapter(config.snowluma, store, () => { void runtime?.tick(); }, credentials.get);
+  const social = createLegacyConnection(config, store, () => { void runtime?.tick(); }, credentials.get);
   let plugins: PluginHost;
   const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding, fetch, credentials.get), () => plugins.knownEmojiNames()) : undefined;
   plugins = createPlugins(config, store, social, recall, credentials.get);
@@ -111,7 +111,7 @@ async function main() {
     if (errors.length) throw new AggregateError(errors, errors.map(errorText).join('; '));
   };
   try {
-    store.bindAccount(config.snowluma.selfId);
+    if (config.adapters === undefined) store.bindAccount(config.snowluma.selfId);
     brain = new PiBrain(config, store, createTools(config, store, social, () => brain.thought, recall, plugins), undefined, monitor, recall, credentials.get);
     // Review runs beside the thoughts with tools of its own; the live view follows the thoughts, and review shows there through its trace (ADR-0012).
     reviewer = new PiBrain(config, store, forReview(createTools(config, store, social, () => reviewer.thought, recall, plugins)), undefined, undefined, recall, credentials.get);

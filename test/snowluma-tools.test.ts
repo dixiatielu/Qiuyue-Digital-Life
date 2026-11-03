@@ -1,21 +1,22 @@
+import { snowlumaToolsPlugin } from '../src/plugins/snowluma-tools.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Compile } from 'typebox/compile';
-import { SNOWLUMA_ACTIONS, SnowLumaApiError } from '@snowluma/sdk';
+import { SnowLumaActionError as SnowLumaApiError } from '../src/adapters/snowluma/index.js';
+const unsupportedActions = ['unsupported_test_action', '.compatibility_action'];
 import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools } from '@earendil-works/pi-ai';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog } from '../src/snowluma-catalog.js';
 import { loadConfig } from '../src/config.js';
 import { event, fixture } from './helpers.js';
 
-test('generated native tools expose canonical SDK names and schemas directly', async () => {
+test('generated native tools expose canonical native names and schemas directly', async () => {
   const f = fixture();
   f.brain.thought.lifeOnly = false;
   try {
     assert.equal(snowlumaCatalog.length, 212);
-    assert.ok(snowlumaCatalog.every(action => (SNOWLUMA_ACTIONS as readonly string[]).includes(action.name)));
     assert.equal(new Set(snowlumaCatalog.map(action => action.name)).size, snowlumaCatalog.length);
     for (const action of snowlumaCatalog) {
       Compile(action.inputSchema);
@@ -109,7 +110,7 @@ test('names outside the catalog cannot be found or described and canonical schem
   try {
     const names = new Set(snowlumaCatalog.map(action => action.name));
     const load = f.tools.current().find(tool => tool.name === 'load_snowluma_tools')!;
-    for (const name of SNOWLUMA_ACTIONS.filter(name => !names.has(name))) {
+    for (const name of unsupportedActions) {
       assert.throws(() => findSnowLumaAction(name), /Unknown/);
       await assert.rejects(load.execute('load', { names: [name] }), /Unknown/);
     }
@@ -317,11 +318,11 @@ test('configuration validates native permissions', () => {
     raw.snowluma.groups = []; writeFileSync(path, JSON.stringify(raw)); assert.deepEqual(loadConfig(path).snowluma.groups, []);
     raw.snowluma.groups = [-1]; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => loadConfig(path), /group IDs for history recovery/);
     raw.snowluma.groups = [];
-    raw.snowluma.tools.allow = ['made_up_action']; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => loadConfig(path), /Unknown/);
+    raw.snowluma.tools.allow = ['made_up_action']; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => snowlumaToolsPlugin(loadConfig(path)), /Unknown|Invalid/);
     raw.snowluma.tools.allow = []; raw.snowluma.tools.deny = ['ocr_image']; writeFileSync(path, JSON.stringify(raw)); assert.deepEqual(loadConfig(path).snowluma.tools.allow, []);
     const names = new Set(snowlumaCatalog.map(action => action.name));
-    for (const name of SNOWLUMA_ACTIONS.filter(name => !names.has(name))) {
-      raw.snowluma.tools.deny = [name]; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => loadConfig(path), /Unknown/);
+    for (const name of unsupportedActions) {
+      raw.snowluma.tools.deny = [name]; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => snowlumaToolsPlugin(loadConfig(path)), /Unknown|Invalid/);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

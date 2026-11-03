@@ -1,3 +1,4 @@
+import type { EventSource } from './identity.js';
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface EnvironmentEvent {
   id: string;
@@ -10,6 +11,8 @@ export interface EnvironmentEvent {
   payload: Record<string, unknown>;
   status: 'pending' | 'processing' | 'processed';
   receivedAt?: number;
+  /** Canonical platform context; legacy QQ numeric fields remain readable. */
+  source?: EventSource;
 }
 export type MemoryKind = 'experience' | 'understanding' | 'fiction' | 'note' | DevelopmentKind;
 /** The digital life's own development (ADR-0012): always supplied by scope, never left to chance recall. */
@@ -61,6 +64,7 @@ export interface Action {
   status: 'pending' | 'success' | 'failed' | 'unknown';
   result: unknown;
   createdAt: number;
+  conversation?: string;
 }
 export interface Observation {
   batchId: string;
@@ -77,13 +81,15 @@ export const isHeartbeat = (kind: string): boolean => kind === 'meta_event:heart
 /** Low-information signals ride along with other observations; they never start or steer a thought on their own. QQ pushes the digital life's own pokes back as notices that say no more than the poke's receipt. */
 export const isAmbient = (kind: string, actorId?: number, selfId?: number): boolean => kind === 'notice:notify:input_status' || kind.startsWith('notice:group_msg_emoji_like:') || (kind === 'notice:notify:poke' && actorId !== undefined && actorId === selfId);
 /** The chat a message or notice happened in: group:<id> or private:<qq>. */
-export function eventChat(event: Pick<EnvironmentEvent, 'kind' | 'groupId' | 'actorId' | 'payload'>): string | undefined {
+export function eventChat(event: Pick<EnvironmentEvent, 'kind' | 'groupId' | 'actorId' | 'payload' | 'source'>): string | undefined {
+  if (event.source) return event.source.conversation;
   if (event.kind !== 'message' && !event.kind.startsWith('notice:')) return;
   if (event.groupId !== undefined && event.payload.message_type !== 'private') return `group:${event.groupId}`;
   return event.actorId === undefined ? undefined : `private:${event.actorId}`;
 }
 /** Addressed to the digital life (ADR-0002): any message from the other person in a private chat; in a group, a message that mentions it or replies to one it sent. A notice is addressed to it when it is the target, as of a poke, or when someone else did something to it, such as banning it or inviting it in. */
-export function addressedTo(selfId: number, event: Pick<EnvironmentEvent, 'kind' | 'groupId' | 'actorId' | 'payload'>, sent: (messageId: number) => boolean): boolean {
+export function addressedTo(selfId: number, event: Pick<EnvironmentEvent, 'kind' | 'groupId' | 'actorId' | 'payload' | 'source'>, sent: (messageId: number) => boolean): boolean {
+  if (event.source) return event.source.addressed;
   const self = (value: unknown) => value != null && Number(value) === selfId;
   if (event.kind.startsWith('notice:')) return (self(event.payload.target_id) && !self(event.actorId)) || (self(event.payload.user_id) && event.payload.operator_id != null && !self(event.payload.operator_id));
   if (event.kind !== 'message' || self(event.actorId)) return false;
@@ -91,3 +97,6 @@ export function addressedTo(selfId: number, event: Pick<EnvironmentEvent, 'kind'
   const segments = (Array.isArray(event.payload.message) ? event.payload.message : []) as { type?: string; data?: Record<string, unknown> }[];
   return segments.some(segment => (segment.type === 'at' && self(segment.data?.qq)) || (segment.type === 'reply' && sent(Number(segment.data?.id))));
 }
+
+export const ambientEvent = (event: EnvironmentEvent, selfId?: number) => event.source ? event.source.attention !== 'normal' : isAmbient(event.kind, event.actorId, selfId);
+export const ownEvent = (event: EnvironmentEvent, selfId?: number) => event.source ? event.source.own : event.actorId !== undefined && event.actorId === selfId;

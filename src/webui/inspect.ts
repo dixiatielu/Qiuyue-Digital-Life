@@ -6,7 +6,7 @@ import { contextIdentity } from '../brain.js';
 import { EmbeddingClient, SemanticRecall } from '../recall.js';
 import { createPlugins, pluginCredentials } from '../plugins/index.js';
 import type { PluginHost } from '../plugins.js';
-import type { SocialAdapter } from '../snowluma.js';
+import type { SocialAdapter } from '../platform.js';
 
 const offline = () => { throw new Error('Offline inspection takes no action.'); };
 

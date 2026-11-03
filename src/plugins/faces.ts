@@ -1,7 +1,7 @@
 import { inflateRawSync } from 'node:zlib';
 import { Type } from 'typebox';
 import type { EnvironmentEvent } from '../domain.js';
-import type { SocialAdapter } from '../snowluma.js';
+import type { SocialAdapter } from '../platform.js';
 import type { Store } from '../store.js';
 import type { Config } from '../config.js';
 import type { LifePlugin } from '../plugins.js';

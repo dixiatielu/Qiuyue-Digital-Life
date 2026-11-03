@@ -1,9 +1,9 @@
 import { Type } from 'typebox';
-import type { SocialAdapter } from '../snowluma.js';
+import type { SocialAdapter } from '../platform.js';
 import type { Config } from '../config.js';
 import type { LifePlugin } from '../plugins.js';
 import { errorResult } from '../tool-runtime.js';
-import { allowedSnowLumaAction, findSnowLumaAction, snowlumaChat } from '../snowluma-catalog.js';
+import { allowedSnowLumaAction, findSnowLumaAction, snowlumaChat } from '../adapters/snowluma/catalog.js';
 
 type Feed = Record<string, any>;
 

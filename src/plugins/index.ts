@@ -1,6 +1,10 @@
 import { environmentCredential, type CredentialReader } from '../credentials.js';
 import type { Config } from '../config.js';
 import type { Store } from '../store.js';
+import { SnowLumaAdapter } from '../adapters/snowluma/index.js';
+import { getSnowLumaCatalog } from '../adapters/snowluma/catalog.js';
+import { scopePlugin } from '../adapters/scope.js';
+import { conversationRef } from '../identity.js';
 import { PluginHost } from '../plugins.js';
 import { drawingCredentialProblems, drawingEnabled, drawingPlugin, Drawings, ImageClient } from './drawing.js';
 import { webReaderPlugin } from './web-reader.js';
@@ -10,12 +14,13 @@ import type { SemanticSource } from '../embedding.js';
 import { StickerStore } from './stickers-store.js';
 import { StickerRecall } from './stickers-recall.js';
 import { stickersPlugin } from './stickers.js';
-import type { SocialAdapter } from '../snowluma.js';
+import type { SocialAdapter } from '../platform.js';
 import { FaceCatalog, qqFacesPlugin } from './faces.js';
 import { snowlumaToolsPlugin } from './snowluma-tools.js';
 import { galleryPlugin } from './gallery.js';
 
 export const pluginIds = ['drawing', 'web-search', 'web-reader', 'qzone-share', 'qq-stickers', 'qq-faces', 'snowluma-tools', 'gallery'] as const;
+export const activePluginIds = (config: Config) => config.adapters === undefined ? [...pluginIds] : pluginIds.filter(id => !['qzone-share', 'qq-stickers', 'qq-faces', 'snowluma-tools'].includes(id));
 export type BuiltinPluginId = typeof pluginIds[number];
 // Retain the historical tool order: it participates in working-context identity.
 const pluginOrder: BuiltinPluginId[] = ['qzone-share', 'drawing', 'web-reader', 'web-search', 'qq-stickers', 'qq-faces', 'snowluma-tools', 'gallery'];
@@ -36,7 +41,25 @@ export function createBuiltinPlugin(id: BuiltinPluginId, config: Config, store: 
 }
 /** The composition root is the only place that knows which capability implementations are installed. */
 export function createPlugins(config: Config, store: Store, social: SocialAdapter, semantics?: SemanticSource, credential: CredentialReader = environmentCredential): PluginHost {
-  return new PluginHost(pluginOrder.map(id => createBuiltinPlugin(id, config, store, social, semantics, credential)));
+  const plugins = pluginOrder.filter(id => activePluginIds(config).includes(id)).map(id => createBuiltinPlugin(id, config, store, social, semantics, credential));
+  for (const instance of config.adapters ?? []) {
+    const snow = { ...config.snowluma, url: instance.url ?? 'ws://127.0.0.1:3001', selfId: Number(instance.accountId), tokenEnv: instance.tokenEnv, groups: instance.groups, tools: instance.tools, maxStreamBytes: instance.maxStreamBytes };
+    const local: Config = { ...config, snowluma: snow, plugins: { ...config.plugins } };
+    for (const id of ['snowluma-tools', 'qzone-share', 'qq-stickers', 'qq-faces']) local.plugins[id] = config.plugins[`${instance.id.replaceAll('_', '-')}-${id}`] ?? config.plugins[id] ?? true;
+    const adapter = new SnowLumaAdapter(snow, store, () => {}, credential, instance.id);
+    const actions = getSnowLumaCatalog().actions;
+    for (const id of ['qzone-share', 'qq-stickers', 'qq-faces', 'snowluma-tools'] as const) {
+      const plugin = scopePlugin(createBuiltinPlugin(id, local, store, adapter, semantics, credential), instance.id, actions, adapter, legacy => {
+        const [type, target] = legacy.split(':'); return conversationRef({ platform: 'qq', accountId: instance.accountId }, type as 'private' | 'group', target!);
+      });
+      if (id === 'snowluma-tools') {
+        plugin.start = async () => { store.bindPlatformAccount(instance.id, { platform: 'qq', accountId: instance.accountId }); await adapter.connect(); };
+        plugin.stop = () => adapter.close();
+      }
+      plugins.push(plugin);
+    }
+  }
+  return new PluginHost(plugins);
 }
 export function pluginCredentials(config: Config, credential: CredentialReader = environmentCredential) {
   return { problems: drawingCredentialProblems(config, credential), warnings: webSearchCredentialWarnings(config, credential) };

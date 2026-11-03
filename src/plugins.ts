@@ -1,3 +1,4 @@
+import type { NativeActionDefinition } from './platform.js';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
 import type { ThoughtContext, ToolRuntime } from './tool-runtime.js';
@@ -24,8 +25,11 @@ export interface LifePlugin {
   id: string;
   /** User plugins bump this when their observation/meaning contract changes without changing tool declarations. */
   contextVersion?: string;
+  /** Exclusive platform consumers need a restart instead of overlapping reload lifetimes. */
+  requiresRestart?: boolean;
   enabled?(): boolean;
   tools(runtime: ToolRuntime): PluginTool[];
+  nativeActions?: { accounts?: readonly import('./identity.js').PlatformIdentity[]; definition(name: string): NativeActionDefinition | undefined; allowed(name: string): boolean; execute?(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> };
   reviewTools?: string[];
   emojiNames?(events?: EnvironmentEvent[], signal?: AbortSignal): Record<string, string> | Promise<Record<string, string>>;
   knownEmojiNames?(): Record<string, string>;
@@ -64,19 +68,36 @@ export class PluginHost {
       if (ids.has(plugin.id)) throw new Error(`Duplicate plugin ID: ${plugin.id}`);
       ids.add(plugin.id);
     }
+    this.validate(plugins);
   }
   private enabled(plugin: LifePlugin) { return plugin.enabled?.() ?? true; }
   installed(): readonly LifePlugin[] { return this.plugins; }
   validate(plugins: readonly LifePlugin[]) {
+    const accounts = new Set<string>();
     const ids = new Set<string>();
     for (const plugin of plugins) {
       if (ids.has(plugin.id)) throw new Error(`Duplicate plugin ID: ${plugin.id}`);
       ids.add(plugin.id);
     }
+    for (const plugin of plugins) for (const account of plugin.nativeActions?.accounts ?? []) { const key = `${account.platform}:${account.accountId}`; if (accounts.has(key)) throw new Error(`Duplicate platform account: ${key}`); accounts.add(key); }
     for (const validate of this.validators) validate(plugins);
   }
   /** The caller has drained both brains and started the candidates before this synchronous commit. */
   install(plugins: readonly LifePlugin[]) { this.validate(plugins); this.plugins = plugins; }
+  nativeDefinition(name: string): NativeActionDefinition {
+    for (const plugin of this.plugins) { const definition = plugin.nativeActions?.definition(name); if (definition) return definition; }
+    throw new Error(`Unknown native interface: ${name}`);
+  }
+  nativeAllowed(name: string): boolean {
+    for (const plugin of this.plugins) if (plugin.nativeActions?.definition(name)) return (!plugin.nativeActions.execute || this.enabled(plugin)) && plugin.nativeActions.allowed(name);
+    throw new Error(`Unknown native interface: ${name}`);
+  }
+  nativeExecute(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | undefined {
+    for (const plugin of this.plugins) if (plugin.nativeActions?.definition(name) && plugin.nativeActions.execute) {
+      if (!this.enabled(plugin)) throw new Error(`Adapter ${plugin.id} is disabled.`);
+      return plugin.nativeActions.execute(name, args, signal);
+    }
+  }
   enabledIds(): string[] { return this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.id); }
   manage(id: string, command: string, args: Record<string, any>) {
     const plugin = this.plugins.find(plugin => plugin.id === id);

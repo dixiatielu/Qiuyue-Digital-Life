@@ -51,7 +51,7 @@ function Permissions({ form }) {
   const count = actions.filter(action => allowed(action.name)).length;
   return html`<${Card} title=${t('QQ interface permissions', 'QQ 接口权限')} actions=${html`<span class="muted small">${t(`${count} of ${actions.length} allowed`, `已允许 ${count} / ${actions.length}`)}</span>`}>
     <p class="muted small">${t('Native SnowLuma interfaces she may call, by their original names. Read-only queries and actions are both subject to these. A plugin switch never grants an interface.', '她可以按原名调用的 SnowLuma 原生接口。只读查询和行动都受这里限制。插件开关不会授予接口权限。')}
-      ${' '}SDK ${catalog.data.source.sdkVersion}</p>
+      ${' '}API ${catalog.data.source.commit?.slice(0, 12) ?? catalog.data.source.sdkVersion}</p>
     <div class="row wrap">
       <label class="check"><input type="radio" checked=${tools.allow === '*'} onChange=${() => write({ allow: '*', deny: tools.deny })} />${t('All except denied', '除拒绝列表外全部允许')}</label>
       <label class="check"><input type="radio" checked=${tools.allow !== '*'} onChange=${() => write({ allow: actions.filter(action => allowed(action.name)).map(action => action.name).sort(), deny: [] })} />${t('Only those listed', '只允许勾选的')}</label>
@@ -120,7 +120,7 @@ export function PluginsPage() {
         <ul class="needs">${meta.needs.map(([ok, text]) => html`<li class=${ok === null ? '' : ok ? 'ok' : 'bad'}>${ok === null ? '·' : ok ? '✓' : '✗'} ${text}</li>`)}</ul>
         <p class="small">${user ? t('User plugin', '用户插件') : t('Built-in', '内置插件')} ${live?.version ?? schema?.version ?? ''}${schema?.defaultEnabled === false ? t(' · Off by default', ' · 默认关闭') : ''}
           ${live ? html` · <${Badge} kind=${live.state === 'running' ? 'ok' : ''}>${stateName(live.state)}<//>` : null}
-          ${live?.pending ? html` · <${Badge}>${t('pending changes', '有待应用修改')}<//>` : null}
+          ${live?.pending ? html` · <${Badge}>${live.restartRequired ? t('restart required', '需重启应用') : t('pending changes', '有待应用修改')}<//>` : null}
         </p>
         ${schema?.configSchema ? html`<div class="fields">${Object.entries(schema.configSchema.properties ?? {}).map(([key, field]) => html`
           <${ConfigField} key=${key} form=${pluginForm} path=${`extensions.settings.${id}.${key}`} label=${field.title ?? key} help=${field.description}
@@ -129,7 +129,7 @@ export function PluginsPage() {
         `)}</div>` : html`<p class="small">${t('Saved configuration: ', '已保存的配置下：')}${inspected ? active ? t('enabled', '已启用') : t('not enabled', '未启用') : '—'}</p>`}
         ${info.data.errors?.[id] ? html`<p class="note error">${info.data.errors[id]}</p>` : null}
         ${live?.error ? html`<p class="note error">${live.error}</p>` : null}
-        <div class="row wrap"><button class="ghost" disabled=${!running?.ready || busy || form.dirty} onClick=${() => reload(id)}>${t('Reload', '重载')}</button>
+        <div class="row wrap"><button class="ghost" disabled=${!running?.ready || busy || form.dirty || live?.restartRequired} onClick=${() => reload(id)}>${live?.restartRequired ? t('Restart to apply', '重启后应用') : t('Reload', '重载')}</button>
           ${live?.loadedAt ? html`<span class="muted small">${t('Loaded ', '加载于 ')}${time(live.loadedAt)}</span>` : null}
         </div>
       <//>`;

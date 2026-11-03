@@ -1,6 +1,6 @@
 # 秋月·数字生命
 
-基于 Pi Agent 构建的数字生命，拥有持续的人格与记忆。它通过 SnowLuma 感知 QQ 聊天，自主决定何时参与、行动或保持沉默。
+基于 Pi Agent 构建的数字生命，拥有持续的人格与记忆。平台适配器将完整原生接口暴露为工具；同一个 Agent 感知 QQ 等环境，自主决定何时参与、行动或保持沉默。
 
 [English](README.md) | 简体中文
 
@@ -11,9 +11,15 @@
 - **自主参与。** Agent 自己决定是否回应；开启自主生活后，还可以主动安排自己的活动。
 - **本地管理。** 通过终端查看状态和记忆、暂停或恢复 Agent，并配置它可以使用的行动。
 
+## 平台适配器
+
+可接入具名的 SnowLuma 适配器，也可通过插件 SDK 接入其他平台。所有已启用的原生接口都作为独立工具交给同一个 Agent。原有 QQ 配置继续兼容。[配置、迁移、覆盖范围与适配器 SDK](docs/platform-adapters.md)说明了用法；NapCat 和 Discord 的正式适配器尚未包含在本次实现中。
+
 ## 快速开始
 
 ### 1. 准备环境
+
+本项目原创代码采用 MIT 许可。SnowLuma 适配器通过 npm 依赖使用官方 SDK，SDK 和接口目录保留各自的上游许可。SnowLuma 服务端由用户另行安装和运行。来源与分发条款见[第三方许可说明](THIRD_PARTY_NOTICES.md)。
 
 安装 Node.js **24.22.1**（见 [`.nvmrc`](.nvmrc)），然后安装依赖：
 
@@ -21,7 +27,10 @@
 nvm install
 nvm use
 npm ci
+npm run sync:snowluma
 ```
+
+同步命令将固定版本的接口目录及其许可保存到 Git 忽略的 `.qiuyue-cache/snowluma/`。SDK 或目录源码版本变化后需要重新同步。开发命令、测试和编译后的程序读取这个本地目录；也可用 `QIUYUE_SNOWLUMA_CATALOG` 指定另行准备的目录文件。构建产物不会包含它。
 
 另行启动并登录 [SnowLuma](https://snowluma.github.io/en/docs/sdk)，启用正向 OneBot WebSocket 服务。你还需要支持图片输入的模型及其凭据。
 
@@ -103,18 +112,19 @@ npm start -- webui --config config.json
 ```mermaid
 flowchart LR
   QQ[QQ 聊天和事件] --> SL[SnowLuma]
-  SL --> DB[(SQLite)]
+  SL --> AP[平台适配器]
+  AP --> DB[(SQLite)]
   DB --> RT[感知与调度]
   RT --> PI[单一 Pi Agent]
   PI -->|记忆与持续状态| DB
   PI --> Tools[行动与回执]
-  Tools --> SL
+  Tools --> AP
   CLI[本地管理] --> RT
 ```
 
-TypeScript 服务在 Agent 思考期间持续接收事件。已开放的 SnowLuma 接口以原始名称和参数提供给 Agent，可用范围由 `snowluma.tools` 控制。Agent 可以使用 `search_snowluma_tools` 搜索接口，并通过 `load_snowluma_tools` 查看详细用法。
+TypeScript 服务在 Agent 思考期间持续接收事件。具名适配器按 `实例名__原生接口名` 暴露所有已开放接口；旧 QQ 配置继续按原始名称和参数提供工具，可用范围由 `snowluma.tools` 控制。Agent 可以使用 `search_snowluma_tools` 搜索接口，并通过 `load_snowluma_tools` 查看详细用法。
 
-通用系统提示词放在 [`src/prompts/system.md`](src/prompts/system.md)，随运行时代码维护，与运营者的 `personaFile` 分开。提示词在启动时读取一次，`npm run build` 会将它复制到 `dist`。修改后重新构建并重启常驻进程；开发模式只需重启。
+旧 QQ 配置使用 [`src/prompts/system.md`](src/prompts/system.md)，具名适配器使用 [`src/prompts/platform.md`](src/prompts/platform.md)，两者随运行时代码维护，与运营者的 `personaFile` 分开。提示词在启动时读取一次，`npm run build` 会将它复制到 `dist`。修改后重新构建并重启常驻进程；开发模式只需重启。
 
 QQ 原生工具、画画、网页搜索、网页阅读、空间卡片分享、收藏表情增强和 QQ 系统表情通过插件接入。插件可以提供工具，也可以增强已有工具，并附加观察提示、后台任务和图片。现有 `drawing`、`web` 配置继续有效；可以在 `config.json` 中增加独立开关，例如：
 
@@ -141,7 +151,7 @@ QQ 原生工具、画画、网页搜索、网页阅读、空间卡片分享、�
 
 ## 许可证
 
-[MIT](LICENSE)
+本项目原创代码采用 [MIT](LICENSE) 许可。SnowLuma SDK 和本地准备的接口目录保留各自的[上游许可](THIRD_PARTY_NOTICES.md)。
 
 ### 作品库
 

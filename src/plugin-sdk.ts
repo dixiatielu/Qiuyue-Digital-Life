@@ -1,7 +1,7 @@
 /** Public interface v1. User plugins need not import runtime code: export a plain PluginDefinition. */
 export type JsonSchema = { type?: string; [key: string]: unknown };
 export interface PluginEvent {
-  id: string; kind: string; at: number; text: string; groupId?: number; actorId?: number; payload: unknown;
+  id: string; kind: string; at: number; text: string; groupId?: number; actorId?: number; payload: unknown; source?: import('./identity.js').EventSource;
 }
 export interface PluginActionResult {
   outcome: { id: string; status: 'pending' | 'success' | 'failed' | 'unknown'; result: unknown };
@@ -15,6 +15,11 @@ export interface PluginCall {
   attachImages(sourceId: string, urls: string[]): Promise<{ attached: string[]; failed: { url: string; error: string }[]; omitted: string[] }>;
   /** External writes are recorded before dispatch; errors after dispatch leave an unknown outcome. */
   action(kind: string, args: Record<string, unknown>, dispatch: (signal: AbortSignal) => Promise<unknown>): Promise<PluginActionResult>;
+  adapters: {
+    query(instance: string, operation: string, args: Record<string, unknown>): Promise<unknown>;
+    action(instance: string, operation: string, args: Record<string, unknown>): Promise<unknown>;
+  };
+  /** Compatibility for plugins using the legacy, unnamed SnowLuma configuration. */
   snowluma: {
     query(name: string, args: Record<string, unknown>): Promise<unknown>;
     action(name: string, args: Record<string, unknown>): Promise<unknown>;
@@ -39,6 +44,8 @@ export interface PluginContext {
   readonly signal: AbortSignal;
   credential(name: string): string | undefined;
   tool(tool: UserTool): void;
+  /** Register an entire native API catalog during setup. */
+  adapter(adapter: NativeAdapterDefinition): void;
   observe(provider: (events: readonly PluginEvent[]) => string[]): void;
   activity(activity: { activity: string; tools: string[] }): void;
   /** Begins after activation. Calls never overlap and are drained before reload. */
@@ -69,3 +76,30 @@ export interface PluginDefinition extends PluginManifest {
   setup(context: PluginContext): void | Promise<void>;
 }
 export const definePlugin = <T extends PluginDefinition>(definition: T): T => definition;
+
+/** Stable platform identity is independent of the adapter implementation. */
+export interface NativeAdapterDefinition {
+  instance: string;
+  platform: string;
+  accountId: string;
+  /** Exact API/catalog version, not the agent version. */
+  version: string;
+  actions: { name: string; summary?: string; inputSchema: JsonSchema; readOnly: boolean; invariants?: string[] }[];
+  permissions?: { allow: '*' | string[]; deny: string[] };
+  execute(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
+  conversation?(operation: string, args: Record<string, unknown>): { type: import('./identity.js').ConversationType; id: string } | undefined;
+  /** Images come from the event's actual native media, and are loaded only when shown. */
+  images?(event: PluginEvent): { label: string; autoView?: boolean; load(signal: AbortSignal): Promise<{ data: Uint8Array; mimeType: string }> }[];
+  start?(context: AdapterContext): void | Promise<void>;
+  stop?(): void | Promise<void>;
+}
+export interface AdapterContext {
+  signal: AbortSignal;
+  publish(event: {
+    key: string; kind: string; at?: number; text: string; payload: Record<string, unknown>;
+    conversation?: { type: import('./identity.js').ConversationType; id: string };
+    actor?: string; actorName?: string; own?: boolean; addressed?: boolean;
+    attention?: 'normal' | 'ambient' | 'transport';
+  }): void;
+  storage: PluginContext['storage'];
+}

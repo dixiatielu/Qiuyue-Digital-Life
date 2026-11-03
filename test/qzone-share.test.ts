@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SnowLumaApiError } from '@snowluma/sdk';
+import { SnowLumaActionError as SnowLumaApiError } from '../src/adapters/snowluma/index.js';
 import { deferred, fixture } from './helpers.js';
 
 const post = (tid: string) => ({ cell_common: { feed_id: tid }, cell_operation: { share_outside: { share_access_resource: { resource_id: `v2_${tid}`, busi_id: 'qzone_feed' } } }, cell_feed_transfer: `transfer-${tid}` });

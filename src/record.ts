@@ -1,3 +1,4 @@
+import { parseConversationRef } from './identity.js';
 import { eventChat, type Action, type EnvironmentEvent } from './domain.js';
 import { conversationOf, eventRef, type Store } from './store.js';
 import { textTokens } from './context.js';
@@ -28,11 +29,22 @@ interface Observed { limit: number }
 export class ChatRecord {
   private names = new Map<number, string>();
   /** faces names QQ system faces by ID, so reactions read as what they show. */
-  constructor(private store: Store, private selfId: number, private conversation: string, private faces: Record<string, string> = {}, private observed?: Observed, private actionCaption?: (action: Action) => string | undefined) { conversationOf(conversation); }
+  constructor(private store: Store, private selfId: number, private conversation: string, private faces: Record<string, string> = {}, private observed?: Observed, private actionCaption?: (action: Action) => string | undefined) {
+    const canonical = parseConversationRef(conversation);
+    if (!canonical) conversationOf(conversation);
+    else if (canonical.platform === 'qq') this.selfId = Number(canonical.accountId);
+  }
+  private legacyConversation() {
+    const canonical = parseConversationRef(this.conversation);
+    return canonical?.platform === 'qq' && ['group', 'private'].includes(canonical.type) && /^\d+$/.test(canonical.id) ? `${canonical.type}:${canonical.id}` : this.conversation;
+  }
+  private generic() { const ref = parseConversationRef(this.conversation); return ref && (ref.platform !== 'qq' || !['group', 'private'].includes(ref.type)); }
+
 
   /** Events an observation brings from this conversation, under a heading naming it; a date is given only when it is not today. */
   observe(events: EnvironmentEvent[]): string {
-    const { type, id } = conversationOf(this.conversation);
+    if (this.generic()) return `${this.conversation}:\n${this.render(events, [], day(Date.now())).lines.join('\n')}`;
+    const { type, id } = conversationOf(this.legacyConversation());
     const name = type === 'group' && this.store.groupName(id);
     const heading = type === 'private' ? `Private chat with ${this.name(id)}:` : `Group ${id}${name ? ` (${name})` : ''}:`;
     return [heading, ...this.render(events, [], day(Date.now())).lines].join('\n');
@@ -59,15 +71,16 @@ export class ChatRecord {
   }
 
   /** The latest items containing a phrase or written by one person, in order. */
-  matches(limit: number, match: { query?: string; person?: number }): string {
+  matches(limit: number, match: { query?: string; person?: number | string }): string {
     const { events, actions } = this.store.conversationMatches(this.conversation, limit, { ...match, selfId: this.selfId });
     const page = this.render(events, actions);
-    const what = [match.query && `containing "${match.query}"`, match.person && `from ${this.name(match.person)}`].filter(Boolean).join(' and ');
+    const what = [match.query && `containing "${match.query}"`, match.person && `from ${typeof match.person === 'number' ? this.name(match.person) : match.person}`].filter(Boolean).join(' and ');
     return [`${this.title()}: latest items ${what}.`, this.legend(page), ...(page.lines.length ? page.lines : ['(none)'])].filter(Boolean).join('\n');
   }
 
   private title() {
-    const { type, id } = conversationOf(this.conversation);
+    if (parseConversationRef(this.conversation)) return `Chat record of ${this.conversation}`;
+    const { type, id } = conversationOf(this.legacyConversation());
     if (type === 'private') return `Chat record of the private chat with ${this.name(id)} (${id})`;
     const name = this.store.groupName(id);
     return `Chat record of group ${id}${name ? ` (${name})` : ''}`;
@@ -91,6 +104,10 @@ export class ChatRecord {
   }
   /** today, when given, is the date the lines begin in, so a record of today needs no date line. */
   private render(events: EnvironmentEvent[], actions: Action[], today = ''): Page {
+    if (this.generic()) {
+      const items = [...events.map(event => ({ at: event.at, text: `${eventRef(event.id)} [${event.kind}] ${event.source?.own ? 'me' : [event.source?.actorName, event.source?.actor].filter(Boolean).join(' ')}: ${clip(event.text, eventRef(event.id), this.observed?.limit ?? LINE_LIMIT)}` })), ...actions.map(action => ({ at: action.createdAt, text: `${action.id} me: ${action.kind} ${clip(JSON.stringify(action.args), action.id, this.observed?.limit ?? LINE_LIMIT)} → ${clip(JSON.stringify(action.result), action.id, this.observed?.limit ?? LINE_LIMIT)}` }))].sort((a, b) => a.at - b.at);
+      return { lines: items.map(item => `${day(item.at) === today ? '' : day(item.at) + ' '}${clock(item.at)} ${item.text}`), last: items.at(-1)?.at };
+    }
     for (const event of events) {
       const sender = event.payload.sender as { card?: string; nickname?: string } | undefined;
       const name = sender?.card || sender?.nickname;
@@ -98,7 +115,7 @@ export class ChatRecord {
     }
     // Echoes of this account's sends and reactions duplicate the actions that made them.
     const sent = new Set(actions.filter(isSend).map(action => Number((action.result as { message_id?: unknown } | null)?.message_id)));
-    const reacted = new Set(actions.filter(action => action.kind === 'set_group_reaction').map(action => `${action.args.message_id}:${action.args.code}`));
+    const reacted = new Set(actions.filter(action => operation(action) === 'set_group_reaction').map(action => `${action.args.message_id}:${action.args.code}`));
     const echo = (event: EnvironmentEvent) => event.kind === 'message' ? event.actorId === this.selfId && sent.has(Number(event.payload.message_id))
       : event.kind.startsWith('notice:group_msg_emoji_like:') && Number(event.payload.operator_id ?? event.actorId) === this.selfId && Array.isArray(event.payload.likes) && event.payload.likes.every((like: { emoji_id?: unknown }) => reacted.has(`${event.payload.message_id}:${like.emoji_id}`));
     const items: Item[] = [
@@ -139,7 +156,7 @@ export class ChatRecord {
       return `${eventRef(event.id)} (${this.name(event.actorId ?? 0)}${text ? `: ${text.length > QUOTE_LIMIT ? `${text.slice(0, QUOTE_LIMIT)}…` : text}` : ''})`;
     }
     if (event) return 'my message';
-    return this.store.sentMessage(messageId) ? 'my message' : `message ${messageId}`;
+    return this.store.sentMessage(messageId, parseConversationRef(this.conversation)) ? 'my message' : `message ${messageId}`;
   }
   private line(item: Item): string {
     const { event, action } = item;
@@ -163,12 +180,13 @@ export class ChatRecord {
     const caption = this.actionCaption?.(action);
     if (caption !== undefined) return caption;
     const args = action.args;
-    if (action.kind === 'send_group_msg' || action.kind === 'send_private_msg') return `me: ${clip(this.segments(args.message))}`;
-    if (action.kind === 'send_custom_face') return 'me: [saved sticker]';
-    if (action.kind === 'send_group_ai_record') return `me: [AI voice] ${clip(String(args.text ?? ''))}`;
-    if (['group_poke', 'friend_poke', 'send_poke'].includes(action.kind)) return `me poked ${this.name(Number(args.user_id ?? args.target_id))}`;
-    if (action.kind === 'delete_msg') return `me recalled ${this.target(Number(args.message_id))}`;
-    return `me used ${action.kind}`;
+    const kind = operation(action);
+    if (kind === 'send_group_msg' || kind === 'send_private_msg') return `me: ${clip(this.segments(args.message))}`;
+    if (kind === 'send_custom_face') return 'me: [saved sticker]';
+    if (kind === 'send_group_ai_record') return `me: [AI voice] ${clip(String(args.text ?? ''))}`;
+    if (['group_poke', 'friend_poke', 'send_poke'].includes(kind)) return `me poked ${this.name(Number(args.user_id ?? args.target_id))}`;
+    if (kind === 'delete_msg') return `me recalled ${this.target(Number(args.message_id))}`;
+    return `me used ${kind}`;
   }
   private segments(message: unknown): string {
     if (typeof message === 'string') return message;
@@ -195,7 +213,8 @@ export class ChatRecord {
   }
 }
 
-const isSend = (action?: Action) => !!action && ['send_group_msg', 'send_private_msg', 'send_custom_face', 'send_group_ai_record'].includes(action.kind);
+const operation = (action: Action) => action.kind.includes('__') ? action.kind.slice(action.kind.indexOf('__') + 2) : action.kind;
+const isSend = (action?: Action) => !!action && ['send_group_msg', 'send_private_msg', 'send_custom_face', 'send_group_ai_record'].includes(operation(action));
 function clip(text: string, ref?: string, limit = LINE_LIMIT) {
   const flat = text.replace(/\s*\n\s*/g, ' ⏎ ');
   return flat.length > limit ? `${flat.slice(0, limit)}… [+${flat.length - limit} chars${ref ? `; read_event ${ref}` : ''}]` : flat;

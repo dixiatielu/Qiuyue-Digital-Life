@@ -8,11 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, webuiSettings, type Config } from '../config.js';
 import { callControl, requestControl } from '../control.js';
 import { errorText } from '../domain.js';
-import { pluginIds } from '../plugins/index.js';
+import { activePluginIds, pluginIds } from '../plugins/index.js';
 import { discoverPlugins } from '../plugin-loader.js';
 import type { PluginManager } from '../plugin-manager.js';
 import { systemInstructions } from '../prompts.js';
-import { snowlumaCatalog, snowlumaCatalogSource } from '../snowluma-catalog.js';
+import { getSnowLumaCatalog } from '../adapters/snowluma/catalog.js';
 import { ui } from '../ui-language.js';
 import { LiveMirror, ServiceJobs, alive, busyReasons, changedSince, processStartedAt, serviceCommand, serviceState } from './daemon.js';
 import { ConflictError, OperatorFiles, hash, historyKinds, type HistoryKind } from './files.js';
@@ -169,7 +169,7 @@ export class WebUi {
       const { raw, config } = this.current();
       const persona = typeof body.persona === 'string' ? body.persona : config?.persona ?? this.files.persona().text;
       const template = typeof body.template === 'string' ? body.template : config?.systemPrompt;
-      const text = systemInstructions({ persona, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template });
+      const text = systemInstructions({ persona, adapters: config?.adapters, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template });
       return { text, chars: text.length };
     });
 
@@ -180,14 +180,15 @@ export class WebUi {
       catch (error) { runtimeError = errorText(error); }
       const discovered = config ? discoverPlugins(config.extensions.directory) : [];
       const manifests = config ? inspectPluginManifests(config.extensions.directory) : { metadata: {}, errors: {} };
-      return { ids: [...new Set([...pluginIds, ...discovered, ...running?.plugins.map(plugin => plugin.id) ?? []])], ...manifests, builtinIds: pluginIds, switches: raw.plugins ?? {}, inspected: config ? this.continuity(config) : null, error: error ?? null, running, runtimeError, directory: config?.extensions.directory };
+      const builtins = config ? activePluginIds(config) : pluginIds;
+      return { ids: [...new Set([...builtins, ...discovered, ...running?.plugins.map(plugin => plugin.id) ?? []])], ...manifests, builtinIds: builtins, switches: raw.plugins ?? {}, inspected: config ? this.continuity(config) : null, error: error ?? null, running, runtimeError, directory: config?.extensions.directory };
     });
     this.on('POST', '/api/plugins/reload', ({ body }) => {
       const id = body.id ?? 'all';
       if (typeof id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(id)) throw new HttpError(400, 'Invalid plugin ID.');
       return callControl(this.paths.socket, { args: ['plugins', 'reload', id] });
     });
-    this.on('GET', '/api/snowluma', () => ({ source: snowlumaCatalogSource, actions: snowlumaCatalog.map(action => ({ name: action.name, category: action.category, summary: action.summary, readOnly: action.readOnly })) }));
+    this.on('GET', '/api/snowluma', () => { const catalog = getSnowLumaCatalog(); return { source: catalog.source, actions: catalog.actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, readOnly: action.readOnly })) }; });
 
     this.on('GET', '/api/gallery', ({ url }) => {
       const query: DrawingQuery = { limit: 24 };
@@ -265,6 +266,7 @@ export class WebUi {
     try { ({ raw, config } = this.current()); } catch { /* still allow credentials while repairing config */ }
     const usedBy = new Map<string, string[]>();
     const use = (name: unknown, by: string) => { if (typeof name === 'string' && name) usedBy.set(name, [...usedBy.get(name) ?? [], by]); };
+    for (const adapter of config?.adapters ?? []) use(adapter.tokenEnv, `adapter:${adapter.id}`);
     for (const [section, field] of credentialFields) use((config as any)?.[section]?.[field] ?? raw[section]?.[field], section);
     for (const { name, plugin } of pluginCredentialReferences(config?.extensions)) use(name, plugin);
     try { for (const profile of this.providers.list(raw)) use(profile.apiKeyEnv, `provider:${profile.name}`); } catch { /* unreadable providers add no names */ }

@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools, type Message } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools, toToolDeclaration, type Message } from '@earendil-works/pi-ai';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '../src/store.js';
-import { estimatedContextTokens } from '../src/context.js';
+import { systemInstructions } from '../src/prompts.js';
+import { estimatedContextTokens, textTokens, estimateTokens } from '../src/context.js';
 import { deferred, event, fixture } from './helpers.js';
 
 const snapshots = (messages: Message[]) => messages.filter(message => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<runtime_data>'));
@@ -17,17 +18,11 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   // This fixed-size pressure scenario exercises core exchanges, independently of optional gallery tools.
   f.cfg.plugins.gallery = false;
   f.restart();
-  // Leaves the same headroom after the fixed instructions and tools grew by about 730 tokens with development (ADR-0012)
-  // and 60 more when view_event_image learned to read URLs in tool results, and 430 more with pursuits: 620 more window, since idle compaction starts at 0.7 of the budget.
-  // view_face and the note on reaction codes added 130 more: 190 more window. Ending a thought after social actions added 60 more: 90 more window.
-  // The note on what recalled holds added 73 more: 110 more window.
-  // Keeping corrections and unknown outcomes, and one person's ways in their impression, added 155 more: 230 more window.
-  // Free-time wakes, rest, and saving what was seen online added 127 more: 190 more window.
-  // How a thought ends, and that new messages come by themselves, added 98 more: 150 more window.
-  // What a rest holds back added 91 more: 140 more window.
-  // That runtime_data does not repeat what the context shows, and what a revision reaches, added 120 more: 180 more window.
-  f.cfg.limits.contextTokens = 14800;
+  // Keep a fixed amount of conversation space above instructions and schemas.
+  // Prompt edits must not turn the fixture's idle threshold into permanent pressure.
   f.cfg.limits.outputReserveTokens = 4096;
+  const fixed = textTokens(systemInstructions(f.cfg)) + estimateTokens(f.tools.current().map(toToolDeclaration));
+  f.cfg.limits.contextTokens = f.cfg.limits.outputReserveTokens + f.cfg.limits.contextSafetyTokens + Math.ceil((fixed + 700) / 0.7);
   f.cfg.compaction.keepRecentTokens = 1500;
   f.cfg.compaction.summaryMaxTokens = 512;
   f.cfg.compaction.retries = 0;
@@ -295,7 +290,7 @@ test('checkpoint write failure keeps the prior window and observation acknowledg
 test('pressure can be resolved by pruning old tool output without a summary call', async () => {
   const f = fixture({ execute: async () => ({ content: 'raw original '.repeat(1000) }) });
   try {
-    smallWindow(f); f.cfg.limits.contextTokens = 15000; event(f.store, 'Read a large result');
+    smallWindow(f); f.cfg.limits.contextTokens += 4000; event(f.store, 'Read a large result');
     f.faux.setResponses([answer(call('get_msg', { message_id: 1 })), answer('Finished reading')]);
     await f.brain.run(f.store.claim(20)!);
     const originalResult = f.brain.agent.state.messages.find(message => message.role === 'toolResult')!;

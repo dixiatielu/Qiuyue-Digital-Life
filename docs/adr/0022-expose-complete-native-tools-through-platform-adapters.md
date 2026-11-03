@@ -1,0 +1,9 @@
+# Expose complete native tools through platform adapters
+
+The same Agent participates across platforms. Each platform adapter supplies the complete native tool catalog for its declared API version, native execution, and environmental events; the host retains permissions, action receipts, memory, and continuing state. This extends ADR-0010 and ADR-0011 beyond SnowLuma, and uses the plugin lifetimes of ADR-0021. Discovery and detailed documentation do not unlock tools or select a smaller tool set.
+
+Adapter instances namespace model tool names while retaining original operation identifiers and complete parameters. Platform accounts and conversations have identities independent of the adapter implementation, so changing a QQ transport does not change who the Agent or its contacts are. Existing QQ records remain readable through migration and compatibility mappings. Native results and events remain available alongside normalized context; uncertain dispatch outcomes remain unknown under ADR-0008.
+
+Catalog provenance, version, and licensing belong to each adapter. Moving a dependency into a plugin does not grant redistribution rights. The SnowLuma adapter uses the official SDK for transport, CQ parsing, and streams, and converts SDK errors to native action receipts at the adapter interface. Other platforms do not require a running SnowLuma service or its catalog; the SDK is an implementation detail of the built-in SnowLuma adapter.
+
+The initial built-in implementation is SnowLuma at its pinned canonical catalog revision; other platforms can register through the same plugin SDK. Large repeated schema prose can be retrieved separately while every native parameter and operation remains declared. Unlike ordinary capability plugins under ADR-0021, connection plugins require restart: starting two pollers during a hot replacement can consume or acknowledge each other's updates.

@@ -9,11 +9,12 @@ import type { CredentialReader } from './credentials.js';
 import { errorText } from './domain.js';
 import type { LifePlugin } from './plugins.js';
 import type { PluginContext, PluginDefinition, UserTool } from './plugin-sdk.js';
-import { findSnowLumaAction } from './snowluma-catalog.js';
 import type { Store } from './store.js';
 import { waitFor } from './async.js';
 import { validateManifest, validPluginId } from './plugin-manifest.js';
 import { fetchImage } from './web.js';
+import { nativeAdapterPlugin } from './adapters/native.js';
+import { nativeToolName } from './platform.js';
 import { jsonResult } from './tool-runtime.js';
 export { discoverPlugins, validPluginId } from './plugin-manifest.js';
 
@@ -47,6 +48,7 @@ class PluginScope {
   private cleanup: (() => void | Promise<void>)[] = [];
   private stopping?: Promise<void>;
   private tools: UserTool[] = [];
+  private adapters: LifePlugin[] = [];
   private observations: Parameters<PluginContext['observe']>[0][] = [];
   private activities: Parameters<PluginContext['activity']>[0][] = [];
   constructor(private id: string, private store: Store, private credential: CredentialReader) {}
@@ -69,6 +71,7 @@ class PluginScope {
     return {
       id: this.id, settings: Object.freeze(structuredClone(settings)), directory, dataDirectory, signal: this.controller.signal,
       credential: name => this.credential(name),
+      adapter: adapter => { this.declare(); this.adapters.push(nativeAdapterPlugin(adapter, this.store)); },
       tool: tool => {
         this.declare();
         if (!tool || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(tool.name) || typeof tool.description !== 'string' || !tool.description.trim() || typeof tool.execute !== 'function' || tool.parameters?.type !== 'object') throw new Error('Tools need a valid name, description, object parameters, and execute function.');
@@ -115,14 +118,15 @@ class PluginScope {
     return this.stopping ??= (async () => {
       this.state = 'stopped'; this.controller.abort();
       for (const timer of this.timers) clearInterval(timer.timer);
+      const closed = await Promise.allSettled(this.adapters.map(adapter => adapter.stop?.()));
       await this.idle();
-      const errors: unknown[] = [];
+      const errors: unknown[] = closed.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
       for (const cleanup of this.cleanup.reverse()) { try { await cleanup(); } catch (error) { errors.push(error); } }
       if (errors.length) throw new AggregateError(errors, `Plugin ${this.id} cleanup failed.`);
     })();
   }
   adapter(definition: PluginDefinition, enabled: boolean, dataDirectory: string): LifePlugin {
-    return {
+    const base: LifePlugin = {
       id: this.id, contextVersion: definition.contextVersion ?? '1', enabled: () => enabled,
       reviewTools: this.tools.filter(tool => tool.review).map(tool => tool.name),
       experienceKinds: Object.fromEntries(this.tools.filter(tool => tool.experienceKind).map(tool => [tool.name, `plugin:${this.id}:${tool.experienceKind}`])),
@@ -172,8 +176,12 @@ class PluginScope {
               return delivery;
             },
             action: (kind, parameters, dispatch) => { write(); return runtime.externalAction(`plugin:${this.id}:${kind}`, parameters, () => dispatch(combined), combined); },
+            adapters: {
+              query: (instance, operation, parameters) => { check(); const name = nativeToolName(instance, operation); if (!runtime.definition(name).readOnly) throw new Error('Use adapters.action for external writes.'); return runtime.query(name, parameters, combined); },
+              action: (instance, operation, parameters) => { write(); const name = nativeToolName(instance, operation); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
+            },
             snowluma: {
-              query: (name, parameters) => { check(); if (!findSnowLumaAction(name).readOnly) throw new Error('Use snowluma.action for external writes.'); return runtime.query(name, parameters, combined); },
+              query: (name, parameters) => { check(); if (!runtime.definition(name).readOnly) throw new Error('Use snowluma.action for external writes.'); return runtime.query(name, parameters, combined); },
               action: (name, parameters) => { write(); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
             },
           });
@@ -185,6 +193,23 @@ class PluginScope {
       })),
       start: () => { if (this.state !== 'staged') throw new Error('Plugin already started or stopped.'); mkdirSync(dataDirectory, { recursive: true, mode: 0o700 }); this.state = 'active'; this.schedule(); },
       stop: () => this.stop(), idle: () => this.idle(), quiesce: () => this.quiesce(),
+    };
+    const adapters = this.adapters;
+    return {
+      ...base, requiresRestart: adapters.length > 0,
+      tools: runtime => [...base.tools(runtime), ...adapters.flatMap(adapter => adapter.tools(runtime))],
+      reviewTools: [...base.reviewTools ?? [], ...adapters.flatMap(adapter => adapter.reviewTools ?? [])],
+      images: event => adapters.flatMap(adapter => adapter.images?.(event) ?? []),
+      chatActions: adapters.flatMap(adapter => adapter.chatActions ?? []),
+      chatTarget: (name, args) => adapters.map(adapter => adapter.chatTarget?.(name, args)).find(Boolean),
+      nativeActions: {
+        accounts: adapters.flatMap(adapter => adapter.nativeActions?.accounts ?? []),
+        definition: name => adapters.map(adapter => adapter.nativeActions?.definition(name)).find(Boolean),
+        allowed: name => adapters.some(adapter => adapter.nativeActions?.definition(name) && adapter.nativeActions.allowed(name)),
+        execute: (name, args, signal) => { const adapter = adapters.find(adapter => adapter.nativeActions?.definition(name)); if (!adapter) throw new Error('Unknown native operation.'); return adapter.nativeActions!.execute!(name, args, signal); },
+      },
+      start: async () => { await base.start?.(); for (const adapter of adapters) await adapter.start?.(); },
+      stop: () => this.stop(),
     };
   }
 }

@@ -3,7 +3,7 @@ import type { Config } from '../config.js';
 import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
 import { errorResult } from '../tool-runtime.js';
 import { preferJpeg } from '../web.js';
-import { findSnowLumaAction, nativeToolDescription, snowlumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../snowluma-catalog.js';
+import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
 
 const string = (description: string, maxLength = 6000) => Type.String({ description, minLength: 1, maxLength });
 // Normalize common ways of describing QQ actions before matching catalog text.
@@ -65,7 +65,10 @@ const activities: OnlineActivity[] = [
 ];
 
 export function snowlumaToolsPlugin(config: Config): LifePlugin {
+  const snowlumaCatalog = getSnowLumaCatalog().actions;
+  for (const name of [...(config.snowluma.tools.allow === '*' ? [] : config.snowluma.tools.allow), ...config.snowluma.tools.deny]) findSnowLumaAction(name);
   return {
+    nativeActions: { accounts: [{ platform: 'qq', accountId: String(config.snowluma.selfId) }], definition: name => snowlumaCatalog.find(action => action.name === name), allowed: name => allowedSnowLumaAction(findSnowLumaAction(name), config.snowluma.tools) },
     id: 'snowluma-tools', enabled: () => config.plugins['snowluma-tools'] !== false,
     tools: runtime => {
       const tool = runtime.jsonTool.bind(runtime);

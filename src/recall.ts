@@ -1,6 +1,6 @@
 import type { Config } from './config.js';
 import type { EnvironmentEvent, Memory } from './domain.js';
-import { errorText } from './domain.js';
+import { errorText, ownEvent } from './domain.js';
 import type { Store } from './store.js';
 import { closestLine, unit, type Embedder, type Line, type SemanticSource } from './embedding.js';
 export { EmbeddingClient, type Embedder } from './embedding.js';
@@ -95,7 +95,7 @@ export class SemanticRecall implements SemanticSource {
     });
   }
   private observe(event: EnvironmentEvent) {
-    if (event.kind !== 'message' || event.actorId === undefined || event.actorId === this.config.snowluma.selfId || this.messages.has(event.id) || this.waiting.has(event.id) || Date.now() < this.pausedUntil) return;
+    if (event.kind !== 'message' || (!event.source && event.actorId === undefined) || ownEvent(event, this.config.snowluma.selfId) || this.messages.has(event.id) || this.waiting.has(event.id) || Date.now() < this.pausedUntil) return;
     const faces = event.text.includes('[face ') ? this.emojiNames() : {};
     const text = queryText(event.text, faces, this.config.embedding.selfNames);
     if ([...text].length < 2) return;

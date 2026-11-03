@@ -1,7 +1,8 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { SNOWLUMA_ACTIONS } from '@snowluma/sdk';
 
-// Pin the upstream source: catalog changes are reviewed together with SDK upgrades.
+// Keep restricted upstream material in the ignored local cache, under its own license.
+// Pin the source so catalog changes can be checked together with SDK upgrades.
 const commit = process.argv[2] ?? 'e9faec0e28298c6837ecd41d6132900c7bf08343';
 if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Provide the full SnowLuma Git commit SHA.');
 const base = `https://raw.githubusercontent.com/SnowLuma/SnowLuma/${commit}/`;
@@ -11,6 +12,7 @@ async function fetchSource(path) {
   return response.text();
 }
 const catalog = JSON.parse(await fetchSource('packages/mcp/src/generated/catalog.json'));
+const license = await fetchSource('LICENSE');
 const actions = catalog.actions.filter(action => !action.name.startsWith('.') && action.category !== '兼容接口' && !action.examples?.some(example => /兼容占位接口|历史拼写兼容接口/.test(example.notes ?? '')));
 // The public catalog contains canonical actions; expose those names directly.
 for (const action of actions) {
@@ -35,7 +37,8 @@ const result = {
   source: { repository: 'https://github.com/SnowLuma/SnowLuma', commit, sdkVersion: sdk.version, catalog: 'packages/mcp/src/generated/catalog.json' },
   actions: actions.map(({ name, category, summary, readOnly, stream, inputSchema, invariants, returns, returnsSchema, examples }) => ({ name, category, summary, readOnly, ...(stream ? { stream } : {}), inputSchema: currentSchema(inputSchema), invariants, returns: returns?.replaceAll('等级别名', '等级'), returnsSchema: currentSchema(returnsSchema), examples })).sort((a, b) => a.name.localeCompare(b.name, 'en')),
 };
-const directory = new URL('../src/generated/', import.meta.url);
+const directory = new URL('../.qiuyue-cache/snowluma/', import.meta.url);
 await mkdir(directory, { recursive: true });
-await writeFile(new URL('snowluma-catalog.json', directory), JSON.stringify(result, null, 2) + '\n');
-console.log(`SnowLuma ${sdk.version}: ${result.actions.length} actions, source ${commit}`);
+await writeFile(new URL('LICENSE', directory), license);
+await writeFile(new URL('catalog.json', directory), JSON.stringify(result, null, 2) + '\n');
+console.log(`Local SnowLuma ${sdk.version} catalog: ${result.actions.length} actions, source ${commit}. Upstream license saved beside it; see THIRD_PARTY_NOTICES.md for dependency notices.`);

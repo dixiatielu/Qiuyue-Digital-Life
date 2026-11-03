@@ -1,3 +1,4 @@
+import { parseConversationRef } from './identity.js';
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend } from './model.js';
@@ -6,7 +7,7 @@ import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
 import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
-import { addressedTo, errorText, eventChat, isAmbient } from './domain.js';
+import { addressedTo, errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, conversationOf, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
@@ -52,7 +53,7 @@ export interface Brain {
 /** What a persisted working context belongs to: when any of it changes, the next start begins a fresh one. */
 export function contextIdentity(config: Config, tools: ToolSet, legacy = false) {
   const contracts = tools.plugins.installed().filter(plugin => plugin.contextVersion !== undefined && (plugin.enabled?.() ?? true)).map(plugin => [plugin.id, plugin.contextVersion]);
-  return digest({ instructions: systemInstructions(config, legacy), model: config.model, selfId: config.snowluma.selfId, tools: tools.current().map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
+  return digest({ instructions: systemInstructions(config, legacy), model: config.model, selfId: config.snowluma.selfId, ...(config.adapters ? { accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })) } : {}), tools: tools.current().map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
 }
 
 export class PiBrain implements Brain {
@@ -321,14 +322,15 @@ export class PiBrain implements Brain {
     for (const source of [...recent, ...recalled.map(item => item.memory)]) this.thought.sources.add(source.id);
     // A review looks at the chats it lists, so their groups and the people who spoke there count as present.
     const chats = this.observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
-    const reviewed = chats.map(chat => conversationOf(chat.conversation));
-    const present = this.observations.map(event => event.actorId).filter((id): id is number => id !== undefined && id !== this.config.snowluma.selfId).reverse();
+    const reviewed = chats.filter(chat => !parseConversationRef(chat.conversation)).map(chat => conversationOf(chat.conversation));
+    const present = this.observations.filter(event => !ownEvent(event, this.config.snowluma.selfId)).map(event => event.source?.actor ?? event.actorId).filter((id): id is number | string => id !== undefined).reverse();
     const people = [...new Set([...present, ...reviewed.filter(chat => chat.type === 'private').map(chat => chat.id), ...this.store.impressionsIn(chats, this.config.snowluma.selfId, this.config.development.people)])].slice(0, this.config.development.people);
     const settings = new Set([...groups, ...reviewed.filter(chat => chat.type === 'group').map(chat => chat.id)]);
-    const development = this.store.development(['global', ...[...settings].map(id => `group:${id}`), ...people.map(id => `person:${id}`)]);
+    const platformScopes = this.observations.flatMap(event => event.source ? [...(event.source.conversation ? [`conversation:${event.source.conversation}`] : []), ] : []);
+    const development = this.store.development([...platformScopes, ...chats.filter(chat => parseConversationRef(chat.conversation)).map(chat => `conversation:${chat.conversation}`), 'global', ...[...settings].map(id => `group:${id}`), ...people.map(id => `person:${id}`)]);
     // When each was formed, so a judgment from last night's review reads as that rather than as settled.
     const entries = (kind: MemoryKind) => development.filter(memory => memory.kind === kind).map((memory: Memory) => ({ id: memory.id, scope: memory.scope, title: memory.title, content: memory.content, createdAt: new Date(memory.createdAt).toISOString() }));
-    const runtime = { now: new Date().toISOString(), timeZone: 'Asia/Shanghai', selfId: this.config.snowluma.selfId, settings: this.store.settings(), allowFiction: this.config.life.allowFiction, historyGroups: this.config.snowluma.groups, snowlumaPermissions: this.config.snowluma.tools, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, groupId: event.groupId, actorId: event.actorId, text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
+    const runtime = { ...(this.config.adapters === undefined ? {} : { platformAccounts: this.store.setting('platformAccounts', {}) }), now: new Date().toISOString(), timeZone: 'Asia/Shanghai', ...(this.config.adapters === undefined ? { selfId: this.config.snowluma.selfId, historyGroups: this.config.snowluma.groups, snowlumaPermissions: this.config.snowluma.tools } : { adapters: this.config.adapters.map(({ id, driver, accountId, tools }) => ({ id, driver, accountId, tools })) }), settings: this.store.settings(), allowFiction: this.config.life.allowFiction, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, groupId: event.groupId, actorId: event.actorId, ...(event.source ? { source: event.source } : {}), text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
     // Commitments, current activity, pursuits, and development are never selected by probabilistic recall.
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
@@ -448,7 +450,7 @@ export class PiBrain implements Brain {
     const rollback = this.checkpoint(); this.compactions = [];
     this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     const self = this.config.snowluma.selfId;
-    this.engaged = new Set(observation.events.filter(event => event.actorId !== self && !isAmbient(event.kind, event.actorId, self)).map(eventChat).filter((chat): chat is string => chat !== undefined));
+    this.engaged = new Set(observation.events.filter(event => !ownEvent(event, self) && !ambientEvent(event, self)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true };

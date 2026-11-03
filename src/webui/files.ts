@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { dirname, join, resolve } from 'node:path';
 import { Credentials, credentialPaths } from '../credentials.js';
 import { loadConfig, type Config } from '../config.js';
-import { builtinSystemPrompt, checkSystemPrompt } from '../prompts.js';
+import { builtinSystemPrompt, platformSystemPrompt, checkSystemPrompt } from '../prompts.js';
 
 export type HistoryKind = 'config' | 'persona' | 'prompt';
 const kept: Record<HistoryKind, { count: number; ext: string }> = { config: { count: 50, ext: 'json' }, persona: { count: 200, ext: 'md' }, prompt: { count: 100, ext: 'md' } };
@@ -83,7 +83,8 @@ export class OperatorFiles {
     const raw = this.raw(); const path = this.promptPath(raw);
     const override = path ? readText(path) : undefined;
     const base = existsSync(this.promptBasePath) ? readFileSync(this.promptBasePath, 'utf8') : undefined;
-    return { path, file: raw.systemPromptFile as string | undefined, builtin: builtinSystemPrompt, override, hash: hash(override ?? ''), base, builtinChanged: override !== undefined && base !== undefined && base !== builtinSystemPrompt };
+    const builtin = raw.adapters === undefined ? builtinSystemPrompt : platformSystemPrompt;
+    return { path, file: raw.systemPromptFile as string | undefined, builtin, override, hash: hash(override ?? ''), base, builtinChanged: override !== undefined && base !== undefined && base !== builtin };
   }
   /** Save the operator's template; the first save also points systemPromptFile at it. The built-in version it was written against is kept, to tell later when that changes. */
   savePrompt(text: string, baseHash?: string) {
@@ -97,7 +98,7 @@ export class OperatorFiles {
     this.check(next, { prompt: text });
     this.replace('prompt', path, text);
     if (!raw.systemPromptFile) this.replace('config', this.configPath, JSON.stringify(next, null, 2) + '\n');
-    writeAtomic(this.promptBasePath, builtinSystemPrompt);
+    writeAtomic(this.promptBasePath, this.prompt().builtin);
   }
   /** Go back to the built-in prompt. The operator's file stays on disk and in history; only the reference goes. */
   resetPrompt() {

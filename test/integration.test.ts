@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
+import { SnowLumaWebSocketClient } from '@snowluma/sdk';
 import { Store, eventRef } from '../src/store.js';
 import { normalizeEvent, SnowLumaAdapter } from '../src/snowluma.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
@@ -14,10 +15,11 @@ import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { config, deferred, event, fixture } from './helpers.js';
 import { snowlumaCatalog } from '../src/snowluma-catalog.js';
-import { SNOWLUMA_ACTIONS, SnowLumaApiError } from '@snowluma/sdk';
+import { SnowLumaActionError as SnowLumaApiError } from '../src/adapters/snowluma/index.js';
+const unsupportedActions = ['unsupported_test_action', '.compatibility_action'];
 import { LifeRuntime } from '../src/runtime.js';
 
-test('SnowLuma adapter uses real SDK transport, stores notices and history, and passes native actions', async () => {
+test('SnowLuma adapter uses the official SDK, stores notices and history, and passes native actions', async () => {
   const cfg = config(); const store = new Store(':memory:');
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
   const addr = server.address(); assert.ok(typeof addr === 'object' && addr);
@@ -42,6 +44,7 @@ test('SnowLuma adapter uses real SDK transport, stores notices and history, and 
   store.receive(normalizeEvent({ post_type: 'message', self_id: 900, group_id: 100, user_id: 7, time: 80, message_id: 10, message: 'Previously online' }, cfg.snowluma)!);
   const adapter = new SnowLumaAdapter(cfg.snowluma, store, () => { if (store.pending() >= 8) received.resolve(); });
   try {
+    assert.ok(adapter.client instanceof SnowLumaWebSocketClient);
     await adapter.connect();
     assert.equal(requests.find(r => r.action === 'get_group_msg_history' && r.params.group_id === 100)?.params.message_id, 10);
     store.setSetting('paused', true);
@@ -65,7 +68,7 @@ test('SnowLuma adapter uses real SDK transport, stores notices and history, and 
   }
 });
 
-test('every exposed action reaches the SDK unchanged, including multi-frame streams', async () => {
+test('every exposed action reaches the protocol unchanged, including multi-frame streams', async () => {
   const cfg = config(); const store = new Store(':memory:');
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
   const addr = server.address(); assert.ok(typeof addr === 'object' && addr);
@@ -105,7 +108,7 @@ test('every exposed action reaches the SDK unchanged, including multi-frame stre
     }
     const beforeUnknown = requests.length;
     const names = new Set(snowlumaCatalog.map(action => action.name));
-    for (const name of SNOWLUMA_ACTIONS.filter(name => !names.has(name))) await assert.rejects(adapter.execute(name, {}), /Unknown/);
+    for (const name of unsupportedActions) await assert.rejects(adapter.execute(name, {}), /Unknown/);
     assert.equal(requests.length, beforeUnknown);
     cfg.snowluma.tools.deny = ['fetch_ptt_text'];
     const beforeDenied = requests.length;
@@ -167,7 +170,7 @@ test('private message keys separate peers and groups, preserve direction, and de
   } finally { store.close(); }
 });
 
-test('SDK pushes reach observation after pause while heartbeats remain stored outside model context', { timeout: 10000 }, async () => {
+test('Protocol pushes reach observation after pause while heartbeats remain stored outside model context', { timeout: 10000 }, async () => {
   const f = fixture(); f.cfg.snowluma.groups = [];
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');

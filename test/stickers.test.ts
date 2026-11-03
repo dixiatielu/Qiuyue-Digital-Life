@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-works/pi-ai';
-import { SnowLumaApiError } from '@snowluma/sdk';
+import { SnowLumaActionError as SnowLumaApiError } from '../src/adapters/snowluma/index.js';
 import { Store, eventRef } from '../src/store.js';
 import { SemanticRecall } from '../src/recall.js';
 import { StickerStore } from '../src/plugins/stickers-store.js';

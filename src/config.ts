@@ -1,11 +1,17 @@
 import { credentialPaths } from './credentials.js';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { findSnowLumaAction, type SnowLumaPermissions } from './snowluma-catalog.js';
+import type { ToolPermissions } from './platform.js';
 import { validateModelConfig, type ModelConfig } from './model.js';
 import { checkSystemPrompt } from './prompts.js';
 
+export interface AdapterConfig {
+  id: string; driver: 'snowluma'; accountId: string; url?: string; tokenEnv: string;
+  tools: ToolPermissions; groups: number[]; maxStreamBytes: number;
+}
 export interface Config {
+  /** Omit for legacy QQ configuration; an empty list runs without built-in platform connections. */
+  adapters?: AdapterConfig[];
   credentialsFile: string;
   uiLanguage: 'en' | 'zh';
   database: string;
@@ -19,7 +25,7 @@ export interface Config {
   plugins: Record<string, boolean>;
   extensions: { directory: string; dataDirectory: string; settings: Record<string, Record<string, unknown>>; reloadTimeoutMs: number };
   model: ModelConfig;
-  snowluma: { url: string; tokenEnv: string; selfId: number; groups: number[]; tools: SnowLumaPermissions; maxStreamBytes: number };
+  snowluma: { url: string; tokenEnv: string; selfId: number; groups: number[]; tools: ToolPermissions; maxStreamBytes: number };
   /** freeTime: a quiet stretch, drawn between quietMinMs and quietMaxMs each time, offers a life wake at least gapMs from any other, at most perDay a day (ADR-0015). */
   life: { enabled: boolean; allowFiction: boolean; minWakeMs: number; freeTime: { enabled: boolean; quietMinMs: number; quietMaxMs: number; gapMs: number; perDay: number } };
   limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; maxPreemptions: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
@@ -29,7 +35,7 @@ export interface Config {
   web: { enabled: boolean; searchUrl: string; searchKeyEnv: string; timeoutMs: number; maxBytes: number };
   /** Recall by meaning, through an OpenAI-compatible /embeddings endpoint. Every threshold depends on the model: threshold for what messages call to mind, searchThreshold for the few words of a deliberate search, which score lower, and stickerThreshold for saved stickers whose descriptions fit what was said. */
   embedding: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; threshold: number; searchThreshold: number; limit: number; stickerThreshold: number; stickerLimit: number; timeoutMs: number; selfNames: string[] };
-  /** Drawing through an OpenAI-compatible /images/generations endpoint (ADR-0018); finished drawings are kept in dir. */
+  /** Image generation through an OpenAI-compatible /images/generations endpoint (ADR-0018); generated images are kept in dir. */
   drawing: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; timeoutMs: number; dir: string };
 }
 
@@ -40,6 +46,7 @@ export function loadConfig(path: string): Config {
   const persona = readFileSync(resolve(base, raw.personaFile), 'utf8');
   if (raw.systemPromptFile !== undefined && (typeof raw.systemPromptFile !== 'string' || !raw.systemPromptFile.trim())) throw new Error('systemPromptFile must be a non-empty file path when set.');
   const config: Config = {
+    ...(raw.adapters === undefined ? {} : { adapters: readAdapters(raw.adapters) }),
     credentialsFile: credentialPaths(path, raw.credentialsFile).file,
     uiLanguage: raw.uiLanguage ?? (process.env.QIUYUE_UI_LANGUAGE?.toLowerCase() === 'zh' ? 'zh' : 'en'),
     database: resolve(base, raw.database ?? 'data/life.sqlite'),
@@ -81,7 +88,7 @@ export function loadConfig(path: string): Config {
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
   validateModelConfig(config.model);
   for (const name of [config.model.apiKeyEnv, config.snowluma.tokenEnv, config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
-  if (!Number.isSafeInteger(config.snowluma.selfId) || config.snowluma.selfId <= 0) throw new Error('snowluma.selfId must be an actual QQ account ID.');
+  if (config.adapters === undefined && (!Number.isSafeInteger(config.snowluma.selfId) || config.snowluma.selfId <= 0)) throw new Error('snowluma.selfId must be an actual QQ account ID.');
   if (!Array.isArray(config.snowluma.groups) || config.snowluma.groups.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('snowluma.groups must be an array of group IDs for history recovery; it may be empty.');
   const url = new URL(config.snowluma.url);
   if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password) throw new Error('SnowLuma must use a ws/wss URL without credentials.');
@@ -119,7 +126,7 @@ export function loadConfig(path: string): Config {
   if ((permissions.allow !== '*' && !Array.isArray(permissions.allow)) || !Array.isArray(permissions.deny)) throw new Error('snowluma.tools.allow must be "*" or an array of interface names; deny must be an array of interface names.');
   for (const name of [...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny]) {
     if (typeof name !== 'string') throw new Error('SnowLuma interface permissions accept only interface names.');
-    findSnowLumaAction(name);
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) throw new Error(`Invalid native interface name: ${name}`);
   }
   return config;
 }
@@ -132,4 +139,27 @@ export function webuiSettings(raw: Record<string, any>): Config['webui'] {
   if (typeof webui.tokenEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(webui.tokenEnv)) throw new Error('Credential settings must be environment variable names.');
   if (webui.service !== null && (typeof webui.service !== 'string' || !/^[\w@.:-]+$/.test(webui.service))) throw new Error('webui.service must be a systemd user unit name or null.');
   return webui;
+}
+
+function readAdapters(value: unknown): AdapterConfig[] {
+  if (!Array.isArray(value)) throw new Error('adapters must be an array.');
+  const ids = new Set<string>(), accounts = new Set<string>();
+  return value.map(raw => {
+    if (!raw || !/^[a-z][a-z0-9_]{0,23}$/.test(raw.id) || ids.has(raw.id)) throw new Error('Each adapter needs a unique id of 1–24 lowercase letters, digits or underscores.');
+    ids.add(raw.id);
+    if (raw.driver !== 'snowluma') throw new Error('Built-in adapter driver must be snowluma. Other adapters register through plugins.');
+    if (typeof raw.accountId !== 'string' || !/^[1-9][0-9]*$/.test(raw.accountId) || !Number.isSafeInteger(Number(raw.accountId))) throw new Error('These adapters require accountId as a positive decimal string within the platform ID range.');
+    const key = `qq:${raw.accountId}`;
+    if (accounts.has(key)) throw new Error('Configure each platform account once to avoid competing event consumers.'); accounts.add(key);
+    const config: AdapterConfig = { groups: [], maxStreamBytes: 32_000_000, ...raw, tokenEnv: raw.tokenEnv ?? 'SNOWLUMA_TOKEN', tools: { allow: '*', deny: [], ...raw.tools } };
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.tokenEnv)) throw new Error('Adapter tokenEnv must be an environment variable name.');
+    const url = new URL(config.url ?? 'ws://127.0.0.1:3001');
+    if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Adapter URL has an invalid protocol or embedded credentials.');
+    if (!Array.isArray(config.groups) || config.groups.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('Adapter groups must contain positive QQ group IDs.');
+    for (const limit of [config.maxStreamBytes]) if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Adapter size limits must be positive integers.');
+    const permissions = config.tools;
+    if (permissions.allow !== '*' && !Array.isArray(permissions.allow) || !Array.isArray(permissions.deny)) throw new Error('Adapter tools.allow must be "*" or an array; deny must be an array.');
+    if ([...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny].some(name => typeof name !== 'string' || !name)) throw new Error('Adapter permission names must be non-empty strings.');
+    return config;
+  });
 }

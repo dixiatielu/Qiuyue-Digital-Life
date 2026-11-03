@@ -4,7 +4,7 @@ import { errorText } from '../domain.js';
 import type { LifePlugin } from '../plugins.js';
 import { clipRecordText } from '../record.js';
 import type { ThoughtContext, ToolRuntime } from '../tool-runtime.js';
-import { findSnowLumaAction, nativeToolDescription } from '../snowluma-catalog.js';
+import { findSnowLumaAction, nativeToolDescription } from '../adapters/snowluma/catalog.js';
 import type { StickerStore } from './stickers-store.js';
 import type { StickerRecall } from './stickers-recall.js';
 

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { stripVTControlCharacters } from 'node:util';
 import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
-import { isAmbient, type Action, type EnvironmentEvent, type Observation } from './domain.js';
+import { ambientEvent, type Action, type EnvironmentEvent, type Observation } from './domain.js';
 import { Store, type StoreNotice } from './store.js';
 
 export interface DisplayItem {
@@ -160,8 +160,8 @@ export class Monitor {
   private environment(event: EnvironmentEvent, live = true) {
     const previous = this.items.get(event.id);
     const sender = (event.payload.sender as { card?: string; nickname?: string } | undefined);
-    const source = event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private chat ${event.actorId}`, `私聊 ${event.actorId}`) : ui('Environment', '环境');
-    this.put({ id: event.id, at: event.at, type: 'environment', source, sender: sender?.card || sender?.nickname || (event.actorId === undefined ? undefined : String(event.actorId)),
+    const source = event.source?.conversation ?? (event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private chat ${event.actorId}`, `私聊 ${event.actorId}`) : ui('Environment', '环境'));
+    this.put({ id: event.id, at: event.at, type: 'environment', source, sender: event.source?.actorName || event.source?.actor || sender?.card || sender?.nickname || (event.actorId === undefined ? undefined : String(event.actorId)),
       title: `${event.status === 'processed' ? ui('Recorded', '已记录') : ui('Received', '收到')} · ${source}${sender?.card || sender?.nickname ? ` · ${sender.card || sender.nickname}` : event.actorId ? ` · ${event.actorId}` : ''}`,
       text: event.text, state: event.status === 'processing' && previous?.state === 'accepted' ? 'accepted' : event.status,
       runId: event.status === 'pending' ? undefined : previous?.runId,
@@ -228,9 +228,9 @@ export class Monitor {
   }
   private observationText(observation: Observation) {
     // Ambient signals accompany the events that wake a thought; lead with those waking events.
-    const ambient = (event: EnvironmentEvent) => isAmbient(event.kind, event.actorId, this.config.snowluma.selfId);
+    const ambient = (event: EnvironmentEvent) => ambientEvent(event, this.config.snowluma.selfId);
     return [...observation.events.filter(event => !ambient(event)), ...observation.events.filter(ambient)].map(event => {
-      const source = event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private ${event.actorId}`, `私聊 ${event.actorId}`) : event.kind;
+      const source = event.source?.conversation ?? (event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private ${event.actorId}`, `私聊 ${event.actorId}`) : event.kind);
       const sender = event.payload.sender as { card?: string; nickname?: string } | undefined;
       const name = sender?.card || sender?.nickname || (event.kind === 'message' ? event.actorId : undefined);
       const text = event.kind === 'perception_gap' ? ui('Perception gap notification', '感知缺口通知') : event.kind.startsWith('meta_event:lifecycle') ? ui('Connection state notification', '连接状态通知') : event.text;
