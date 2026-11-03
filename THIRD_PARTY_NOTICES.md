@@ -14,6 +14,10 @@ The upstream terms restrict commercial use, require license and notice retention
 
 Redistributing SDK code, modified catalogs, bundled dependencies, or historical source containing upstream material must be assessed against the applicable upstream terms. Do not include the local catalog in release artifacts without resolving its redistribution conditions. Excluding a file from new snapshots does not remove it from older Git history.
 
+## Telegram catalog
+
+`src/adapters/telegram/catalog.json` is generated from all API methods in `@grammyjs/types` 5.0.0, published by the [grammY types project](https://github.com/grammyjs/types) under MIT. Its copyright and full license are included at [`src/adapters/telegram/LICENSE`](src/adapters/telegram/LICENSE) and copied into builds. Generator inputs replace the generic upload type with a local upload descriptor and retain native parameter structure. This is a fixed type-package coverage statement, not an assertion of parity with future Telegram releases.
+
 ## Other dependencies
 
-`package-lock.json` records the installed dependency versions. Their own license and notice files remain authoritative. The project does not vendor dependency source or build a bundled JavaScript release.
+`package-lock.json` records the installed dependency versions. Their own license and notice files remain authoritative. Apart from the attributed generated Telegram catalog, the project does not vendor dependency source or build a bundled JavaScript release.

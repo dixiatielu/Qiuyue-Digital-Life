@@ -1,6 +1,6 @@
 # Qiuyue Digital Life
 
-A digital life with a persistent identity and memory, built with Pi Agent. Platform adapters expose complete native APIs as tools; one Agent observes QQ and other social environments and decides when to participate, act, or stay silent.
+A digital life with a persistent identity and memory, built with Pi Agent. Platform adapters expose complete native APIs as tools; one Agent observes QQ or Telegram and decides when to participate, act, or stay silent.
 
 English | [简体中文](README.zh.md)
 
@@ -13,7 +13,7 @@ English | [简体中文](README.zh.md)
 
 ## Platform adapters
 
-Use named SnowLuma adapters or provide another platform through the plugin SDK. All permitted native APIs are independently callable by the same Agent. Existing QQ configuration remains compatible. See [configuration, migration, coverage, and the adapter SDK](docs/platform-adapters.md).
+Use named SnowLuma and Telegram adapters together, or run Telegram without a SnowLuma service or catalog. All permitted native APIs are independently callable by the same Agent. Existing QQ configuration remains compatible. See [configuration, migration, coverage, and the adapter SDK](docs/platform-adapters.md).
 
 ## Quick start
 
@@ -112,7 +112,8 @@ A web page for the same work: live status and timeline, pause and life switches,
 ```mermaid
 flowchart LR
   QQ[QQ chats and events] --> SL[SnowLuma]
-  SL --> AP[Platform adapters]
+  TG[Telegram Bot API] --> AP[Platform adapters]
+  SL --> AP
   AP --> DB[(SQLite)]
   DB --> RT[Perception and scheduling]
   RT --> PI[Single Pi Agent]

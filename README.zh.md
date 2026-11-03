@@ -1,6 +1,6 @@
 # 秋月·数字生命
 
-基于 Pi Agent 构建的数字生命，拥有持续的人格与记忆。平台适配器将完整原生接口暴露为工具；同一个 Agent 感知 QQ 等环境，自主决定何时参与、行动或保持沉默。
+基于 Pi Agent 构建的数字生命，拥有持续的人格与记忆。平台适配器将完整原生接口暴露为工具；同一个 Agent 感知 QQ、Telegram 等环境，自主决定何时参与、行动或保持沉默。
 
 [English](README.md) | 简体中文
 
@@ -13,7 +13,7 @@
 
 ## 平台适配器
 
-可接入具名的 SnowLuma 适配器，也可通过插件 SDK 接入其他平台。所有已启用的原生接口都作为独立工具交给同一个 Agent。原有 QQ 配置继续兼容。[配置、迁移、覆盖范围与适配器 SDK](docs/platform-adapters.md)说明了用法；NapCat 和 Discord 的正式适配器尚未包含在本次实现中。
+可同时接入具名的 SnowLuma 和 Telegram 适配器，也可独立使用 Telegram，无需运行 SnowLuma 服务或准备其接口目录。所有已启用的原生接口都作为独立工具交给同一个 Agent。原有 QQ 配置继续兼容。[配置、迁移、覆盖范围与适配器 SDK](docs/platform-adapters.md)说明了用法；NapCat 和 Discord 的正式适配器尚未包含在本次实现中。
 
 ## 快速开始
 
@@ -112,7 +112,8 @@ npm start -- webui --config config.json
 ```mermaid
 flowchart LR
   QQ[QQ 聊天和事件] --> SL[SnowLuma]
-  SL --> AP[平台适配器]
+  TG[Telegram Bot API] --> AP[平台适配器]
+  SL --> AP
   AP --> DB[(SQLite)]
   DB --> RT[感知与调度]
   RT --> PI[单一 Pi Agent]

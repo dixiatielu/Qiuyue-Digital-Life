@@ -6,8 +6,8 @@ import { validateModelConfig, type ModelConfig } from './model.js';
 import { checkSystemPrompt } from './prompts.js';
 
 export interface AdapterConfig {
-  id: string; driver: 'snowluma'; accountId: string; url?: string; tokenEnv: string;
-  tools: ToolPermissions; groups: number[]; maxStreamBytes: number;
+  id: string; driver: 'snowluma' | 'telegram'; accountId: string; url?: string; tokenEnv: string;
+  tools: ToolPermissions; groups: number[]; maxStreamBytes: number; maxFileBytes: number; receive: 'polling' | 'manual';
 }
 export interface Config {
   /** Omit for legacy QQ configuration; an empty list runs without built-in platform connections. */
@@ -147,16 +147,17 @@ function readAdapters(value: unknown): AdapterConfig[] {
   return value.map(raw => {
     if (!raw || !/^[a-z][a-z0-9_]{0,23}$/.test(raw.id) || ids.has(raw.id)) throw new Error('Each adapter needs a unique id of 1–24 lowercase letters, digits or underscores.');
     ids.add(raw.id);
-    if (raw.driver !== 'snowluma') throw new Error('Built-in adapter driver must be snowluma. Other adapters register through plugins.');
+    if (!['snowluma', 'telegram'].includes(raw.driver)) throw new Error('Built-in adapter driver must be snowluma or telegram. Other adapters register through plugins.');
     if (typeof raw.accountId !== 'string' || !/^[1-9][0-9]*$/.test(raw.accountId) || !Number.isSafeInteger(Number(raw.accountId))) throw new Error('These adapters require accountId as a positive decimal string within the platform ID range.');
-    const key = `qq:${raw.accountId}`;
+    const key = `${raw.driver === 'snowluma' ? 'qq' : 'telegram'}:${raw.accountId}`;
     if (accounts.has(key)) throw new Error('Configure each platform account once to avoid competing event consumers.'); accounts.add(key);
-    const config: AdapterConfig = { groups: [], maxStreamBytes: 32_000_000, ...raw, tokenEnv: raw.tokenEnv ?? 'SNOWLUMA_TOKEN', tools: { allow: '*', deny: [], ...raw.tools } };
+    const config: AdapterConfig = { groups: [], maxStreamBytes: 32_000_000, maxFileBytes: 50_000_000, receive: 'polling', ...raw, tokenEnv: raw.tokenEnv ?? (raw.driver === 'telegram' ? 'TELEGRAM_BOT_TOKEN' : 'SNOWLUMA_TOKEN'), tools: { allow: '*', deny: [], ...raw.tools } };
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.tokenEnv)) throw new Error('Adapter tokenEnv must be an environment variable name.');
-    const url = new URL(config.url ?? 'ws://127.0.0.1:3001');
-    if (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Adapter URL has an invalid protocol or embedded credentials.');
+    const url = new URL(config.url ?? (config.driver === 'snowluma' ? 'ws://127.0.0.1:3001' : 'https://api.telegram.org'));
+    if (!(config.driver === 'snowluma' ? ['ws:', 'wss:'] : ['https:', 'http:']).includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Adapter URL has an invalid protocol or embedded credentials.');
     if (!Array.isArray(config.groups) || config.groups.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('Adapter groups must contain positive QQ group IDs.');
-    for (const limit of [config.maxStreamBytes]) if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Adapter size limits must be positive integers.');
+    for (const limit of [config.maxStreamBytes, config.maxFileBytes]) if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Adapter size limits must be positive integers.');
+    if (!['manual', 'polling'].includes(config.receive)) throw new Error('Telegram receive must be polling or manual.');
     const permissions = config.tools;
     if (permissions.allow !== '*' && !Array.isArray(permissions.allow) || !Array.isArray(permissions.deny)) throw new Error('Adapter tools.allow must be "*" or an array; deny must be an array.');
     if ([...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny].some(name => typeof name !== 'string' || !name)) throw new Error('Adapter permission names must be non-empty strings.');
