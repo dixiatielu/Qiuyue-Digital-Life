@@ -99,6 +99,20 @@ test('the page asks for its token, refuses foreign hosts and cross-site writes, 
   assert.equal((await call('/vendor/typebox/package.json')).status, 404);
 }));
 
+test('the page serves its Markdown browser module with JavaScript MIME type after authentication', () => page(async (call, _dir, port) => {
+  const index = await call('/');
+  const imports = JSON.parse(index.body.match(/<script type="importmap">(.*?)<\/script>/)[1]).imports;
+  const path = imports['markdown-it/browser'];
+  assert.equal(typeof path, 'string');
+  assert.equal((await call(path, { headers: { Authorization: '' } })).status, 401);
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type') ?? '', /^text\/javascript/);
+  const browserModule = await response.text();
+  assert.match(browserModule, /export\s*\{/);
+  assert.equal((await call('/app/markdown.js')).status, 200);
+}));
+
 test('the login page loads its styling and appearance before authentication, without exposing management resources', () => page(async (call, dir, port) => {
   const anonymous = { headers: { Authorization: '' } };
   const login = await call('/', anonymous);

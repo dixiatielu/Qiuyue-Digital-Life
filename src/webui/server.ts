@@ -26,8 +26,8 @@ import { drawingIdPattern, validateDrawingPatch, validateDrawingQuery, type Draw
 
 const publicDir = resolve(fileURLToPath(new URL('./public/', import.meta.url)));
 const modulesDir = resolve(fileURLToPath(new URL('../../node_modules/', import.meta.url)));
-const vendored = new Set(['preact', 'htm']);
-const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
+const vendored = new Set(['preact', 'htm', 'markdown-it']);
+const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const cookie = 'qiuyue_webui';
 // These contain presentation only. Management modules and every API still require authentication.
 const loginAssets = new Set(['/app/style.css', '/app/favicon.svg', '/app/login.js', '/app/theme.js']);

@@ -1,4 +1,5 @@
 import { api, Badge, Card, ContextNote, DiffView, failed, html, Loading, PageHeader, Modal, t, Tabs, time, toast, useAsync, useMemo, useState } from '../lib.js';
+import { Markdown } from '../markdown.js';
 
 /** Versions kept for one of the operator's files, newest first, each comparable with the editor. */
 export function History({ kind, current, onLoad, saved }) {
@@ -68,7 +69,7 @@ function MemoryDetail({ id, onClose }) {
   const detail = useAsync(() => api(`/api/memory/${encodeURIComponent(id)}`), [id]);
   return html`<${Modal} wide title=${t('Memory', '记忆')} onClose=${onClose}>
     ${!detail.data ? html`<${Loading} state=${detail} />` : html`
-      <h3>${detail.data.memory.title}</h3><p class="pre">${detail.data.memory.content}</p>
+      <h3>${detail.data.memory.title}</h3><${Markdown} text=${detail.data.memory.content} />
       <p class="muted small mono">${detail.data.memory.id} · ${time(detail.data.memory.createdAt)}</p>
       <h3>${t('Sources', '依据')}</h3>
       <ul class="plain">${detail.data.sources.map(source => html`<li><span class="mono small">${source.id}</span> <${Badge}>${source.kind}<//> <span class="muted small">${time(source.at)}</span><div class="small pre clamp">${source.text}</div></li>`)}</ul>
@@ -112,7 +113,7 @@ function Forget({ entry, onClose, onDone }) {
 function Folded({ text }) {
   const [open, setOpen] = useState(false);
   const long = text.length > 600 || text.split('\n').length > 12;
-  return html`<p class=${`pre ${long && !open ? 'folded' : ''}`}>${text}</p>${long ? html`<button class="link small" onClick=${() => setOpen(!open)}>${open ? t('Fold', '收起') : t(`Show all ${[...text].length} characters`, `展开全部 ${[...text].length} 字`)}</button>` : null}`;
+  return html`<${Markdown} text=${text} class=${long && !open ? 'folded' : ''} />${long ? html`<button class="link small" aria-expanded=${open} onClick=${() => setOpen(!open)}>${open ? t('Fold', '收起') : t(`Show all ${[...text].length} characters`, `展开全部 ${[...text].length} 字`)}</button>` : null}`;
 }
 
 function Development() {
