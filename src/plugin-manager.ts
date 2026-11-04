@@ -9,7 +9,6 @@ import type { PluginDefinition } from './plugin-sdk.js';
 import { PluginHost, type LifePlugin } from './plugins.js';
 import { createBuiltinPlugin, activePluginIds, pluginIds, type BuiltinPluginId } from './plugins/index.js';
 import type { LifeRuntime } from './runtime.js';
-import type { SocialAdapter } from './platform.js';
 import { digest, type Store } from './store.js';
 import { join } from 'node:path';
 
@@ -28,14 +27,13 @@ function fingerprint(id: string, config: Config): string {
     case 'drawing': return digest({ enabled, drawing: config.drawing });
     case 'gallery': return digest({ enabled, dir: config.drawing.dir, drawing: config.drawing.enabled, generator: config.plugins.drawing, embedding: config.embedding });
     case 'web-reader': case 'web-search': return digest({ enabled, web: config.web });
-    case 'qq-stickers': return digest({ enabled, native: config.plugins['snowluma-tools'] ?? true, permissions: config.snowluma.tools, embedding: config.embedding });
-    default: return digest({ enabled, permissions: config.snowluma.tools });
+    case 'qq-stickers': return digest({ enabled, embedding: config.embedding });
+    default: return digest({ enabled });
   }
 }
 function core(config: Config) {
-  const { plugins: _plugins, web: _web, drawing: _drawing, extensions, snowluma, ...rest } = config;
-  const { tools: _tools, ...connection } = snowluma;
-  return { ...rest, snowluma: connection, drawing: { dir: config.drawing.dir }, extensions: { directory: extensions.directory, dataDirectory: extensions.dataDirectory } };
+  const { plugins: _plugins, web: _web, drawing: _drawing, extensions, ...rest } = config;
+  return { ...rest, drawing: { dir: config.drawing.dir }, extensions: { directory: extensions.directory, dataDirectory: extensions.dataDirectory } };
 }
 /** Reload is a daemon operation. The web page reads metadata and never imports user code. */
 export class PluginManager {
@@ -50,7 +48,7 @@ export class PluginManager {
   private ready = false;
   job?: PluginReloadJob;
   constructor(
-    private config: Config, readonly host: PluginHost, private store: Store, private social: SocialAdapter,
+    private config: Config, readonly host: PluginHost, private store: Store,
     private readConfig: () => Config, private credential: CredentialReader, private semantics?: SemanticSource,
     private readCredentials: () => CredentialReader = () => credential,
   ) {
@@ -141,7 +139,7 @@ export class PluginManager {
     next.extensions.reloadTimeoutMs = desired.extensions.reloadTimeoutMs;
     if (target === 'all') {
       next.plugins = desired.plugins; next.extensions.settings = desired.extensions.settings;
-      next.web = desired.web; next.drawing = { ...desired.drawing, dir: this.config.drawing.dir }; next.snowluma.tools = desired.snowluma.tools;
+      next.web = desired.web; next.drawing = { ...desired.drawing, dir: this.config.drawing.dir };
     } else {
       delete next.plugins[target];
       if (desired.plugins[target] !== undefined) next.plugins[target] = desired.plugins[target];
@@ -149,7 +147,6 @@ export class PluginManager {
       if (desired.extensions.settings[target] !== undefined) next.extensions.settings[target] = desired.extensions.settings[target]!;
       if (target === 'drawing') next.drawing = { ...desired.drawing, dir: this.config.drawing.dir };
       if (target === 'web-reader' || target === 'web-search') next.web = desired.web;
-      if (target === 'snowluma-tools') next.snowluma.tools = desired.snowluma.tools;
     }
     for (const [id, item] of this.installed) if (item.plugin.requiresRestart || item.source === 'builtin' && !builtin(id)) { delete next.extensions.settings[id]; if (this.config.extensions.settings[id]) next.extensions.settings[id] = this.config.extensions.settings[id]!; delete next.plugins[id]; if (this.config.plugins[id] !== undefined) next.plugins[id] = this.config.plugins[id]!; }
     return next;
@@ -157,7 +154,7 @@ export class PluginManager {
   private applyConfig(next: Config) {
     this.config.plugins = next.plugins; this.config.extensions.settings = next.extensions.settings;
     this.config.extensions.reloadTimeoutMs = next.extensions.reloadTimeoutMs;
-    this.config.web = next.web; this.config.drawing = next.drawing; this.config.snowluma.tools = next.snowluma.tools;
+    this.config.web = next.web; this.config.drawing = next.drawing;
   }
   private async reload(target: string, job: PluginReloadJob, signal: AbortSignal) {
     if (target !== 'all' && this.installed.get(target)?.plugin.requiresRestart) throw new Error('Native adapter plugins require a daemon restart to avoid overlapping event consumers.');
@@ -178,7 +175,7 @@ export class PluginManager {
         signal.throwIfAborted();
         if (builtin(id)) {
           if (discovered.includes(id)) throw new Error(`User plugin ${id} conflicts with a built-in plugin.`);
-          candidates.set(id, { plugin: createBuiltinPlugin(id, next, this.store, this.social, this.semantics, credential), source: 'builtin', loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
+          candidates.set(id, { plugin: createBuiltinPlugin(id, next, this.store, this.semantics, credential), source: 'builtin', loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
         } else if (discovered.includes(id)) {
           const manifest = next.plugins[id] === false ? undefined : readPluginManifest(next.extensions.directory, id);
           if (manifest) this.definitions.set(id, manifest);

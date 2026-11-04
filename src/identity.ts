@@ -23,6 +23,27 @@ export function personRef(platform: string, id: string): string { if (!/^[a-z][a
 export function parseConversationRef(value: string): { platform: string; accountId: string; type: ConversationType; id: string } | undefined {
   const match = /^([a-z][a-z0-9_-]*):([^:]+):(private|group|channel|thread):([^:]+)$/.exec(value);
   if (!match) return;
-  try { return { platform: match[1]!, accountId: decodeURIComponent(match[2]!), type: match[3] as ConversationType, id: decodeURIComponent(match[4]!) }; }
+  try {
+    const ref = { platform: match[1]!, accountId: decodeURIComponent(match[2]!), type: match[3] as ConversationType, id: decodeURIComponent(match[4]!) };
+    return conversationRef(ref, ref.type, ref.id) === value ? ref : undefined;
+  }
   catch { throw new Error('Invalid encoded conversation identifier.'); }
+}
+
+export function requireConversationRef(value: string) {
+  const ref = parseConversationRef(value);
+  if (!ref || conversationRef(ref, ref.type, ref.id) !== value) throw new Error('Use a canonical platform:account:type:id conversation reference.');
+  return ref;
+}
+export function parsePersonRef(value: string): { platform: string; id: string } | undefined {
+  const match = /^([a-z][a-z0-9_-]*):user:([^:]+)$/.exec(value);
+  if (!match) return;
+  try { const id = decodeURIComponent(match[2]!); return personRef(match[1]!, id) === value ? { platform: match[1]!, id } : undefined; } catch { return; }
+}
+export function validateSource(source: EventSource) {
+  personRef(source.platform, source.accountId);
+  if (!/^[a-z][a-z0-9_]{0,23}$/.test(source.instance)) throw new Error('Invalid platform instance.');
+  if (source.conversation) { const chat = requireConversationRef(source.conversation); if (chat.platform !== source.platform || chat.accountId !== source.accountId || chat.type !== source.conversationType) throw new Error('Conversation must belong to the event account.'); }
+  if (source.actor && parsePersonRef(source.actor)?.platform !== source.platform) throw new Error('Actor must belong to the event platform.');
+  if (typeof source.own !== 'boolean' || typeof source.addressed !== 'boolean' || !['normal', 'ambient', 'transport'].includes(source.attention)) throw new Error('Invalid event attention context.');
 }

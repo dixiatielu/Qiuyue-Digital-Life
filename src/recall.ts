@@ -95,7 +95,7 @@ export class SemanticRecall implements SemanticSource {
     });
   }
   private observe(event: EnvironmentEvent) {
-    if (event.kind !== 'message' || (!event.source && event.actorId === undefined) || ownEvent(event, this.config.snowluma.selfId) || this.messages.has(event.id) || this.waiting.has(event.id) || Date.now() < this.pausedUntil) return;
+    if (event.kind !== 'message' || !event.source?.actor || ownEvent(event) || this.messages.has(event.id) || this.waiting.has(event.id) || Date.now() < this.pausedUntil) return;
     const faces = event.text.includes('[face ') ? this.emojiNames() : {};
     const text = queryText(event.text, faces, this.config.embedding.selfNames);
     if ([...text].length < 2) return;

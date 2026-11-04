@@ -180,10 +180,7 @@ class PluginScope {
               query: (instance, operation, parameters) => { check(); const name = nativeToolName(instance, operation); if (!runtime.definition(name).readOnly) throw new Error('Use adapters.action for external writes.'); return runtime.query(name, parameters, combined); },
               action: (instance, operation, parameters) => { write(); const name = nativeToolName(instance, operation); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
             },
-            snowluma: {
-              query: (name, parameters) => { check(); if (!runtime.definition(name).readOnly) throw new Error('Use snowluma.action for external writes.'); return runtime.query(name, parameters, combined); },
-              action: (name, parameters) => { write(); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
-            },
+
           });
           check();
           const response = jsonResult(result);
@@ -229,7 +226,7 @@ export async function loadUserPlugin(id: string, config: Config, store: Store, c
     if (!existsSync(join(snapshot, 'package.json'))) writeFileSync(join(snapshot, 'package.json'), '{"type":"module"}\n');
     const module = await waitFor(import(pathToFileURL(join(snapshot, entry)).href), signal);
     const exported = module.default as PluginDefinition;
-    if (!exported || exported.id !== id || exported.apiVersion !== 1 || typeof exported.setup !== 'function') throw new Error(`Plugin ${id} must export { id: '${id}', apiVersion: 1, setup(ctx) }.`);
+    if (!exported || exported.id !== id || exported.apiVersion !== 2 || typeof exported.setup !== 'function') throw new Error(`Plugin ${id} must export { id: '${id}', apiVersion: 2, setup(ctx) }.`);
     // Read the sidecar from the same snapshot as the code, not a newer directory revision.
     const sidecar = source.entries.find(entry => entry.name === 'plugin.json');
     const definition = { ...exported, ...(sidecar ? validateManifest(JSON.parse(sidecar.data.toString('utf8')), id) : {}) };

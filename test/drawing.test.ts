@@ -99,15 +99,15 @@ test('a drawing is sent by its ID: what is sent carries the picture, and the act
     const { drawingId } = text(await run('imagen', { prompt: 'A mug of cocoa by a snowy window, watercolor' }));
     const finished = done(); paint.finish(png); await finished;
     const message = [{ type: 'image', data: { file: drawingId } }, { type: 'text', data: { text: '画好啦' } }];
-    await run('send_group_msg', { group_id: 100, message });
+    await run("qq_main__send_group_msg", { group_id: 100, message });
     assert.deepEqual(sent, [{ action: 'send_group_msg', args: { group_id: 100, message: [{ type: 'image', data: { file: `base64://${png.toString('base64')}` } }, { type: 'text', data: { text: '画好啦' } }] } }]);
-    const action = f.store.actions().find(item => item.kind === 'send_group_msg')!;
+    const action = f.store.actions().find(item => item.kind === 'qq_main__send_group_msg')!;
     assert.deepEqual([action.status, action.args], ['success', { group_id: 100, message }]);
-    await run('send_qzone_msg', { content: '今天画的', images: [drawingId] });
+    await run("qq_main__send_qzone_msg", { content: '今天画的', images: [drawingId] });
     assert.deepEqual(sent[1]!.args.images, [`base64://${png.toString('base64')}`]);
     // A drawing that does not exist fails before anything is recorded or sent.
     const missing = 'drawing:00000000-0000-4000-8000-000000000000';
-    await assert.rejects(run('send_group_msg', { group_id: 100, message: [{ type: 'image', data: { file: missing } }] }), /does not exist/);
+    await assert.rejects(run("qq_main__send_group_msg", { group_id: 100, message: [{ type: 'image', data: { file: missing } }] }), /does not exist/);
     assert.equal(sent.length, 2); assert.equal(f.store.actions().length, 2);
   } finally { close(); }
 });

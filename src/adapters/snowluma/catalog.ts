@@ -1,3 +1,4 @@
+import { conversationRef } from '../../identity.js';
 import { readFileSync } from 'node:fs';
 import type { TSchema } from 'typebox';
 
@@ -35,10 +36,10 @@ export function nativeToolDescription(action: SnowLumaActionDefinition, usage?: 
   return [action.summary, `SnowLuma native interface ${action.name}; ${action.readOnly ? 'read-only query' : 'may have side effects and is subject to action budgets and deduplication'}.`, ...action.invariants, action.returns, action.stream ? 'Streaming results return an array of raw data frames in arrival order.' : '', usage].filter(Boolean).join('\n');
 }
 /** The native target is also the chat an action engages. */
-export function snowlumaChat(args: unknown): string | undefined {
+export function snowlumaChat(args: unknown, accountId: string): string | undefined {
   const { group_id: group, user_id: user, message_type: type } = (args ?? {}) as Record<string, unknown>;
-  if (group != null && type !== 'private') return `group:${Number(group)}`;
-  return user != null ? `private:${Number(user)}` : undefined;
+  if (group != null && type !== 'private') return conversationRef({ platform: 'qq', accountId }, 'group', String(group));
+  return user != null ? conversationRef({ platform: 'qq', accountId }, 'private', String(user)) : undefined;
 }
 export function findSnowLumaAction(name: string): SnowLumaActionDefinition {
   const action = getSnowLumaCatalog().actions.find(action => action.name === name);

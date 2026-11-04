@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { dirname, join, resolve } from 'node:path';
 import { Credentials, credentialPaths } from '../credentials.js';
 import { loadConfig, type Config } from '../config.js';
-import { builtinSystemPrompt, platformSystemPrompt, checkSystemPrompt } from '../prompts.js';
+import { builtinSystemPrompt, checkSystemPrompt } from '../prompts.js';
 
 export type HistoryKind = 'config' | 'persona' | 'prompt';
 const kept: Record<HistoryKind, { count: number; ext: string }> = { config: { count: 50, ext: 'json' }, persona: { count: 200, ext: 'md' }, prompt: { count: 100, ext: 'md' } };
@@ -26,10 +26,8 @@ const normalized = (text: string) => text.replace(/\r\n?/g, '\n');
 /** The operator's files: configuration, persona, and system prompt, each saved whole with earlier versions kept beside the life database. */
 export class OperatorFiles {
   readonly base: string;
-  readonly envPath: string;
   constructor(readonly configPath: string) {
     this.base = dirname(configPath);
-    this.envPath = resolve(this.base, '.env');
   }
   get dataDir() {
     let database = 'data/life.sqlite';
@@ -83,7 +81,7 @@ export class OperatorFiles {
     const raw = this.raw(); const path = this.promptPath(raw);
     const override = path ? readText(path) : undefined;
     const base = existsSync(this.promptBasePath) ? readFileSync(this.promptBasePath, 'utf8') : undefined;
-    const builtin = raw.adapters === undefined ? builtinSystemPrompt : platformSystemPrompt;
+    const builtin = builtinSystemPrompt;
     return { path, file: raw.systemPromptFile as string | undefined, builtin, override, hash: hash(override ?? ''), base, builtinChanged: override !== undefined && base !== undefined && base !== builtin };
   }
   /** Save the operator's template; the first save also points systemPromptFile at it. The built-in version it was written against is kept, to tell later when that changes. */

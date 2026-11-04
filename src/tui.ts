@@ -28,14 +28,14 @@ const toolLabel = (name: string) => ({
   send_custom_face: ui('Send sticker', '发送表情'), add_custom_face: ui('Save sticker', '收藏表情'),
   set_group_reaction: ui('React to message', '回应消息'), search_snowluma_tools: ui('Find tools', '查找工具'),
   load_snowluma_tools: ui('Read tool instructions', '读取工具用法'),
-} as Record<string, string>)[name] ?? name;
+} as Record<string, string>)[name.split('__').at(-1)!] ?? name;
 const symbol = (item: DisplayItem) => problem(item) ? '!' : ['done', 'success', 'processed', 'stop'].includes(item.state ?? '') ? '✓' : item.state === 'interrupted' || item.state === 'aborted' ? '−' : '·';
 const outcomeStyle = (item: DisplayItem, text: string, theme: TuiTheme) => item.state === 'unknown' || item.state === 'pending' ? theme.warning(text) : problem(item) ? theme.danger(text) : item.state === 'success' ? theme.success(text) : dim(text);
 const marker = (item: DisplayItem, selected: boolean, theme: TuiTheme) => selected ? theme.accent('›') : problem(item) ? outcomeStyle(item, symbol(item), theme) : symbol(item) === '✓' ? theme.success('✓') : ['running', 'preparing', 'streaming'].includes(item.state ?? '') ? theme.accent(symbol(item)) : dim(symbol(item));
 function argumentsOf(item: DisplayItem): Record<string, unknown> {
   try { const value = JSON.parse(item.text); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; }
 }
-const actionKind = (item: DisplayItem) => item.actionKind ?? item.title.replace(/^(?:Action|行动) · /, '');
+const actionKind = (item: DisplayItem) => (item.actionKind ?? item.title.replace(/^(?:Action|行动) · /, '')).split('__').at(-1)!;
 const isMessage = (item: DisplayItem) => ['send_group_msg', 'send_private_msg', 'send_custom_face', 'send_group_ai_record'].includes(actionKind(item));
 function messageText(value: unknown): string {
   if (typeof value === 'string') return plainText(value);

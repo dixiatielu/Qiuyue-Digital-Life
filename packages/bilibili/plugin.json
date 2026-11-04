@@ -1,6 +1,6 @@
 {
   "id": "bilibili",
-  "apiVersion": 1,
+  "apiVersion": 2,
   "version": "0.2.0",
   "name": "B 站",
   "description": "搜索与阅读视频简介、可用字幕和评论，保留续读进度；使用已登录账号原生收藏／取消收藏。",

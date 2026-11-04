@@ -10,7 +10,7 @@ export interface ReadingItem {
 }
 export interface ReadingEntry extends ReadingItem {
   discoveredAt: number; readAt?: number; sourceId?: string;
-  cursor?: Record<string, number>; saved?: boolean; note?: string;
+  cursor?: Record<string, number>; note?: string;
   platformFavorite?: { saved: boolean; checkedAt: number; collectionId?: number };
 }
 export interface Reading {
@@ -79,8 +79,8 @@ export class ReadingHistory {
   private entries() { return this.storage.get<ReadingEntry[]>('history', [])!; }
   get(input: string) { return this.entries().find(item => item.id === input || item.url === input); }
   private write(entries: ReadingEntry[]) {
-    const kept = entries.filter(item => item.saved).sort((a, b) => (b.platformFavorite?.checkedAt ?? b.readAt ?? b.discoveredAt) - (a.platformFavorite?.checkedAt ?? a.readAt ?? a.discoveredAt)).slice(0, 100);
-    const recent = entries.filter(item => !item.saved).sort((a, b) => (b.readAt ?? b.discoveredAt) - (a.readAt ?? a.discoveredAt)).slice(0, 200);
+    const kept = entries.filter(item => item.platformFavorite?.saved).sort((a, b) => (b.platformFavorite?.checkedAt ?? b.readAt ?? b.discoveredAt) - (a.platformFavorite?.checkedAt ?? a.readAt ?? a.discoveredAt)).slice(0, 100);
+    const recent = entries.filter(item => !item.platformFavorite?.saved).sort((a, b) => (b.readAt ?? b.discoveredAt) - (a.readAt ?? a.discoveredAt)).slice(0, 200);
     this.storage.set('history', [...kept, ...recent]);
   }
   discover(items: ReadingItem[]) {
@@ -95,15 +95,15 @@ export class ReadingHistory {
   keep(id: string, saved: boolean, note?: string, collectionId?: number) {
     const entries = this.entries(), item = entries.find(item => item.id === id);
     if (!item) throw new Error('Read or discover this item before keeping it.');
-    item.saved = saved; if (note !== undefined) item.note = note;
+    if (note !== undefined) item.note = note;
     item.platformFavorite = { saved, checkedAt: Date.now(), ...(collectionId === undefined ? {} : { collectionId }) };
     this.write(entries);
     return { id, saved, note: item.note };
   }
   list(savedOnly: boolean, offset: number) {
-    const entries = this.entries().filter(item => !savedOnly || item.saved).sort((a, b) => (b.readAt ?? b.discoveredAt) - (a.readAt ?? a.discoveredAt));
+    const entries = this.entries().filter(item => !savedOnly || item.platformFavorite?.saved).sort((a, b) => (b.readAt ?? b.discoveredAt) - (a.readAt ?? a.discoveredAt));
     return { items: entries.slice(offset, offset + 20).map(({ locator: _, ...item }) => item), nextOffset: offset + 20 < entries.length ? offset + 20 : null,
-      scope: 'Local reading cache, not a full or live account favorites listing. platformFavorite is the last confirmed account state; an older saved item without it is a legacy local bookmark.' };
+      scope: 'Local reading cache, not a full or live account favorites listing. platformFavorite is the last confirmed account state.' };
   }
 }
 

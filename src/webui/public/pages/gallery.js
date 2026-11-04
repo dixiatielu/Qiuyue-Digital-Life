@@ -95,8 +95,8 @@ export function GalleryPage({ overview }) {
       </div>
       <details><summary>${t('Filter by date, tag or origin', '按日期、标签或来源筛选')}</summary><div class="gallery-filter-grid">
         <label>${t('Tag', '标签')}<input value=${form.tag} onInput=${event => set('tag', event.currentTarget.value)} /></label>
-        <label>${t('Person (QQ)', '相关人物（QQ 号）')}<input value=${form.person} onInput=${event => set('person', event.currentTarget.value)} /></label>
-        <label>${t('Conversation', '来源聊天')}<input placeholder="group:123 / private:123" value=${form.conversation} onInput=${event => set('conversation', event.currentTarget.value)} /></label>
+        <label>${t('Person reference', '相关人物标识')}<input placeholder="qq:user:123" value=${form.person} onInput=${event => set('person', event.currentTarget.value)} /></label>
+        <label>${t('Conversation', '来源聊天')}<input placeholder="qq:900:group:123" value=${form.conversation} onInput=${event => set('conversation', event.currentTarget.value)} /></label>
         <label>${t('From', '开始日期')}<input type="date" value=${form.from} onInput=${event => set('from', event.currentTarget.value)} /></label>
         <label>${t('Through', '结束日期')}<input type="date" value=${form.to} onInput=${event => set('to', event.currentTarget.value)} /></label>
       </div></details>

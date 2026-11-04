@@ -69,7 +69,7 @@ export async function serveControl(path: string, handler: (request: ControlReque
         const request = JSON.parse(input.split('\n')[0]!);
         if (!Array.isArray(request.args) || request.args.some((x: unknown) => typeof x !== 'string')) throw new Error('Invalid command format.');
         if (request.args[0] === 'subscribe') {
-          if (!monitor) throw new Error('The running daemon does not support live display; restart with the new version.');
+          if (!monitor) throw new Error('Live display is unavailable on this control endpoint.');
           if (request.cursor !== undefined && (typeof request.cursor?.instanceId !== 'string' || !Number.isSafeInteger(request.cursor?.seq) || request.cursor.seq < 0)) throw new Error('Invalid subscription cursor format.');
           socket.setTimeout(0);
           unsubscribe = monitor.subscribe(request.cursor, packet => {
@@ -95,7 +95,7 @@ export async function requestControl(config: Config, request: ControlRequest): P
   try { return await callControl(config.socket, request); }
   catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
   const store = new Store(config.database, config.life.enabled);
-  try { const release = store.acquireDaemon(); try { store.bindAccount(config.snowluma.selfId); return handleControl(store, request); } finally { release(); } }
+  try { const release = store.acquireDaemon(); try { return handleControl(store, request); } finally { release(); } }
   finally { store.close(); }
 }
 

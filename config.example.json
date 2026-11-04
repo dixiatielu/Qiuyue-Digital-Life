@@ -9,19 +9,6 @@
     "id": "REPLACE_WITH_A_VISION_MODEL_FROM_MODELS_COMMAND",
     "apiKeyEnv": "MODEL_API_KEY"
   },
-  "snowluma": {
-    "url": "ws://127.0.0.1:3001",
-    "tokenEnv": "SNOWLUMA_TOKEN",
-    "selfId": 123456789,
-    "groups": [
-      123456789
-    ],
-    "tools": {
-      "allow": "*",
-      "deny": []
-    },
-    "maxStreamBytes": 32000000
-  },
   "life": {
     "enabled": false,
     "allowFiction": false,
@@ -101,5 +88,22 @@
     "port": 8848,
     "tokenEnv": "WEBUI_TOKEN",
     "service": null
-  }
+  },
+  "adapters": [
+    {
+      "url": "ws://127.0.0.1:3001",
+      "tokenEnv": "SNOWLUMA_TOKEN",
+      "groups": [
+        123456789
+      ],
+      "tools": {
+        "allow": "*",
+        "deny": []
+      },
+      "maxStreamBytes": 32000000,
+      "id": "qq_main",
+      "driver": "snowluma",
+      "accountId": "123456789"
+    }
+  ]
 }

@@ -160,9 +160,9 @@ export class Monitor {
   private environment(event: EnvironmentEvent, live = true) {
     const previous = this.items.get(event.id);
     const sender = (event.payload.sender as { card?: string; nickname?: string } | undefined);
-    const source = event.source?.conversation ?? (event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private chat ${event.actorId}`, `私聊 ${event.actorId}`) : ui('Environment', '环境'));
-    this.put({ id: event.id, at: event.at, type: 'environment', source, sender: event.source?.actorName || event.source?.actor || sender?.card || sender?.nickname || (event.actorId === undefined ? undefined : String(event.actorId)),
-      title: `${event.status === 'processed' ? ui('Recorded', '已记录') : ui('Received', '收到')} · ${source}${sender?.card || sender?.nickname ? ` · ${sender.card || sender.nickname}` : event.actorId ? ` · ${event.actorId}` : ''}`,
+    const source = event.source?.conversation ?? ui('Environment', '环境');
+    this.put({ id: event.id, at: event.at, type: 'environment', source, sender: event.source?.actorName || event.source?.actor || sender?.card || sender?.nickname || (event.source?.actor === undefined ? undefined : String(event.source?.actor)),
+      title: `${event.status === 'processed' ? ui('Recorded', '已记录') : ui('Received', '收到')} · ${source}${sender?.card || sender?.nickname ? ` · ${sender.card || sender.nickname}` : event.source?.actor ? ` · ${event.source?.actor}` : ''}`,
       text: event.text, state: event.status === 'processing' && previous?.state === 'accepted' ? 'accepted' : event.status,
       runId: event.status === 'pending' ? undefined : previous?.runId,
       eventKind: event.kind, receivedAt: event.receivedAt ?? event.at,
@@ -222,23 +222,23 @@ export class Monitor {
     this.runningTools.clear(); this.runActions.clear();
     this.put({ id: `run:${runId}`, at: now, type: 'run', title: ui('Thinking run', '本轮思考'), text: this.observationText(observation),
       state: 'running', runId, observationId: observation.batchId, eventIds: observation.events.map(event => event.id),
-      details: this.describe(observation.events.map(event => ({ id: event.id, kind: event.kind, source: event.groupId ?? event.actorId, text: event.text }))),
+      details: this.describe(observation.events.map(event => ({ id: event.id, kind: event.kind, source: event.source?.conversation ?? event.source?.actor, text: event.text }))),
     });
     this.observation(observation); this.refresh();
   }
   private observationText(observation: Observation) {
     // Ambient signals accompany the events that wake a thought; lead with those waking events.
-    const ambient = (event: EnvironmentEvent) => ambientEvent(event, this.config.snowluma.selfId);
+    const ambient = (event: EnvironmentEvent) => ambientEvent(event);
     return [...observation.events.filter(event => !ambient(event)), ...observation.events.filter(ambient)].map(event => {
-      const source = event.source?.conversation ?? (event.groupId ? ui(`Group ${event.groupId}`, `群 ${event.groupId}`) : event.actorId ? ui(`Private ${event.actorId}`, `私聊 ${event.actorId}`) : event.kind);
+      const source = event.source?.conversation ?? event.kind;
       const sender = event.payload.sender as { card?: string; nickname?: string } | undefined;
-      const name = sender?.card || sender?.nickname || (event.kind === 'message' ? event.actorId : undefined);
+      const name = sender?.card || sender?.nickname || (event.kind === 'message' ? event.source?.actor : undefined);
       const text = event.kind === 'perception_gap' ? ui('Perception gap notification', '感知缺口通知') : event.kind.startsWith('meta_event:lifecycle') ? ui('Connection state notification', '连接状态通知') : event.text;
       return `${source}${name ? ` / ${name}` : ''}: ${text.replace(/\s+/g, ' ').slice(0, 180)}`;
     }).join('\n') || ui('No environment events', '无环境事件');
   }
   observation(observation: Observation) {
-    this.put({ id: observation.batchId, at: Date.now(), type: 'observation', title: ui(`Observation · ${observation.events.length} events`, `观察 · ${observation.events.length} 条事件`), text: this.observationText(observation), state: 'queued', eventIds: observation.events.map(event => event.id), details: this.describe(observation.events.map(event => ({ id: event.id, kind: event.kind, groupId: event.groupId }))), runId: this.runId });
+    this.put({ id: observation.batchId, at: Date.now(), type: 'observation', title: ui(`Observation · ${observation.events.length} events`, `观察 · ${observation.events.length} 条事件`), text: this.observationText(observation), state: 'queued', eventIds: observation.events.map(event => event.id), details: this.describe(observation.events.map(event => ({ id: event.id, kind: event.kind, source: event.source }))), runId: this.runId });
     for (const event of observation.events) {
       const received = this.items.get(event.id);
       if (received) this.put({ ...received, state: 'processing', runId: undefined });

@@ -14,7 +14,7 @@ const isSummary = (messages: Message[]) => messages.at(-1)?.role === 'user' && t
 function smallWindow(f: ReturnType<typeof fixture>) {
   // The faux provider's usage omits tool schemas. Keep this pressure fixture
   // small and test the complete catalog separately at the actual request seam.
-  f.cfg.snowluma.tools = { allow: ['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'get_group_member_info'], deny: [] };
+  f.cfg.adapters[0]!.tools = { allow: ['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'get_group_member_info'], deny: [] };
   // This fixed-size pressure scenario exercises core exchanges, independently of optional gallery tools.
   f.cfg.plugins.gallery = false;
   f.restart();
@@ -239,7 +239,7 @@ test('SQLite checkpoints restore the compacted window, source records and tools 
   let f = fixture(undefined, new Store(path));
   try {
     smallWindow(f); event(f.store, 'Observation before restart');
-    f.faux.setResponses([answer(call('load_snowluma_tools', { names: ['get_group_member_info'] })), answer(longReply('Judgment only in working history'))]);
+    f.faux.setResponses([answer(call("qq_main__load_snowluma_tools", { names: ['get_group_member_info'] })), answer(longReply('Judgment only in working history'))]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Trigger compaction');
     f.faux.setResponses([answer('Handoff summary that must survive restart.'), answer('Run completed')]);
@@ -250,7 +250,7 @@ test('SQLite checkpoints restore the compacted window, source records and tools 
     event(f.store, 'Observation after restart');
     f.faux.setResponses([context => {
       assert.match(JSON.stringify(context.messages), /Handoff summary that must survive restart/);
-      assert.ok(getCurrentTools(context.messages).some(tool => tool.name === 'get_group_member_info'));
+      assert.ok(getCurrentTools(context.messages).some(tool => tool.name === "qq_main__get_group_member_info"));
       return answer(call('read_context', { id: recordId }));
     }, context => {
       assert.ok(context.messages.some(message => message.role === 'toolResult' && message.toolName === 'read_context' && !message.isError));
@@ -291,7 +291,7 @@ test('pressure can be resolved by pruning old tool output without a summary call
   const f = fixture({ execute: async () => ({ content: 'raw original '.repeat(1000) }) });
   try {
     smallWindow(f); f.cfg.limits.contextTokens += 4000; event(f.store, 'Read a large result');
-    f.faux.setResponses([answer(call('get_msg', { message_id: 1 })), answer('Finished reading')]);
+    f.faux.setResponses([answer(call("qq_main__get_msg", { message_id: 1 })), answer('Finished reading')]);
     await f.brain.run(f.store.claim(20)!);
     const originalResult = f.brain.agent.state.messages.find(message => message.role === 'toolResult')!;
     const originalId = (await import('../src/context.js')).contextRecordId(originalResult);
@@ -424,7 +424,7 @@ test('history too large for one summary request is set aside without a summary c
     smallWindow(f); f.cfg.limits.contextTokens = 64000;
     f.faux.setResponses(Array.from({ length: 4 }, () => answer(longReply('Judgment from a roomy window.'))));
     for (let index = 0; index < 4; index++) { event(f.store, `Observation ${index}`); await f.brain.run(f.store.claim(20)!); }
-    f.cfg.limits.contextTokens = 12800;
+    f.cfg.limits.contextTokens = 15500;
     const source = event(f.store, 'Observation after the window shrank');
     f.faux.setResponses([context => { assert.ok(!isSummary(context.messages)); return answer('Continue'); }]);
     await f.brain.run(f.store.claim(20)!);

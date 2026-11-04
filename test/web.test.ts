@@ -1,3 +1,4 @@
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -37,7 +38,7 @@ test('view_event_image reads an image URL found in a tool result, asking Qzone f
   f.brain.thought.lifeOnly = false;
   const image = `http://m.qpic.cn:${address.port}/psc?/SAMPLE_A!/b&ek=1&t=8&tl=17#sce=5-1-1`;
   const page = `http://m.qpic.cn:${address.port}/psc?/SAMPLE_B!/c&ek=1&tl=1`;
-  const feeds = f.store.receive({ key: 'tool:feeds', kind: 'snowluma:get_qzone_public_feeds', at: Date.now(), text: '{}', payload: { result: { feeds: [{ cell_media: { media_items: [{ image: { default_url: { url: image } } }] }, html: `<img src="${page.replaceAll('&', '&amp;')}">` }] } } }, true)!;
+  const feeds = f.store.receive(qqEvent({ key: 'tool:feeds', kind: 'adapter:qq_main:get_qzone_public_feeds', at: Date.now(), text: '{}', payload: { result: { feeds: [{ cell_media: { media_items: [{ image: { default_url: { url: image } } }] }, html: `<img src="${page.replaceAll('&', '&amp;')}">` }] } } }, f.store), true)!;
   const view = f.tools.current().find(tool => tool.name === 'view_event_image')!;
   try {
     const seen = await view.execute('view', { id: feeds.id, url: image });

@@ -36,14 +36,14 @@ export function loginPage(failed: boolean, tokenEnv: string) {
           <div class="login-token-wrap"><input id="login-token" name="token" type="password" autocomplete="current-password" required maxlength="4096" spellcheck="false" autocapitalize="none" placeholder="${ui('Paste your access token', '粘贴你的访问令牌')}" aria-invalid="${failed}" aria-describedby="login-token-hint${failed ? ' login-error' : ''}">
             <button id="login-reveal" class="login-reveal" type="button" aria-controls="login-token" aria-pressed="false" data-show="${ui('Show', '显示')}" data-hide="${ui('Hide', '隐藏')}" hidden>${ui('Show', '显示')}</button>
           </div>
-          <p id="login-token-hint" class="login-hint">${ui(`Paste the value after ${name}= in your .env file.`, `填写 .env 中 ${name}= 后面的值。`)}</p>
-          ${failed ? `<p id="login-error" class="login-error" role="alert">${ui('That token was not accepted. Copy its value again; the variable name itself is not a token.', '令牌不正确。请重新复制等号后面的值，不要填写变量名。')}</p>` : ''}
+          <p id="login-token-hint" class="login-hint">${ui(`Enter the value of ${name} from your credential file or deployment environment.`, `填写凭据文件或部署环境中的 ${name} 值。`)}</p>
+          ${failed ? `<p id="login-error" class="login-error" role="alert">${ui('That token was not accepted. Copy its value again; the variable name itself is not a token.', '令牌不正确。请重新复制凭据的值，不要填写凭据名称。')}</p>` : ''}
           <button class="primary login-submit" type="submit">${ui('Open management', '进入管理台')}<span aria-hidden="true">↗</span></button>
         </form>
         <details class="login-help"${failed ? ' open' : ''}>
           <summary>${ui('Where do I find my token?', '访问令牌在哪里？')}<span aria-hidden="true">＋</span></summary>
-          <div class="login-help-content"><p>${ui(`Open the <code>.env</code> file beside <code>config.json</code> and find <code>${name}</code>. Copy the value after <code>=</code>, without surrounding quotes.`, `打开 <code>config.json</code> 同目录下的 <code>.env</code> 文件，找到 <code>${name}</code>，复制 <code>=</code> 后的值（不含两侧引号）。`)}</p>
-          <p>${ui('If it is not set there, check the terminal or log used to start the management page. With no configured token, each start prints a login link; open the latest one.', '如果文件里没有设置，请查看启动管理网页的终端或日志。未配置令牌时，每次启动都会打印登录链接，打开最近一次的链接即可。')}</p></div>
+          <div class="login-help-content"><p>${ui(`Open the file named by <code>credentialsFile</code> in <code>config.json</code> (defaults to <code>credentials.json</code>). Find <code>${name}</code> under <code>credentials</code> and copy its value, without surrounding quotes. An externally supplied environment variable takes precedence.`, `打开 <code>config.json</code> 中 <code>credentialsFile</code> 指向的文件（默认 <code>credentials.json</code>），在 <code>credentials</code> 中找到 <code>${name}</code> 并复制其值，不含两侧引号。外部环境变量优先。`)}</p>
+          <p>${ui('If it is not set there, check the terminal or log used to start the management page. With no configured token, each start prints a temporary access token; copy the latest one into this form.', '如果文件里没有设置，请查看启动管理网页的终端或日志。未配置令牌时，每次启动都会打印临时访问令牌，复制最近一次的令牌填入此表单。')}</p></div>
         </details>
         <div class="login-note"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></svg><span>${ui('Your token stays on this management server.', '访问令牌仅发送给当前管理服务。')}</span></div>
       </section>

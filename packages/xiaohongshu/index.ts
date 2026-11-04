@@ -107,4 +107,4 @@ export function setup(ctx: PluginContext) {
   });
 }
 
-export default { ...metadata, apiVersion: 1, setup } satisfies PluginDefinition;
+export default { ...metadata, apiVersion: 2, setup } satisfies PluginDefinition;

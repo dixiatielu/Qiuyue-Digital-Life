@@ -1,15 +1,15 @@
 import { environmentCredential, type CredentialReader } from '../../credentials.js';
 import { SnowLumaWebSocketClient, SnowLumaApiError, fromCQString, type SnowLumaAction, type SnowLumaStreamAction } from '@snowluma/sdk';
 import { ActionNotDispatchedError, NativeApiError, type SocialAdapter } from '../../platform.js';
-import type { Config } from '../../config.js';
+import type { AdapterConfig } from '../../config.js';
 import type { EnvironmentEvent } from '../../domain.js';
-import { addressedTo, isAmbient, isHeartbeat, errorText } from '../../domain.js';
+import { isHeartbeat, errorText } from '../../domain.js';
 import { conversationRef, personRef } from '../../identity.js';
 import { Store, digest } from '../../store.js';
 import { allowedSnowLumaAction, findSnowLumaAction } from './catalog.js';
 
-export function normalizeEvent(raw: Record<string, any>, config: Config['snowluma']): Omit<EnvironmentEvent, 'id' | 'status'> | undefined {
-  if (Number(raw.self_id) !== config.selfId || typeof raw.post_type !== 'string' || !raw.post_type) return;
+export function normalizeEvent(raw: Record<string, any>, config: AdapterConfig, sent: (id: number) => boolean = () => false): Omit<EnvironmentEvent, 'id' | 'status'> | undefined {
+  if (Number(raw.self_id) !== Number(config.accountId) || typeof raw.post_type !== 'string' || !raw.post_type) return;
   const isMessage = ['message', 'message_sent'].includes(raw.post_type);
   const optionalId = (value: unknown) => value != null && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? Number(value) : undefined;
   const groupId = optionalId(raw.group_id);
@@ -28,12 +28,28 @@ export function normalizeEvent(raw: Record<string, any>, config: Config['snowlum
   const kind = isMessage ? 'message' : [raw.post_type, eventType, raw.sub_type ?? ''].filter(value => value !== undefined).join(':');
   const conversation = raw.message_type !== 'private' && groupId !== undefined ? `group:${groupId}` : actorId === undefined ? undefined : `private:${actorId}`;
   return {
-    key: isMessage && raw.message_id != null && conversation !== undefined ? `qq:${config.selfId}:${conversation}:message:${raw.message_id}` : `qq:${config.selfId}:${isMessage ? 'message' : raw.post_type}:${digest(raw)}`,
+    key: isMessage && raw.message_id != null && conversation !== undefined ? `qq:${Number(config.accountId)}:${conversation}:message:${raw.message_id}` : `qq:${Number(config.accountId)}:${isMessage ? 'message' : raw.post_type}:${digest(raw)}`,
     kind,
     at: Number.isFinite(Number(raw.time)) ? Number(raw.time) * 1000 : Date.now(),
-    groupId, actorId, text,
+    text,
+    source: qqSource(raw, config, kind, groupId, actorId, message, sent),
     payload: isMessage ? { ...raw, message } : { ...raw },
   };
+}
+
+/** QQ-native addressing and attention are settled once, at ingestion. */
+function qqSource(raw: Record<string, any>, account: AdapterConfig, kind: string, groupId: number | undefined, actorId: number | undefined, segments: any[], sent: (id: number) => boolean): import('../../identity.js').EventSource {
+  const self = (value: unknown) => value != null && String(value) === account.accountId;
+  const own = self(actorId) || raw.post_type === 'message_sent';
+  const type = groupId !== undefined && raw.message_type !== 'private' ? 'group' : 'private';
+  const target = type === 'group' ? groupId : raw.post_type === 'message_sent' ? raw.target_id ?? actorId : actorId;
+  const addressed = kind.startsWith('notice:') ? (self(raw.target_id) && !own) || (self(raw.user_id) && raw.operator_id != null && !self(raw.operator_id))
+    : kind === 'message' && !own && (type === 'private' || segments.some(segment => segment.type === 'at' && self(segment.data?.qq) || segment.type === 'reply' && sent(Number(segment.data?.id))));
+  const ambient = kind === 'notice:notify:input_status' || kind.startsWith('notice:group_msg_emoji_like:') || kind === 'notice:notify:poke' && own;
+  const identity = { platform: 'qq', accountId: account.accountId };
+  return { ...identity, instance: account.id, own, addressed, attention: isHeartbeat(kind) ? 'transport' : ambient ? 'ambient' : 'normal',
+    ...(actorId === undefined ? {} : { actor: personRef('qq', String(actorId)), actorName: raw.sender?.card || raw.sender?.nickname }),
+    ...(target === undefined || !(kind === 'message' || kind.startsWith('notice:') || groupId !== undefined && kind === 'perception_gap') ? {} : { conversation: conversationRef(identity, type, String(target)), conversationType: type }) };
 }
 
 export class SnowLumaAdapter implements SocialAdapter {
@@ -43,27 +59,15 @@ export class SnowLumaAdapter implements SocialAdapter {
   private closing = false;
   private recovery?: Promise<void>;
   private anchors = new Map<number, number | undefined>();
-  constructor(private config: Config['snowluma'], private store: Store, private notify: () => void, credential: CredentialReader = environmentCredential, private instance?: string) {
-    this.client = new SnowLumaWebSocketClient({ url: config.url, accessToken: credential(config.tokenEnv), reconnect: true, requestTimeoutMs: 20_000 });
-    this.client.onEvent(raw => { if (this.closing) return; const event = normalizeEvent(raw as Record<string, unknown>, config); if (event && this.receive(event)?.status === 'pending') notify(); });
+  constructor(private config: AdapterConfig, private store: Store, private notify: () => void, credential: CredentialReader = environmentCredential) {
+    this.client = new SnowLumaWebSocketClient({ url: config.url ?? 'ws://127.0.0.1:3001', accessToken: credential(config.tokenEnv), reconnect: true, requestTimeoutMs: 20_000 });
+    this.client.onEvent(raw => { if (this.closing) return; const event = normalizeEvent(raw as Record<string, unknown>, config, id => store.sentMessage(id, { platform: 'qq', accountId: config.accountId })); if (event && this.receive(event)?.status === 'pending') notify(); });
     this.client.on('close', () => { this.verified = false; if (!this.closing) { this.captureAnchors(); store.log('connection_closed', {}); } });
     this.client.on('error', error => { if (!this.closing) store.log('connection_error', { message: errorText(error) }); });
     this.client.on('open', () => { if (this.connectedOnce && !this.closing) void this.recover().catch(error => { if (!this.closing) store.log('recovery_error', { message: errorText(error) }); }); });
   }
-  private receive(event: Omit<EnvironmentEvent, 'id' | 'status'>) {
-    if (this.instance) {
-      const identity = { platform: 'qq', accountId: String(this.config.selfId) };
-      const type = event.groupId === undefined || event.payload.message_type === 'private' ? 'private' : 'group';
-      const target = type === 'group' ? event.groupId : event.payload.post_type === 'message_sent' ? event.payload.target_id ?? event.actorId : event.actorId;
-      event.source = { ...identity, instance: this.instance, own: event.actorId === this.config.selfId || event.payload.post_type === 'message_sent',
-        addressed: addressedTo(this.config.selfId, event, id => this.store.sentMessage(id, identity)), attention: isHeartbeat(event.kind) ? 'transport' : isAmbient(event.kind, event.actorId, this.config.selfId) ? 'ambient' : 'normal',
-        ...(event.actorId === undefined ? {} : { actor: personRef('qq', String(event.actorId)) }),
-        ...(target === undefined ? {} : { conversation: conversationRef(identity, type, String(target)), conversationType: type }),
-      };
-    }
-    return this.store.receive(event);
-  }
-  private captureAnchors() { for (const group of this.config.groups) this.anchors.set(group, this.store.latestGroupMessage(group, this.instance ? conversationRef({ platform: 'qq', accountId: String(this.config.selfId) }, 'group', String(group)) : undefined)); }
+  private receive(event: Omit<EnvironmentEvent, 'id' | 'status'>) { return this.store.receive(event); }
+  private captureAnchors() { for (const group of this.config.groups) this.anchors.set(group, this.store.latestGroupMessage(conversationRef({ platform: 'qq', accountId: this.config.accountId }, 'group', String(group)))); }
   async connect() { this.captureAnchors(); await this.client.connect(); this.connectedOnce = true; await this.recover(); }
   async close() { this.closing = true; this.client.close(); await this.recovery?.catch(() => {}); }
   private recover() {
@@ -73,10 +77,10 @@ export class SnowLumaAdapter implements SocialAdapter {
   private async verifyAndRecover() {
     const login = await this.client.getLoginInfo();
     if (this.closing) return;
-    if (login.user_id !== this.config.selfId) { this.client.close(); throw new Error('The SnowLuma account does not match the configured account.'); }
+    if (login.user_id !== Number(this.config.accountId)) { this.client.close(); throw new Error('The SnowLuma account does not match the configured account.'); }
     this.verified = true;
     this.store.log('connection_opened', {});
-    this.receive({ key: `gap:snowluma:${this.config.selfId}:${Date.now()}`, kind: 'perception_gap', at: Date.now(), text: 'Connection established or restored: receiving all SnowLuma pushes for the current account. Private chats, requests, notices, meta events, and other pushes during the offline period may not be recovered; group message history recovery is attempted only for configured groups.', payload: { selfId: this.config.selfId, historyGroups: this.config.groups } });
+    this.receive({ key: `gap:snowluma:${Number(this.config.accountId)}:${Date.now()}`, kind: 'perception_gap', at: Date.now(), source: { platform: 'qq', accountId: this.config.accountId, instance: this.config.id, own: true, addressed: false, attention: 'normal' }, text: 'Connection established or restored: receiving all SnowLuma pushes for the current account. Private chats, requests, notices, meta events, and other pushes during the offline period may not be recovered; group message history recovery is attempted only for configured groups.', payload: { historyGroups: this.config.groups } });
     for (const groupId of this.config.groups) {
       const anchor = this.anchors.get(groupId);
       try {
@@ -86,7 +90,7 @@ export class SnowLumaAdapter implements SocialAdapter {
           if (this.closing) return;
           const messages = history.messages ?? [];
           for (const message of messages) {
-            const event = normalizeEvent({ ...message, post_type: 'message', self_id: this.config.selfId, group_id: groupId }, this.config);
+            const event = normalizeEvent({ ...message, post_type: 'message', self_id: Number(this.config.accountId), group_id: groupId }, this.config, id => this.store.sentMessage(id, { platform: 'qq', accountId: this.config.accountId }));
             if (event) this.receive(event);
           }
           const next = messages.at(-1)?.message_id;
@@ -94,7 +98,7 @@ export class SnowLumaAdapter implements SocialAdapter {
           messageId = Number(next);
         }
       } catch (error) { if (this.closing) return; this.store.log('history_unavailable', { groupId, message: errorText(error) }); }
-      this.receive({ key: `gap:${groupId}:${Date.now()}`, kind: 'perception_gap', at: Date.now(), groupId, text: 'Connection established or restored: message history recovery was attempted. Notices and messages outside the recovery scope during the offline period may be incomplete.', payload: { anchor: anchor ?? null } });
+      this.receive({ key: `gap:qq:${this.config.accountId}:${groupId}:${Date.now()}`, kind: 'perception_gap', at: Date.now(), source: { platform: 'qq', accountId: this.config.accountId, instance: this.config.id, conversation: conversationRef({ platform: 'qq', accountId: this.config.accountId }, 'group', String(groupId)), conversationType: 'group', own: true, addressed: false, attention: 'normal' }, text: 'Connection established or restored: message history recovery was attempted. Notices and messages outside the recovery scope during the offline period may be incomplete.', payload: { anchor: anchor ?? null } });
     }
     this.notify();
   }

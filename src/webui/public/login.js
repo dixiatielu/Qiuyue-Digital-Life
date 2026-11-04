@@ -23,5 +23,3 @@ token.addEventListener('input', () => {
   const error = document.getElementById('login-error');
   if (error) error.hidden = true;
 });
-// Legacy startup links contain the token in their query. Remove it after the server handles it.
-if (location.search) history.replaceState(null, '', location.pathname);

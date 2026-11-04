@@ -1,3 +1,4 @@
+import { beginAction } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -10,7 +11,8 @@ import { createModels, fauxProvider, fauxAssistantMessage as answer, fauxText, f
 import { Monitor, type DisplayPacket } from '../src/monitor.js';
 import { Store } from '../src/store.js';
 import { PiBrain } from '../src/brain.js';
-import { createTools } from '../src/tools.js';
+import { createTools } from './helpers.js';
+
 import { callControl, handleControl, serveControl } from '../src/control.js';
 import { followDisplay } from '../src/display-client.js';
 import { DisplayModel } from '../src/tui.js';
@@ -32,7 +34,7 @@ test('display notices describe committed records only, and broken observers cann
     assert.equal(store.pending(), 0);
     store.subscribe(() => { throw new Error('viewer failure'); });
     const source = event(store, 'committed');
-    const attempt = store.beginAction('action:1', 'send_group_msg', { message: 'committed' }, [source.id]);
+    const attempt = beginAction(store, 'action:1', "qq_main__send_group_msg", { message: 'committed' }, [source.id]);
     store.finishAction(attempt.action.id, 'unknown', { reason: 'receipt lost' });
     assert.equal(store.actionById(attempt.action.id)?.status, 'unknown');
     const item = monitor.snapshot().items.find(item => item.id === attempt.action.id);
@@ -54,7 +56,7 @@ test('real Pi deltas, queued steering and tool execution appear live while unkno
   const source = event(store, 'First message');
   const batch = store.claim(10)!;
   faux.setResponses([
-    answer([fauxThinking('private-thought-never-publish'), fauxText('This is public text appearing one character at a time.'), fauxToolCall('send_group_msg', { group_id: 100, message: 'Hello' })]),
+    answer([fauxThinking('private-thought-never-publish'), fauxText('This is public text appearing one character at a time.'), fauxToolCall("qq_main__send_group_msg", { group_id: 100, message: 'Hello' })]),
     answer('Stay quiet'),
   ]);
   const running = brain.run(batch);
@@ -64,7 +66,7 @@ test('real Pi deltas, queued steering and tool execution appear live while unkno
     await entered.promise;
     assert.ok(monitor.snapshot().items.some(item => item.type === 'tool' && item.state === 'running'));
     const busy = monitor.snapshot().status.busy!;
-    assert.equal(busy.stage, 'tool'); assert.equal(busy.tool, 'send_group_msg');
+    assert.equal(busy.stage, 'tool'); assert.equal(busy.tool, 'qq_main__send_group_msg');
     assert.equal(busy.requestCount, 1); assert.ok(busy.lastOutputAt! >= busy.requestStartedAt!);
     assert.ok(busy.outputChunks! > 0);
     const stages = packets.flatMap(packet => packet.type === 'event' && packet.change.type === 'status' && packet.change.status.busy ? [packet.change.status.busy.stage] : []);
@@ -173,7 +175,7 @@ test('display projection strips credentials, reasoning, images and terminal cont
   const store = new Store(':memory:'); const monitor = new Monitor(cfg, store);
   try {
     event(store, 'hello\x1b]52;c;malicious\x07\x1b[2J test-display-secret');
-    const attempt = store.beginAction('private', 'get_credentials', { access_token: 'other-credential', message: 'test-display-secret' }, []);
+    const attempt = beginAction(store, 'private', "qq_main__get_credentials", { access_token: 'other-credential', message: 'test-display-secret' }, []);
     store.finishAction(attempt.action.id, 'success', { cookie: 'cookie-value' });
     monitor.startRun('run:test', { batchId: 'batch:test', events: [] });
     monitor.agentEvent({ type: 'tool_execution_update', toolCallId: 't:0', toolName: 'partial', args: {}, partialResult: { content: [{ type: 'text', text: 'Public progress' }], details: { private: 'tool-private-data' } } });
@@ -277,12 +279,12 @@ test('forgetting while a model response is in flight prevents old content return
   } finally { release.resolve(); await running.catch(() => {}); monitor.close(); store.close(); }
 });
 
-test('an older daemon produces an actionable restart message instead of an unknown-command screen', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'life-legacy-viewer-')); const path = join(dir, 'control.sock');
+test('display subscription failures preserve the endpoint error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'life-refused-viewer-')); const path = join(dir, 'control.sock');
   const server = createServer(socket => socket.once('data', () => socket.end(JSON.stringify({ ok: false, error: 'Unknown command. Use help to view management commands.' }) + '\n')));
   server.listen(path); await once(server, 'listening');
   let message = '';
   const stop = followDisplay(path, () => {}, (_connected, text) => { message = text; }, 1000);
-  try { await waitFor(() => message.includes('restart run'), 'legacy daemon hint'); }
+  try { await waitFor(() => message === 'Unknown command. Use help to view management commands.', 'endpoint error'); }
   finally { stop(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); }
 });

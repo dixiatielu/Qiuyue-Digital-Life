@@ -14,8 +14,9 @@ import { inspectConfig } from '../src/webui/inspect.js';
 import { ServiceJobs, type LiveMirror } from '../src/webui/daemon.js';
 import type { LifeReader } from '../src/webui/reader.js';
 import { PluginManager } from '../src/plugin-manager.js';
-import { createPlugins } from '../src/plugins/index.js';
-import { createTools } from '../src/tools.js';
+import { createPlugins } from './helpers.js';
+import { createTools } from './helpers.js';
+
 import { contextIdentity } from '../src/brain.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { Store } from '../src/store.js';
@@ -30,7 +31,7 @@ async function page(work: (call: (path: string, init?: { method?: string; body?:
   const base = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
   writeFileSync(join(dir, base.personaFile), 'Qiuyue, a student who likes rain.\n');
   writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...base, extra: { kept: true } }, null, 2) + '\n');
-  writeFileSync(join(dir, '.env'), '# credentials\nMODEL_API_KEY=sk-old-value-1234\n\nOTHER=1\n');
+  writeFileSync(join(dir, 'credentials.json'), JSON.stringify({ version: 1, credentials: { MODEL_API_KEY: 'sk-old-value-1234' }, changes: [] }));
   const app = new WebUi(join(dir, 'config.json'), token, WebUi.paths(join(dir, 'config.json')));
   const server = await app.listen('127.0.0.1', 0);
   const port = (server.address() as AddressInfo).port;
@@ -50,6 +51,8 @@ async function page(work: (call: (path: string, init?: { method?: string; body?:
 
 test('optional plugin forms and credentials come from manifests even offline, without importing user code', () => page(async (call, dir) => {
   const absent = await call('/api/plugins');
+  assert.ok(absent.body.ids.includes('qq-main-snowluma-tools'));
+  assert.ok(!absent.body.ids.includes('snowluma-tools'));
   assert.ok(!absent.body.ids.includes('bilibili')); assert.ok(!absent.body.ids.includes('xiaohongshu'));
   assert.ok(!(await call('/api/secrets')).body.entries.some((entry: any) => entry.name === 'BILIBILI_COOKIE'));
   await installPackagedPlugin(join(dir, 'plugins'), 'bilibili');
@@ -57,7 +60,7 @@ test('optional plugin forms and credentials come from manifests even offline, wi
   mkdirSync(join(dir, 'plugins/reading-room'), { recursive: true });
   writeFileSync(join(dir, 'plugins/reading-room/index.mjs'), 'throw new Error("Must not execute for management metadata");');
   writeFileSync(join(dir, 'plugins/reading-room/plugin.json'), JSON.stringify({
-    id: 'reading-room', apiVersion: 1, name: 'Reading room', defaultEnabled: false, defaults: { credentialName: 'READING_ROOM_KEY' },
+    id: 'reading-room', apiVersion: 2, name: 'Reading room', defaultEnabled: false, defaults: { credentialName: 'READING_ROOM_KEY' },
     configSchema: { type: 'object', properties: { credentialName: { type: 'string', credential: true } } },
   }));
   mkdirSync(join(dir, 'plugins/broken'), { recursive: true });
@@ -87,7 +90,7 @@ test('the page asks for its token, refuses foreign hosts and cross-site writes, 
   const host = await new Promise<number>(done => request({ host: '127.0.0.1', port, path: '/api/overview', headers: { Host: 'attacker.example', Authorization: `Bearer ${token}` } }, response => { response.resume(); done(response.statusCode!); }).end());
   assert.equal(host, 421);
   const login = await call(`/login?token=${token}`, { headers: { Authorization: '' } });
-  assert.equal(login.status, 303);
+  assert.equal(login.status, 401);
   assert.equal((await call('/api/overview', { headers: { Authorization: '', Cookie: `qiuyue_webui=${token}` } })).status, 200);
   assert.equal((await call('/api/control', { method: 'POST', body: { args: ['pause'] }, headers: { 'Content-Type': 'text/plain' } })).status, 415);
   assert.equal((await call('/api/control', { method: 'POST', body: { args: ['pause'] }, headers: { Origin: 'http://attacker.example' } })).status, 403);
@@ -107,7 +110,8 @@ test('the login page loads its styling and appearance before authentication, wit
     assert.ok(!(await response.text()).includes(token), path);
   }
   assert.match(login.body, /WEBUI_TOKEN/);
-  assert.match(login.body, /\.env/);
+  assert.match(login.body, /credentials\.json/);
+  assert.ok(!login.body.includes('.env'));
   assert.ok(!login.body.includes(token), 'the real credential is never embedded in the login page');
   for (const path of ['/app/main.js', '/app/pages/config.js', '/app/index.html', '/vendor/preact/package.json', '/api/config', '/api/secrets', '/api/live']) {
     assert.equal((await call(path, anonymous)).status, 401, path);
@@ -120,7 +124,7 @@ test('the login page loads its styling and appearance before authentication, wit
   assert.equal((await call('/login', anonymous)).status, 401, 'login still works when config needs repair');
 }));
 
-test('the login form submits the token in its body and keeps startup login links working', () => page(async (_call, _dir, port) => {
+test('the login form accepts a token only in its body and ignores token query strings', () => page(async (_call, _dir, port) => {
   const base = `http://127.0.0.1:${port}`;
   assert.equal((await fetch(base)).headers.get('referrer-policy'), 'same-origin', 'native form submissions need their same-origin Origin header');
   const submit = (value: string, origin = base) => fetch(`${base}/login`, {
@@ -139,7 +143,9 @@ test('the login form submits the token in its body and keeps startup login links
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Strict/);
   assert.equal((await fetch(`${base}/api/overview`, { headers: { Cookie: cookie.split(';')[0]! } })).status, 200);
-  assert.equal((await fetch(`${base}/login?token=${token}`, { redirect: 'manual' })).status, 303);
+  const query = await fetch(`${base}/login?token=${token}`, { redirect: 'manual' });
+  assert.equal(query.status, 401); assert.equal(query.headers.get('set-cookie'), null);
+  assert.ok(!(await query.text()).includes(token));
 }));
 
 test('a configuration is saved only whole, valid, and against the version it was read at, keeping unknown keys and earlier versions', () => page(async (call, dir) => {
@@ -148,9 +154,9 @@ test('a configuration is saved only whole, valid, and against the version it was
   assert.equal(loaded.body.error, null);
   const raw = loaded.body.raw;
   const before = readFileSync(join(dir, 'config.json'), 'utf8');
-  const invalid = await call('/api/config', { method: 'PUT', body: { raw: { ...raw, snowluma: { ...raw.snowluma, selfId: 0 } }, hash: loaded.body.hash } });
+  const invalid = await call('/api/config', { method: 'PUT', body: { raw: { ...raw, adapters: [{ ...raw.adapters[0]!, accountId: '0' }] }, hash: loaded.body.hash } });
   assert.equal(invalid.status, 400);
-  assert.match(invalid.body.error, /selfId/);
+  assert.match(invalid.body.error, /accountId/);
   assert.equal(readFileSync(join(dir, 'config.json'), 'utf8'), before);
   const checked = await call('/api/config/check', { method: 'POST', body: { raw: { ...raw, limits: { ...raw.limits, batchSize: 5 } } } });
   assert.equal(checked.body.valid, true);
@@ -186,7 +192,6 @@ test('the persona and the system prompt are checked before saving, and the opera
   const config = loadConfig(join(dir, 'config.json'));
   assert.equal(config.systemPrompt, template);
   assert.equal(systemInstructions(config), 'You are:\nQiuyue, who likes snow.\n\nOld part.\nNew part.');
-  assert.equal(systemInstructions(config, true), 'You are:\nQiuyue, who likes snow.\n\nOld part.');
   assert.equal(systemInstructions({ ...config, life: { ...config.life, allowFiction: true } }), 'You are:\nQiuyue, who likes snow.\n\nOld part.\nNew part. Fiction.');
   const preview = await call('/api/prompt/preview', { method: 'POST', body: { template: 'Hi {{persona}}\n<!-- current-context -->\n' } });
   assert.equal(preview.body.text, 'Hi Qiuyue, who likes snow.\n');
@@ -201,14 +206,13 @@ test('the persona and the system prompt are checked before saving, and the opera
 test('credentials are masked, stored separately, version-checked, and cannot be read through history', async () => page(async (call, dir) => {
   const before = await call('/api/secrets');
   assert.equal(before.body.entries.find((item: any) => item.name === 'MODEL_API_KEY').value, '••••1234');
-  assert.equal(before.body.entries.find((item: any) => item.name === 'MODEL_API_KEY').source, 'legacy');
+  assert.equal(before.body.entries.find((item: any) => item.name === 'MODEL_API_KEY').source, 'file');
   assert.ok(!before.body.entries.some((item: any) => item.name === 'OTHER'));
   const originalEnvironment = process.env.MODEL_API_KEY;
   const updated = await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: 'sk-new value#5678', revision: before.body.revision } });
   assert.equal(updated.status, 200);
   assert.equal(updated.body.entries.find((item: any) => item.name === 'MODEL_API_KEY').source, 'file');
   assert.equal(process.env.MODEL_API_KEY, originalEnvironment);
-  assert.ok(readFileSync(join(dir, '.env'), 'utf8').includes('sk-old-value-1234'), 'legacy input is read-only until explicit migration');
   const credentials = new Credentials(credentialPaths(join(dir, 'config.json')), {});
   assert.equal(credentials.get('MODEL_API_KEY'), 'sk-new value#5678');
   assert.ok(!JSON.stringify(updated.body).includes('sk-new value'));
@@ -216,7 +220,7 @@ test('credentials are masked, stored separately, version-checked, and cannot be 
   assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: 'unversioned' } })).status, 400);
   const removed = await call('/api/secrets', { method: 'PUT', body: { name: 'MODEL_API_KEY', value: null, revision: updated.body.revision } });
   assert.equal(removed.status, 200);
-  assert.equal(new Credentials(credentials.paths, {}).get('MODEL_API_KEY'), undefined, 'the old .env value stays disabled');
+  assert.equal(new Credentials(credentials.paths, {}).get('MODEL_API_KEY'), undefined, 'the file credential stays disabled');
   assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'BAD NAME', value: 'x', revision: removed.body.revision } })).status, 400);
   assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'MULTI', value: 'a\nb', revision: removed.body.revision } })).status, 400);
   const history = join(dir, 'data/webui/history/env');
@@ -235,13 +239,15 @@ test('external credentials are read-only and take the same priority in the page 
     await page(async (call, dir) => {
       const path = join(dir, 'config.json'); const config = JSON.parse(readFileSync(path, 'utf8'));
       config.model.apiKeyEnv = name; writeFileSync(path, JSON.stringify(config));
-      writeFileSync(join(dir, '.env'), `${name}=legacy-value\n`);
+      const file = join(dir, 'credentials.json');
+      const original = JSON.stringify({ version: 1, credentials: { [name]: 'file-value' }, changes: [] });
+      writeFileSync(file, original);
       const list = await call('/api/secrets');
       const item = list.body.entries.find((item: any) => item.name === name);
       assert.equal(item.source, 'environment'); assert.equal(item.writable, false);
       assert.equal(new Credentials(credentialPaths(path)).get(name), 'externally-managed-secret');
       assert.equal((await call('/api/secrets', { method: 'PUT', body: { name, value: 'replacement', revision: list.body.revision } })).status, 400);
-      assert.equal(existsSync(join(dir, 'credentials.json')), false);
+      assert.equal(readFileSync(file, 'utf8'), original);
     });
   } finally { if (old === undefined) delete process.env[name]; else process.env[name] = old; }
 });
@@ -289,8 +295,8 @@ test('the working context identity follows the persona, prompt, model, and tools
     const original = identity(base);
     assert.equal(identity({ ...base, limits: { ...base.limits, batchSize: 3 }, memory: { ...base.memory, recallLimit: 2 } }), original);
     assert.notEqual(identity({ ...base, life: { ...base.life, allowFiction: true } }), original);
-    assert.notEqual(identity({ ...base, plugins: { 'qq-faces': false } }), original);
-    assert.notEqual(identity({ ...base, snowluma: { ...base.snowluma, tools: { allow: '*', deny: ['send_poke'] } } }), original);
+    assert.notEqual(identity({ ...base, plugins: { 'qq-main-qq-faces': false } }), original);
+    assert.notEqual(identity({ ...base, adapters: [{ ...base.adapters[0]!, tools: { allow: '*', deny: ['send_poke'] } }] }), original);
     assert.notEqual(identity({ ...base, model: { ...base.model, thinkingLevel: 'low' } }), original);
     writeFileSync(join(dir, base.personaFile), 'Qiuyue, changed');
     assert.notEqual(identity(base), original);
@@ -343,7 +349,7 @@ test('capabilities show daemon versions and schema, and apply saved settings thr
   let identity = contextIdentity(cfg, tools);
   const brain = { thought, streaming: false, run: async () => {}, review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {} };
   const runtime = new LifeRuntime(cfg, store, brain, brain);
-  const manager = new PluginManager(cfg, host, store, social, () => loadConfig(path), () => undefined);
+  const manager = new PluginManager(cfg, host, store, () => loadConfig(path), () => undefined);
   manager.connect(runtime, () => { const next = contextIdentity(cfg, tools), changed = next !== identity; identity = next; return changed; });
   mkdirSync(join(dir, 'plugins/clock'), { recursive: true });
   writeFileSync(join(dir, 'plugins/clock/index.mjs'), readFileSync(new URL('../examples/plugins/clock/index.mjs', import.meta.url)));
@@ -373,7 +379,7 @@ test('gallery APIs browse offline, authenticate images, and send versioned edits
   const social = { execute: async () => ({}) }, host = createPlugins(cfg, store, social);
   const brain = { thought: { generation: 0, sources: new Set<string>(), triggers: new Set<string>(), lifeOnly: false }, streaming: false, run: async () => {}, review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {} };
   const runtime = new LifeRuntime(cfg, store, brain, brain);
-  const manager = new PluginManager(cfg, host, store, social, () => loadConfig(path), () => undefined); manager.connect(runtime, () => false);
+  const manager = new PluginManager(cfg, host, store, () => loadConfig(path), () => undefined); manager.connect(runtime, () => false);
   const library = new DrawingLibrary(store.db, cfg.drawing.dir), key = `drawing:${crypto.randomUUID()}`;
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
   await library.save(key, png, 'png', { prompt: '猫咪', model: 'test', createdAt: Date.now(), sources: [] });

@@ -1,9 +1,11 @@
+import { beginAction } from './helpers.js';
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools, toToolDeclaration, type Message } from '@earendil-works/pi-ai';
 import { fixture, event } from './helpers.js';
 import { LifeRuntime } from '../src/runtime.js';
-import { normalizeEvent } from '../src/snowluma.js';
+import { normalizeEvent } from '../src/adapters/snowluma/index.js';
 import { textTokens, toModelMessages } from '../src/context.js';
 import { digest } from '../src/store.js';
 import type { ContextCheckpoint } from '../src/context.js';
@@ -18,7 +20,7 @@ test('action summaries stay small with hundreds of provenance IDs, while full re
   try {
     const sources = Array.from({ length: 200 }, () => event(f.store).id);
     const actions = Array.from({ length: 10 }, (_, index) => {
-      const { action } = f.store.beginAction(`a${index}`, 'send_group_msg', { group_id: 100, message: `Reply ${index}` }, sources);
+      const { action } = beginAction(f.store, `a${index}`, "qq_main__send_group_msg", { group_id: 100, message: `Reply ${index}` }, sources);
       f.store.finishAction(action.id, index === 0 ? 'unknown' : 'success', { message_id: index });
       return action.id;
     });
@@ -50,7 +52,7 @@ test('new observations and restart append only changed runtime fields and action
   const f = fixture(); let prefix: Message[] = [];
   try {
     const source = event(f.store, 'First message');
-    const first = f.store.beginAction('first', 'send_group_msg', { group_id: 100, message: 'Received' }, [source.id]).action;
+    const first = beginAction(f.store, 'first', "qq_main__send_group_msg", { group_id: 100, message: 'Received' }, [source.id]).action;
     f.store.finishAction(first.id, 'success', { message_id: 1 });
     f.store.setActivity('Continue researching lunar maria', [source.id]);
     f.faux.setResponses([context => { assert.equal(updates(context.messages).at(-1).format, 'snapshot'); return answer('Remember this topic'); }]);
@@ -58,13 +60,13 @@ test('new observations and restart append only changed runtime fields and action
     prefix = structuredClone(toModelMessages(f.brain.agent.state.messages));
     f.restart();
     event(f.store, 'Second message');
-    const second = f.store.beginAction('second', 'send_group_msg', { group_id: 100, message: 'Second reply' }, [source.id]).action;
+    const second = beginAction(f.store, 'second', "qq_main__send_group_msg", { group_id: 100, message: 'Second reply' }, [source.id]).action;
     f.store.finishAction(second.id, 'unknown', { reason: 'Unconfirmed' });
     f.faux.setResponses([context => {
       assert.deepEqual(context.messages.slice(0, prefix.length), prefix);
       const delta = updates(context.messages).at(-1);
       assert.equal(delta.format, 'delta'); assert.equal(delta.settings, undefined);
-      assert.equal(delta.snowlumaPermissions, undefined);
+      assert.equal(delta.adapters, undefined);
       assert.deepEqual(delta.actualActions.upsert.map((action: any) => action.id), [second.id]);
       assert.ok(textTokens(JSON.stringify(delta)) < 1000);
       return answer('Continue');
@@ -109,19 +111,19 @@ test('commitment updates include additions and removals without repeating unchan
   } finally { f.store.close(); }
 });
 
-test('legacy checkpoints upgrade bulky snapshots without losing conversation or full provenance', async () => {
+test('obsolete identity checkpoints reset conversation while retaining full action provenance', async () => {
   const f = fixture();
   try {
     const source = event(f.store, 'Conversation before restart');
     const provenance = Array.from({ length: 200 }, () => `e:${crypto.randomUUID()}`);
-    const action = f.store.beginAction('legacy', 'send_group_msg', { group_id: 100, message: 'Original reply' }, provenance).action;
+    const action = beginAction(f.store, 'legacy', "qq_main__send_group_msg", { group_id: 100, message: 'Original reply' }, provenance).action;
     f.store.finishAction(action.id, 'unknown', { reason: 'Unknown' });
-    f.faux.setResponses([answer(call('load_snowluma_tools', { names: ['get_group_member_info'] })), answer('Remember the lunar maria topic after restart')]);
+    f.faux.setResponses([answer(call("qq_main__load_snowluma_tools", { names: ['get_group_member_info'] })), answer('Remember the lunar maria topic after restart')]);
     await f.brain.run(f.store.claim(20)!);
     const messages = structuredClone(f.brain.agent.state.messages);
     const legacyInstructions = getCurrentSystemPrompt(toModelMessages(messages)).split('\nruntime_data format=')[0]!;
     const initialTools = f.tools.current().map(toToolDeclaration);
-    const identity = digest({ instructions: legacyInstructions, model: f.cfg.model, selfId: f.cfg.snowluma.selfId, tools: initialTools });
+    const identity = digest({ instructions: legacyInstructions, model: f.cfg.model, selfId: f.cfg.adapters[0]!.accountId, tools: initialTools });
     const snapshot = updates(toModelMessages(messages))[0]; delete snapshot.format;
     snapshot.actualActions = f.store.actions(10);
     for (const message of messages) {
@@ -133,8 +135,8 @@ test('legacy checkpoints upgrade bulky snapshots without losing conversation or 
     f.store.saveContext(checkpoint);
     f.restart(); event(f.store, 'Continue the previous topic');
     f.faux.setResponses([context => {
-      assert.match(JSON.stringify(context.messages), /Remember the lunar maria topic after restart/);
-      assert.ok(getCurrentTools(context.messages).some(tool => tool.name === 'get_group_member_info'));
+      assert.doesNotMatch(JSON.stringify(context.messages), /Remember the lunar maria topic after restart/);
+      assert.ok(getCurrentTools(context.messages).some(tool => tool.name === "qq_main__get_group_member_info"));
       assert.doesNotMatch(JSON.stringify(updates(context.messages)), new RegExp(provenance[0]!));
       assert.equal(updates(context.messages).filter(update => update.format === 'snapshot').length, 1);
       assert.ok(!f.store.logs().some(log => log.kind === 'context_summary_completed'));
@@ -151,8 +153,8 @@ test('heartbeats are persisted but never wake, steer, recall or trigger memory m
   try {
     runtime.start();
     for (let index = 0; index < 5; index++) {
-      const input = normalizeEvent({ self_id: 900, post_type: 'meta_event', meta_event_type: 'heartbeat', time: 100 + index, status: { online: true } }, f.cfg.snowluma)!;
-      const saved = f.store.receive(input)!;
+      const input = normalizeEvent({ self_id: 900, post_type: 'meta_event', meta_event_type: 'heartbeat', time: 100 + index, status: { online: true } }, f.cfg.adapters[0]!)!;
+      const saved = f.store.receive(qqEvent(input, f.store))!;
       assert.equal(saved.status, 'processed'); assert.equal(f.store.event(saved.id)?.payload.status != null, true);
       await runtime.tick(); await runtime.idle();
     }
@@ -190,16 +192,16 @@ test('images seen in a thought are folded when it ends, so later thoughts and re
 test('a delta repeats neither a memory already shown nor an action result already in context, and removes a memory only when it no longer holds', async () => {
   const f = fixture();
   try {
-    f.store.bindAccount(900);
-    const from = (actorId: number, text: string) => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, groupId: 100, actorId, payload: { message_type: 'group', message: [{ type: 'text', data: { text } }] } })!;
-    const seven = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Teases a lot', importance: 5, scope: 'person:7', sources: [from(7, 'Source').id] }, false);
-    const eight = f.store.writeMemory({ kind: 'impression', title: 'P8', content: 'Quiet', importance: 5, scope: 'person:8', sources: [from(8, 'Source').id] }, false);
+    f.store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+    const from = (actorId: number, text: string) => f.store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, groupId: 100, actorId, payload: { message_type: 'group', message: [{ type: 'text', data: { text } }] } }, f.store))!;
+    const seven = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Teases a lot', importance: 5, scope: "person:qq:user:7", sources: [from(7, 'Source').id] }, false);
+    const eight = f.store.writeMemory({ kind: 'impression', title: 'P8', content: 'Quiet', importance: 5, scope: "person:qq:user:8", sources: [from(8, 'Source').id] }, false);
     f.store.acknowledge(f.store.claim(20)!.batchId);
     const ids = (items: { id: string }[]) => items.map(item => item.id);
     from(7, 'Hi');
     f.faux.setResponses([context => {
       assert.deepEqual(ids(updates(context.messages).at(-1).impressions), [seven.id]);
-      return answer(call('send_group_msg', { group_id: 100, message: 'Hi' }));
+      return answer(call("qq_main__send_group_msg", { group_id: 100, message: 'Hi' }));
     }]);
     await f.brain.run(f.store.claim(20)!);
     from(8, 'Hello');
@@ -213,7 +215,7 @@ test('a delta repeats neither a memory already shown nor an action result alread
     from(7, 'Back again');
     f.faux.setResponses([context => { assert.equal(updates(context.messages).length, 2); return answer('Quiet'); }]);
     await f.brain.run(f.store.claim(20)!);
-    const revised = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Teases, kindly', importance: 5, scope: 'person:7', sources: [from(7, 'Kidding').id], supersedes: seven.id }, false);
+    const revised = f.store.writeMemory({ kind: 'impression', title: 'P7', content: 'Teases, kindly', importance: 5, scope: "person:qq:user:7", sources: [from(7, 'Kidding').id], supersedes: seven.id }, false);
     f.faux.setResponses([context => {
       const delta = updates(context.messages).at(-1);
       assert.deepEqual(ids(delta.impressions.upsert), [revised.id]); assert.deepEqual(delta.impressions.removedIds, [seven.id]);

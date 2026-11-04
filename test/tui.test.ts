@@ -1,16 +1,20 @@
+import { beginAction } from './helpers.js';
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { visibleWidth, type Terminal, type ProgramStatus } from '@earendil-works/pi-tui';
 import { createModels, fauxProvider, fauxAssistantMessage as answer, fauxToolCall } from '@earendil-works/pi-ai';
 import { PiBrain } from '../src/brain.js';
-import { createTools } from '../src/tools.js';
+import { createTools } from './helpers.js';
+
 import { Store } from '../src/store.js';
 import { Monitor, plainText, type DisplayItem } from '../src/monitor.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
 import { ActivityLine, createTui, DisplayModel, Timeline } from '../src/tui.js';
+import { loadUiLanguage } from '../src/ui-language.js';
 import { CommandInput } from '../src/tui-commands.js';
 import { config, deferred, event } from './helpers.js';
 
@@ -41,7 +45,7 @@ test('timeline renders Chinese, emoji and markdown at narrow widths, and filters
   try {
     event(store, '这是中文与 emoji 🌙\n第二行消息');
     store.log('thought_error', { message: 'Connection error' });
-    const attempt = store.beginAction('unknown', 'send_group_msg', { group_id: 100, message: 'A message' }, []);
+    const attempt = beginAction(store, 'unknown', "qq_main__send_group_msg", { group_id: 100, message: 'A message' }, []);
     store.finishAction(attempt.action.id, 'unknown', { reason: 'No receipt' });
     const model = new DisplayModel(); model.apply(monitor.snapshot());
     const timeline = new Timeline(model);
@@ -64,10 +68,10 @@ test('timeline renders Chinese, emoji and markdown at narrow widths, and filters
 test('completed conversations keep received and sent content visible while tool and model details stay folded', () => {
   const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
   try {
-    const source = store.receive({ key: 'conversation', kind: 'message', at: Date.now(), groupId: 100, actorId: 7, text: '今晚还练琴吗？', payload: { sender: { nickname: '阿岚' } } })!;
+    const source = store.receive(qqEvent({ key: 'conversation', kind: 'message', at: Date.now(), groupId: 100, actorId: 7, text: '今晚还练琴吗？', payload: { sender: { nickname: '阿岚' } } }, store))!;
     const batch = store.claim(10)!; monitor.startRun('conversation', batch);
     monitor.agentEvent({ type: 'tool_execution_start', toolCallId: 'send', toolName: 'send_group_msg', args: {} });
-    const attempt = store.beginAction('send:conversation', 'send_group_msg', { group_id: 100, message: [{ type: 'text', data: { text: '练呀，今天练后半段。' } }, { type: 'image', data: { file: 'image-file' } }] }, [source.id]);
+    const attempt = beginAction(store, 'send:conversation', "qq_main__send_group_msg", { group_id: 100, message: [{ type: 'text', data: { text: '练呀，今天练后半段。' } }, { type: 'image', data: { file: 'image-file' } }] }, [source.id]);
     store.finishAction(attempt.action.id, 'success', { message_id: 9 });
     monitor.agentEvent({ type: 'tool_execution_end', toolCallId: 'send', toolName: 'send_group_msg', isError: false, result: { content: [{ type: 'text', text: 'RAW_TOOL_RESULT' }] } });
     monitor.agentEvent({ type: 'message_end', message: answer('MODEL_TEXT_NOT_SENT') });
@@ -75,13 +79,13 @@ test('completed conversations keep received and sent content visible while tool 
     const model = new DisplayModel(); model.apply(monitor.snapshot());
     const timeline = new Timeline(model);
     const text = () => timeline.render(80).map(plainText).join('\n');
-    assert.match(text(), /Group 100 \/ 阿岚/);
+    assert.match(text(), /qq:900:group:100 \/ 阿岚/);
     assert.match(text(), /今晚还练琴吗？/);
     assert.match(text(), /Qiuyue → Group 100.*Sent/);
     assert.match(text(), /练呀，今天练后半段。\[Image\]/);
     assert.ok(!text().includes('RAW_TOOL_RESULT'));
     assert.ok(!text().includes('MODEL_TEXT_NOT_SENT'));
-    assert.equal(model.items.get(attempt.action.id)?.actionKind, 'send_group_msg');
+    assert.equal(model.items.get(attempt.action.id)?.actionKind, 'qq_main__send_group_msg');
     model.toggle('run:conversation');
     assert.match(text(), /Model output · not sent to QQ/);
     const output = [...model.items.values()].find(item => item.type === 'assistant')!;
@@ -157,7 +161,7 @@ test('conversation view keeps triggers, queued observations, tool details and un
   const tools = createTools(cfg, store, { execute: async () => { entered.resolve(); await release.promise; throw new Error('receipt-unknown'); } }, () => brain.thought);
   brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) }, monitor);
   event(store, 'TRIGGER_CONTENT 中文 🌙');
-  faux.setResponses([answer([fauxToolCall('send_group_msg', { group_id: 100, message: 'VISIBLE_MESSAGE_BODY' })]), answer('MODEL_OUTPUT_NOT_SENT')]);
+  faux.setResponses([answer([fauxToolCall("qq_main__send_group_msg", { group_id: 100, message: 'VISIBLE_MESSAGE_BODY' })]), answer('MODEL_OUTPUT_NOT_SENT')]);
   const running = brain.run(store.claim(10)!);
   try {
     await entered.promise;
@@ -168,7 +172,7 @@ test('conversation view keeps triggers, queued observations, tool details and un
     const timeline = new Timeline(model);
     const text = () => timeline.render(160).map(plainText).join('\n');
     let rendered = text();
-    assert.match(rendered, /Group 100.*\n.*TRIGGER_CONTENT/);
+    assert.match(rendered, /qq:900:group:100.*\n.*TRIGGER_CONTENT/);
     assert.match(rendered, /Waiting for remote receipt/);
     assert.equal(rendered.split('VISIBLE_MESSAGE_BODY').length - 1, 1);
     assert.match(rendered, /1 received · not yet included in the model/);
@@ -189,7 +193,7 @@ test('conversation view keeps triggers, queued observations, tool details and un
     assert.ok(!rendered.includes('"group_id"'));
     const run = [...model.items.values()].find(item => item.type === 'run')!;
     model.toggle(run.id); rendered = text();
-    assert.match(rendered, /Group 200.*\n.*WAITING_CONTENT/);
+    assert.match(rendered, /qq:900:group:200.*\n.*WAITING_CONTENT/);
     assert.match(rendered, /Unknown/); assert.ok(!rendered.includes('not yet included in the model'));
     model.showDetails = true; rendered = text();
     assert.match(rendered, /SYSTEM_DETAILS_ONLY/); assert.match(rendered, /"group_id"/);
@@ -290,15 +294,15 @@ test('interactive TUI scrolls, follows output, confirms controls and detaches wi
 });
 
 test('interface language defaults to English and supports Chinese for monitoring and management', () => {
-  const previous = process.env.QIUYUE_UI_LANGUAGE;
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-language-')); const path = join(dir, 'config.json');
   const store = new Store(':memory:');
   try {
     event(store, 'shared event');
     for (const [language, phase, title, note, state] of [
-      ['en', 'Idle', 'Received · Group 100', 'Use /help', 'Waiting for observation'],
-      ['zh', '空闲', '收到 · 群 100', '/help 查看命令', '等待观察'],
+      ['en', 'Idle', 'Received · qq:900:group:100', 'Use /help', 'Waiting for observation'],
+      ['zh', '空闲', '收到 · qq:900:group:100', '/help 查看命令', '等待观察'],
     ]) {
-      process.env.QIUYUE_UI_LANGUAGE = language;
+      writeFileSync(path, JSON.stringify({ uiLanguage: language })); loadUiLanguage(path);
       const monitor = new Monitor(config(), store);
       try {
         const snapshot = monitor.snapshot();
@@ -312,7 +316,7 @@ test('interface language defaults to English and supports Chinese for monitoring
       } finally { monitor.close(); }
     }
   } finally {
-    if (previous === undefined) delete process.env.QIUYUE_UI_LANGUAGE; else process.env.QIUYUE_UI_LANGUAGE = previous;
+    rmSync(dir, { recursive: true, force: true }); loadUiLanguage(path);
     store.close();
   }
 });

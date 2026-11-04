@@ -11,7 +11,6 @@ export function stickerLines(desc: string): string[] {
   return use ? [use, whole] : [whole];
 }
 export interface StickerSuggestion { emojiId: string; desc: string; similarity: number }
-const stickerActions = new Set(['add_custom_face', 'modify_custom_face', 'delete_custom_face']);
 
 /** The plugin owns collection indexing and reuses message vectors already made for memory recall. */
 export class StickerRecall {
@@ -28,7 +27,7 @@ export class StickerRecall {
     this.saved.dropOtherVectors(this.semantics.model);
     for (const { emojiId, desc, line, vector } of this.saved.stickerVectors(this.semantics.model)) this.stickers.set(emojiId, { desc, lines: [...this.stickers.get(emojiId)?.lines ?? [], { line, vector }] });
     this.unsubscribe = this.saved.store.subscribe(notice => {
-      if (notice.kind === 'action' && notice.action.status === 'success' && stickerActions.has(notice.action.kind)) this.index();
+      if (notice.kind === 'action' && this.saved.changed(notice.action)) this.index();
     });
     this.index();
   }

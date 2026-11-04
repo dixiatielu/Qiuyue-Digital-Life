@@ -151,9 +151,9 @@ function Secrets({ secrets }) {
     <table class="table"><thead><tr><th>${t('Name', '名称')}</th><th>${t('Used by', '用于')}</th><th>${t('Status', '状态')}</th><th>${t('Source', '来源')}</th><th></th></tr></thead><tbody>
       ${secrets.data.entries.map(secret => html`<tr><td class="mono">${secret.name}</td><td>${secret.usedBy.map(use => html`<${Badge}>${use}<//> `)}</td>
         <td>${secret.set ? html`<span class="mono">${secret.value}</span>` : html`<${Badge} kind="warn">${secret.source === 'file' ? t('disabled', '已停用') : t('not set', '未设置')}<//>`}</td>
-        <td>${({ environment: t('External environment', '外部环境'), file: t('Credential file', '凭据文件'), legacy: t('Legacy .env', '旧 .env'), missing: '—' })[secret.source]}</td>
+        <td>${({ environment: t('External environment', '外部环境'), file: t('Credential file', '凭据文件'), missing: '—' })[secret.source]}</td>
         <td class="nowrap">${secret.writable ? html`<button class="ghost tiny" onClick=${() => setEditing(secret)}>${secret.set ? t('Replace', '更换') : t('Set', '设置')}</button>
-          ${secret.set ? html`<button class="ghost tiny danger" onClick=${() => confirm(t(`Disable ${secret.name}? Old .env values will stay disabled too.`, `停用 ${secret.name}？旧 .env 中的同名值也不会再使用。`)) && write(secret.name, null)}>${t('Disable', '停用')}</button>` : null}` : html`<span class="muted small">${t('Read-only', '只读')}</span>`}</td></tr>`)}
+          ${secret.set ? html`<button class="ghost tiny danger" onClick=${() => confirm(t(`Disable ${secret.name}?`, `停用 ${secret.name}？`)) && write(secret.name, null)}>${t('Disable', '停用')}</button>` : null}` : html`<span class="muted small">${t('Read-only', '只读')}</span>`}</td></tr>`)}
     </tbody></table>
     ${editing ? html`<${Modal} title=${editing.fresh ? t('Add a credential', '添加凭据') : editing.name} onClose=${() => setEditing(null)}
       footer=${html`<button class="ghost" onClick=${() => setEditing(null)}>${t('Cancel', '取消')}</button><button class="primary" disabled=${!editing.name || !value} onClick=${() => write(editing.name, value)}>${t('Save', '保存')}</button>`}>

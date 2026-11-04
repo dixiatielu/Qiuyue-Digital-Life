@@ -30,17 +30,17 @@ function Tri({ value, onChange }) {
   return html`<div class="segmented">${options.map(([option, label]) => html`<button class=${value === option ? 'active' : ''} onClick=${() => onChange(option)}>${label}</button>`)}</div>`;
 }
 
-function Permissions({ form }) {
+function Permissions({ form, account }) {
   const catalog = useAsync(() => api('/api/snowluma'));
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('');
   const [view, setView] = useState('all');
-  const tools = form.get('snowluma.tools') ?? form.effective.snowluma?.tools ?? { allow: '*', deny: [] };
+  const tools = { allow: '*', deny: [], ...account.tools };
   const allowed = permitted(tools);
   const actions = catalog.data?.actions ?? [];
   const categories = useMemo(() => [...new Set(actions.map(action => action.category ?? ''))].filter(Boolean), [actions]);
   if (!catalog.data) return html`<${Loading} state=${catalog} />`;
-  const write = next => form.set('snowluma.tools', { allow: next.allow, deny: [...new Set(next.deny)].sort() });
+  const write = next => form.set('adapters', (form.get('adapters') ?? form.effective.adapters).map(item => item.id === account.id ? { ...item, tools: { allow: next.allow, deny: [...new Set(next.deny)].sort() } } : item));
   const toggle = (name, on) => {
     if (tools.allow === '*') write({ allow: '*', deny: on ? tools.deny.filter(item => item !== name) : [...tools.deny, name] });
     else write({ allow: on ? [...new Set([...tools.allow, name])].sort() : tools.allow.filter(item => item !== name), deny: on ? tools.deny.filter(item => item !== name) : tools.deny });
@@ -49,7 +49,7 @@ function Permissions({ form }) {
   const shown = actions.filter(action => (!category || action.category === category) && (!needle || action.name.toLowerCase().includes(needle) || (action.summary ?? '').toLowerCase().includes(needle))
     && (view === 'all' || (view === 'allowed') === allowed(action.name) || (view === 'readonly' && action.readOnly)));
   const count = actions.filter(action => allowed(action.name)).length;
-  return html`<${Card} title=${t('QQ interface permissions', 'QQ 接口权限')} actions=${html`<span class="muted small">${t(`${count} of ${actions.length} allowed`, `已允许 ${count} / ${actions.length}`)}</span>`}>
+  return html`<${Card} title=${`${account.id} · ${t('QQ interface permissions', 'QQ 接口权限')}`} actions=${html`<span class="muted small">${t(`${count} of ${actions.length} allowed`, `已允许 ${count} / ${actions.length}`)}</span>`}>
     <p class="muted small">${t('Native SnowLuma interfaces she may call, by their original names. Read-only queries and actions are both subject to these. A plugin switch never grants an interface.', '她可以按原名调用的 SnowLuma 原生接口。只读查询和行动都受这里限制。插件开关不会授予接口权限。')}
       ${' '}API ${catalog.data.source.commit?.slice(0, 12) ?? catalog.data.source.sdkVersion}</p>
     <div class="row wrap">
@@ -80,7 +80,7 @@ export function PluginsPage() {
   if (!form.state.data || !info.data) return html`<${Loading} state=${form.state.data ? info : form.state} />`;
   if (!form.raw) return html`<p class="note error">${t('config.json is not valid JSON; repair it on the configuration page first.', 'config.json 不是有效的 JSON，请先在配置页修复。')}</p>`;
   const value = path => form.get(path) ?? getPath(form.effective, path);
-  const allowed = permitted(form.get('snowluma.tools') ?? form.effective.snowluma?.tools ?? { allow: '*', deny: [] });
+  const accounts = (form.get('adapters') ?? form.effective.adapters ?? []).filter(account => account.driver === 'snowluma');
   const inspected = info.data.inspected;
   const credentials = inspected?.credentials ?? { problems: [], warnings: [] };
   const running = info.data.running;
@@ -110,8 +110,10 @@ export function PluginsPage() {
     <div hidden=${tab !== 'installed'} class="plugin-grid">${info.data.ids.map(id => {
       const live = running?.plugins.find(plugin => plugin.id === id);
       const schema = live?.configSchema ? live : info.data.metadata?.[id];
-      const user = !(info.data.builtinIds ?? []).includes(id);
-      const meta = user ? { name: schema?.name ?? live?.name ?? id, text: schema?.description ?? live?.description ?? '', needs: [] } : describe(id, value, allowed);
+      const account = accounts.find(account => id.startsWith(`${account.id.replaceAll('_', '-')}-`));
+      const capability = account ? id.slice(account.id.replaceAll('_', '-').length + 1) : id;
+      const user = !account && !(info.data.builtinIds ?? []).includes(id);
+      const meta = user ? { name: schema?.name ?? live?.name ?? id, text: schema?.description ?? live?.description ?? '', needs: [] } : describe(capability, value, permitted({ allow: '*', deny: [], ...account?.tools }));
       const active = inspected?.plugins.includes(id);
       const pluginForm = { ...form, effective: { ...form.effective, extensions: { ...form.effective.extensions, settings: { ...form.effective.extensions?.settings, [id]: { ...schema?.defaults, ...form.effective.extensions?.settings?.[id] } } } } };
       return html`<${Card} key=${id} title=${html`<span class="plugin-name"><${Icon} name="plugins" /><span>${meta.name}<small class="muted mono">${id}</small></span></span>`} actions=${html`<${Tri} value=${form.get(`plugins.${id}`)} onChange=${next => form.set(`plugins.${id}`, next)} />`}>
@@ -143,7 +145,7 @@ export function PluginsPage() {
         <${ConfigField} form=${form} path="web.maxBytes" type="int" label=${t('Largest page (bytes)', '网页大小上限（字节）')} />
       </div>
     <//>
-    </div><div hidden=${tab !== 'permissions'}><${Permissions} form=${form} /></div>
+    </div><div hidden=${tab !== 'permissions'}>${accounts.map(account => html`<${Permissions} key=${account.id} form=${form} account=${account} />`)}</div>
     ${inspected ? html`<${ContextNote} context=${inspected} />` : null}
-    <${SaveBar} form=${form} onSaved=${info.reload} savedMessage=${t('Saved. Reload plugins to apply these settings.', '已保存，重载插件后应用设置。')} />`;
+    <${SaveBar} form=${form} onSaved=${info.reload} savedMessage=${t('Saved. Restart for account permissions; reload ordinary plugins.', '已保存。账号权限需重启，普通插件可重载。')} />`;
 }

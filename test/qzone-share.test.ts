@@ -34,30 +34,30 @@ function qzone(options: { share?: () => unknown; send?: (action: string) => unkn
 test('a listed post is shared as the card SnowLuma has Qzone sign, found in the result that listed it', async () => {
   const { f, calls, run } = qzone();
   try {
-    const source = (await run('get_qzone_public_feeds', {})).details.sourceId;
-    const shared = await run('share_qzone_feed', { tid: 'bb', source, user_id: 7 });
+    const source = (await run("qq_main__get_qzone_public_feeds", {})).details.sourceId;
+    const shared = await run("qq_main__share_qzone_feed", { tid: 'bb', source, user_id: 7 });
     assert.deepEqual(calls.slice(1), [{ action: 'get_qzone_share_ark', args: { feed: post('bb') } }, { action: 'send_private_msg', args: { user_id: 7, message: [{ type: 'json', data: { data: card } }] } }]);
-    const action = f.store.actions().find(item => item.kind === 'share_qzone_feed')!;
+    const action = f.store.actions().find(item => item.kind === 'qq_main__share_qzone_feed')!;
     assert.deepEqual([action.status, action.args, action.result], ['success', { user_id: 7, tid: 'bb' }, { receipt: { message_id: -7 }, card }]);
     assert.deepEqual(JSON.parse((shared.content[0] as { text: string }).text), action.result);
     assert.ok(action.sources.includes(f.store.resolve(source)));
-    await assert.rejects(run('share_qzone_feed', { tid: 'zz', source, user_id: 7 }), /does not appear/);
-    await assert.rejects(run('share_qzone_feed', { tid: 'bb', source, user_id: 7, group_id: 100 }), /exactly one/);
-    assert.equal(f.store.actions().filter(item => item.kind === 'share_qzone_feed').length, 1);
+    await assert.rejects(run("qq_main__share_qzone_feed", { tid: 'zz', source, user_id: 7 }), /does not appear/);
+    await assert.rejects(run("qq_main__share_qzone_feed", { tid: 'bb', source, user_id: 7, group_id: 100 }), /exactly one/);
+    assert.equal(f.store.actions().filter(item => item.kind === 'qq_main__share_qzone_feed').length, 1);
   } finally { f.store.close(); }
 });
 
 test('your own post is read by its tid and shared with Qzone\'s notice, and a missing one fails without sending', async () => {
   const { f, calls, run } = qzone();
   try {
-    await run('share_qzone_feed', { tid: 'own', group_id: 100 });
+    await run("qq_main__share_qzone_feed", { tid: 'own', group_id: 100 });
     assert.deepEqual(calls, [
       { action: 'get_qzone_feed_detail', args: { tid: 'own' } },
       { action: 'get_qzone_share_ark', args: { feed: post('own') } },
       { action: 'send_group_msg', args: { group_id: 100, message: [{ type: 'json', data: { data: card } }] } },
     ]);
     assert.deepEqual(f.store.actions()[0]!.result, { receipt: { message_id: -7 }, card, notice });
-    await assert.rejects(run('share_qzone_feed', { tid: 'gone', user_id: 7 }), /"outcome":"failed"/);
+    await assert.rejects(run("qq_main__share_qzone_feed", { tid: 'gone', user_id: 7 }), /"outcome":"failed"/);
     assert.match(JSON.stringify(f.store.actions().find(item => item.args.tid === 'gone')!.result), /GetFeedDetail failed/);
     assert.equal(calls.filter(item => item.action.startsWith('send_')).length, 1);
   } finally { f.store.close(); }
@@ -66,14 +66,14 @@ test('your own post is read by its tid and shared with Qzone\'s notice, and a mi
 test('a refused share fails before sending, and an unconfirmed send is not repeated', async () => {
   const refused = qzone({ share: () => { throw new SnowLumaApiError({ status: 'failed', retcode: 100, data: null, wording: '该空间动态暂不支持分享' }); } });
   try {
-    await assert.rejects(refused.run('share_qzone_feed', { tid: 'own', user_id: 7 }), /暂不支持分享/);
+    await assert.rejects(refused.run('qq_main__share_qzone_feed', { tid: 'own', user_id: 7 }), /暂不支持分享/);
     assert.equal(refused.f.store.actions()[0]!.status, 'failed');
     assert.ok(!refused.calls.some(item => item.action.startsWith('send_')));
   } finally { refused.f.store.close(); }
   const lost = qzone({ send: () => { throw new Error('receipt lost'); } });
   try {
-    await assert.rejects(lost.run('share_qzone_feed', { tid: 'own', user_id: 7 }), /"outcome":"unknown"/);
-    await assert.rejects(lost.run('share_qzone_feed', { tid: 'own', user_id: 7 }), /"reused":true/);
+    await assert.rejects(lost.run('qq_main__share_qzone_feed', { tid: 'own', user_id: 7 }), /"outcome":"unknown"/);
+    await assert.rejects(lost.run('qq_main__share_qzone_feed', { tid: 'own', user_id: 7 }), /"reused":true/);
     assert.equal(lost.calls.filter(item => item.action === 'send_private_msg').length, 1);
     assert.equal(lost.calls.filter(item => item.action === 'get_qzone_share_ark').length, 1);
     assert.deepEqual(lost.f.store.actions()[0]!.result, { error: { message: 'receipt lost' }, card, notice });
@@ -83,23 +83,23 @@ test('a refused share fails before sending, and an unconfirmed send is not repea
 test('sharing is offered only while get_qzone_share_ark and a send interface are enabled', () => {
   const { f } = qzone();
   try {
-    const offered = () => f.tools.current().some(tool => tool.name === 'share_qzone_feed');
+    const offered = () => f.tools.current().some(tool => tool.name === "qq_main__share_qzone_feed");
     assert.ok(offered());
-    f.cfg.snowluma.tools = { allow: '*', deny: ['get_qzone_share_ark'] }; assert.ok(!offered());
-    f.cfg.snowluma.tools = { allow: '*', deny: ['get_cookies'] }; assert.ok(offered());
-    f.cfg.snowluma.tools = { allow: '*', deny: ['send_private_msg'] }; assert.ok(offered());
-    f.cfg.snowluma.tools = { allow: '*', deny: ['send_private_msg', 'send_group_msg'] }; assert.ok(!offered());
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['get_qzone_share_ark'] }; assert.ok(!offered());
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['get_cookies'] }; assert.ok(offered());
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['send_private_msg'] }; assert.ok(offered());
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['send_private_msg', 'send_group_msg'] }; assert.ok(!offered());
   } finally { f.store.close(); }
 });
 
 test('a share uses the core action budget and checks its actual target permission', async () => {
   const { f, calls, run } = qzone();
   try {
-    f.cfg.snowluma.tools.deny = ['send_private_msg'];
-    await assert.rejects(run('share_qzone_feed', { tid: 'own', user_id: 7 }), /"outcome":"failed"/);
+    f.cfg.adapters[0]!.tools.deny = ['send_private_msg'];
+    await assert.rejects(run("qq_main__share_qzone_feed", { tid: 'own', user_id: 7 }), /"outcome":"failed"/);
     assert.ok(!calls.some(item => item.action === 'send_private_msg'));
     f.cfg.limits.actionsPerHour = 1;
-    await assert.rejects(run('share_qzone_feed', { tid: 'own', group_id: 100 }), /rate limit/);
+    await assert.rejects(run("qq_main__share_qzone_feed", { tid: 'own', group_id: 100 }), /rate limit/);
     assert.ok(!calls.some(item => item.action === 'send_group_msg'));
   } finally { f.store.close(); }
 });
@@ -108,7 +108,7 @@ test('pausing while a share card is prepared prevents its later send', async () 
   const ready = deferred(); const release = deferred();
   const { f, calls, run } = qzone({ share: async () => { ready.resolve(); await release.promise; return { ark: card }; } });
   try {
-    const sharing = run('share_qzone_feed', { tid: 'own', user_id: 7 });
+    const sharing = run("qq_main__share_qzone_feed", { tid: 'own', user_id: 7 });
     await ready.promise; f.store.setSetting('paused', true); release.resolve();
     await assert.rejects(sharing, /"outcome":"failed"/);
     assert.ok(!calls.some(item => item.action.startsWith('send_')));

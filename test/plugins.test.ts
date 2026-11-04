@@ -1,3 +1,4 @@
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Type } from 'typebox';
@@ -11,28 +12,28 @@ import { ToolRuntime, type ThoughtContext } from '../src/tool-runtime.js';
 import { Store } from '../src/store.js';
 import { config, event, fixture } from './helpers.js';
 
-test('plugin switches are independent, honor legacy switches, and block an already held tool', async () => {
+test('plugin switches are independent and block an already held tool', async () => {
   const f = fixture(undefined, undefined, undefined, (_store, cfg) => {
     cfg.web.enabled = true;
-    return [webReaderPlugin(cfg), webSearchPlugin(cfg), qzoneSharePlugin(cfg)];
+    return [webReaderPlugin(cfg), webSearchPlugin(cfg), qzoneSharePlugin(cfg, cfg.adapters[0]!)];
   });
   f.brain.thought.lifeOnly = false;
   const names = () => f.tools.current().map(tool => tool.name);
   try {
     const search = f.tools.current().find(tool => tool.name === 'search_web')!;
-    assert.ok(names().includes('search_web') && names().includes('read_webpage') && names().includes('share_qzone_feed'));
+    assert.ok(names().includes('search_web') && names().includes('read_webpage') && names().includes('qq_main__share_qzone_feed'));
     f.cfg.plugins['web-search'] = false;
     assert.ok(!names().includes('search_web') && names().includes('read_webpage'));
     await assert.rejects(search.execute('held', { query: 'hello' }), /Plugin web-search is disabled/);
-    f.cfg.plugins['qzone-share'] = false;
-    assert.ok(!names().includes('share_qzone_feed') && names().includes('send_group_msg'));
+    f.cfg.plugins['qq-main-qzone-share'] = false;
+    assert.ok(!names().includes('qq_main__share_qzone_feed') && names().includes('qq_main__send_group_msg'));
     f.cfg.web.enabled = false;
     assert.ok(!names().includes('read_webpage'));
-    assert.ok(f.plugins.activities().every(item => !item.tools.some(tool => ['search_web', 'read_webpage', 'share_qzone_feed'].includes(tool))));
-    assert.ok(!f.reviewTools.current().some(tool => ['search_web', 'read_webpage', 'share_qzone_feed'].includes(tool.name)));
+    assert.ok(f.plugins.activities().every(item => !item.tools.some(tool => ['search_web', 'read_webpage', 'qq_main__share_qzone_feed'].includes(tool))));
+    assert.ok(!f.reviewTools.current().some(tool => ['search_web', 'read_webpage', 'qq_main__share_qzone_feed'].includes(tool.name)));
     f.cfg.drawing.enabled = true; f.cfg.plugins.drawing = false;
-    const plugins = createPlugins(f.cfg, f.store, { execute: async () => ({}) });
-    const runtime = new ToolRuntime(f.cfg, f.store, { execute: async () => ({}) }, () => f.brain.thought);
+    const plugins = createPlugins(f.cfg, f.store);
+    const runtime = new ToolRuntime(f.cfg, f.store, () => f.brain.thought, plugins);
     assert.ok(!plugins.bind(runtime)([]).some(tool => tool.name === 'imagen'));
     assert.deepEqual(pluginCredentials(f.cfg), { problems: [], warnings: [] });
   } finally { f.store.close(); }
@@ -90,13 +91,13 @@ test('plugin images, media references, and life activities work without capabili
   }]);
   try {
     const at = Date.now() - 1000;
-    const art = f.store.receive({ key: 'test:art', kind: 'test_art', at, text: 'Art finished', payload: { origin: 'self' } })!;
+    const art = f.store.receive(qqEvent({ key: 'test:art', kind: 'test_art', at, text: 'Art finished', payload: { origin: 'self' } }, f.store))!;
     f.faux.setResponses([context => { assert.ok(JSON.stringify(context).includes(picture.toString('base64'))); return answer('Seen it'); }]);
     await f.brain.run(f.store.claim(10)!);
     const view = f.tools.current().find(tool => tool.name === 'view_event_image')!;
     assert.deepEqual((await view.execute('view', { id: art.id, index: 0 })).content[1], { type: 'image', data: picture.toString('base64'), mimeType: 'image/png' });
     const message = [{ type: 'image', data: { file: 'art:test' } }];
-    await f.tools.current().find(tool => tool.name === 'send_group_msg')!.execute('send', { group_id: 100, message });
+    await f.tools.current().find(tool => tool.name === "qq_main__send_group_msg")!.execute('send', { group_id: 100, message });
     assert.deepEqual(f.store.actions()[0]!.args.message, message);
     assert.deepEqual(f.sent[0]!.args.message, [{ type: 'image', data: { file: `base64://${picture.toString('base64')}` } }]);
     f.store.setSetting('lifeEnabled', true); f.store.schedule('Free time', 'life', Date.now()); f.store.enqueueDue();
@@ -114,7 +115,7 @@ test('plugin images, media references, and life activities work without capabili
 test('plugin IDs and tool names cannot shadow other plugins or built-in tools, even while disabled', () => {
   const cfg = config(); const store = new Store(':memory:');
   const thought: ThoughtContext = { generation: 0, sources: new Set(), triggers: new Set(), lifeOnly: false };
-  const runtime = new ToolRuntime(cfg, store, { execute: async () => ({}) }, () => thought);
+  const runtime = new ToolRuntime(cfg, store, () => thought);
   const plugin = (id: string, enabled = true): LifePlugin => ({ id, enabled: () => enabled, tools: runtime => [runtime.jsonTool('read_event', 'shadow', Type.Object({}), () => ({}))] });
   try {
     assert.throws(() => new PluginHost([plugin('a'), plugin('a')]), /Duplicate plugin ID/);
@@ -133,7 +134,7 @@ test('a broken plugin picture leaves room for another, and excess pictures can b
   }]);
   try {
     f.cfg.limits.maxImages = 1;
-    const source = f.store.receive({ key: 'test:pictures', kind: 'pictures', at: Date.now(), text: 'Some pictures', payload: { origin: 'self' } })!;
+    const source = f.store.receive(qqEvent({ key: 'test:pictures', kind: 'pictures', at: Date.now(), text: 'Some pictures', payload: { origin: 'self' } }, f.store))!;
     f.faux.setResponses([context => {
       const text = JSON.stringify(context);
       assert.ok(text.includes('Picture 0 is missing') && text.includes(Buffer.from('picture-1').toString('base64')) && text.includes('View picture 2 later'));

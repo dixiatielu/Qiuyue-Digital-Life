@@ -1,10 +1,10 @@
-import { conversationRef, personRef, parseConversationRef, type PlatformIdentity } from './identity.js';
+import { personRef, parseConversationRef, requireConversationRef, parsePersonRef, validateSource, type PlatformIdentity } from './identity.js';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Action, DevelopmentKind, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Pursuit, Wake } from './domain.js';
-import { addressedTo, developmentKinds, isAmbient, isDevelopment, isHeartbeat } from './domain.js';
+import type { Action, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Pursuit, Wake } from './domain.js';
+import { developmentKinds, isDevelopment, isHeartbeat } from './domain.js';
 import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 
@@ -13,24 +13,18 @@ const parse = <T>(value: unknown): T => JSON.parse(String(value)) as T;
 const id = (prefix: string) => `${prefix}:${randomUUID()}`;
 export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
 /** While the digital life rests, group chat not addressed to it waits instead of starting or steering a thought (ADR-0016). */
-const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND ((source IS NOT NULL AND json_extract(source,'$.conversationType') IN ('group','channel','thread')) OR (source IS NULL AND group_id IS NOT NULL AND coalesce(json_extract(payload,'$.message_type'),'')!='private')) AND addressed=0";
+const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND json_extract(source,'$.conversationType') IN ('group','channel','thread') AND addressed=0";
 /** Parameters: whether life wakes may be claimed, then whether the digital life rests. */
 const claimable = `status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') AND (?=0 OR NOT (${restHolds}))`;
 /** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
 const recallable = `active=1 AND kind NOT IN (${developmentKinds.map(kind => `'${kind}'`).join(',')})`;
-/** Program events, including drawings from before plugins marked their own events with payload.origin=self. */
-const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap', 'rest_backlog', 'drawing']);
+/** Internal scheduling events cannot supply external evidence. */
+const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap', 'rest_backlog']);
 /** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
-const developmentScopes: Record<DevelopmentKind, RegExp> = { habit: /^(global|group:\d+|conversation:[a-z][^\s]+)$/, practice: /^(global|group:\d+|conversation:[a-z][^\s]+)$/, impression: /^person:(?:\d+|[a-z][a-z0-9_-]*:user:[^\s:]+)$/ };
-/** A conversation is group:<id> or private:<qq>; its record is what happened there. */
-export function conversationOf(value: string): { type: 'group' | 'private'; id: number } {
-  const match = /^(group|private):(\d+)$/.exec(value);
-  if (!match || !Number.isSafeInteger(Number(match[2]))) throw new Error('A conversation is group:<group ID> or private:<QQ ID>.');
-  return { type: match[1] as 'group' | 'private', id: Number(match[2]) };
-}
 /** Chat records cite events by the first eight characters of their ID. */
 export const eventRef = (eventId: string) => `#${eventId.slice(2, 10)}`;
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
+export const actionFingerprint = (kind: string, args: Record<string, unknown>) => digest({ kind, args: canonical(args) });
 
 /** What a revision reaches; see Store.revisionReach. */
 export interface RevisionReach { withdrawn: { id: string; kind: string; title: string }[]; cites: { id: string; kind: string; title: string }[] }
@@ -46,18 +40,16 @@ export class Store {
   readonly db: DatabaseSync;
   private listeners = new Set<(notice: StoreNotice) => void>();
   private notices: StoreNotice[] = [];
-  private selfId?: number;
   constructor(path: string, lifeEnabled = false) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    if (path !== ':memory:' && existsSync(`${path}.identities.lock`)) throw new Error('Identity migration is in progress.');
     this.db = new DatabaseSync(path);
-    this.db.function('ambient', (kind, actor) => isAmbient(String(kind), actor == null ? undefined : Number(actor), this.selfId) ? 1 : 0);
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='events'").get() && Number(this.db.prepare('PRAGMA user_version').get()!.user_version) !== 2) { this.db.close(); throw new Error('Database identity format needs migration. Stop the daemon and run identities migrate --config <path>.'); }
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, group_id INTEGER, actor_id INTEGER, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT, received_at INTEGER);
+      CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT, received_at INTEGER, addressed INTEGER NOT NULL DEFAULT 0, source TEXT, conversation_ref TEXT, actor_ref TEXT, ambient_flag INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS events_pending ON events(status, at);
-      CREATE INDEX IF NOT EXISTS events_group ON events(group_id, at);
-      CREATE INDEX IF NOT EXISTS events_actor ON events(actor_id, at);
-      CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, importance INTEGER NOT NULL, subjects TEXT NOT NULL, groups_json TEXT NOT NULL, fictional INTEGER NOT NULL, supersedes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, importance INTEGER NOT NULL, subjects TEXT NOT NULL, conversations_json TEXT NOT NULL, fictional INTEGER NOT NULL, supersedes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, scope TEXT);
       CREATE TABLE IF NOT EXISTS sources(owner_id TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(owner_id,source_id));
       CREATE INDEX IF NOT EXISTS source_dependents ON sources(source_id);
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED, title, content, tokenize='trigram');
@@ -66,9 +58,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS memory_vectors(memory_id TEXT NOT NULL, chunk INTEGER NOT NULL, model TEXT NOT NULL, line TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(memory_id,chunk));
       CREATE TRIGGER IF NOT EXISTS memory_vectors_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_vectors WHERE memory_id=old.id; END;
       CREATE TABLE IF NOT EXISTS tombstones(source_key TEXT PRIMARY KEY);
-      CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
+      CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', rest INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS pursuits(id TEXT PRIMARY KEY, title TEXT NOT NULL, progress TEXT NOT NULL, fictional INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, action_key TEXT UNIQUE NOT NULL, fingerprint TEXT NOT NULL, kind TEXT NOT NULL, args TEXT NOT NULL, source_ids TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, action_key TEXT UNIQUE NOT NULL, fingerprint TEXT NOT NULL, kind TEXT NOT NULL, args TEXT NOT NULL, source_ids TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at INTEGER NOT NULL, conversation TEXT);
       CREATE INDEX IF NOT EXISTS action_fingerprint ON actions(fingerprint,status);
       CREATE TABLE IF NOT EXISTS action_triggers(action_id TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY(action_id,event_id));
       CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, at INTEGER NOT NULL, run_id TEXT NOT NULL);
@@ -78,54 +70,16 @@ export class Store {
       CREATE TABLE IF NOT EXISTS context_records(id TEXT PRIMARY KEY, at INTEGER NOT NULL, message TEXT NOT NULL, source_ids TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS working_context(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
     `);
-    // Source timestamps have second precision and remote clocks; scheduling needs the local receive time.
-    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='received_at'").get()) this.db.exec('ALTER TABLE events ADD COLUMN received_at INTEGER');
-    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name='scope'").get()) this.db.exec('ALTER TABLE memories ADD COLUMN scope TEXT');
-    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('wakes') WHERE name='rest'").get()) this.db.exec('ALTER TABLE wakes ADD COLUMN rest INTEGER NOT NULL DEFAULT 0');
-    // Whether an event is addressed to the digital life is settled when it arrives, while the message it replies to is known to be its own.
-    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='addressed'").get()) this.db.exec('ALTER TABLE events ADD COLUMN addressed INTEGER NOT NULL DEFAULT 0');
-    for (const [name, type] of [['source', 'TEXT'], ['conversation_ref', 'TEXT'], ['actor_ref', 'TEXT'], ['ambient_flag', 'INTEGER']] as const) {
-      if (!this.db.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name=?").get(name)) this.db.exec(`ALTER TABLE events ADD COLUMN ${name} ${type}`);
-    }
-    if (!this.db.prepare("SELECT 1 FROM pragma_table_info('actions') WHERE name='conversation'").get()) this.db.exec('ALTER TABLE actions ADD COLUMN conversation TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS event_conversation ON events(conversation_ref,at); CREATE INDEX IF NOT EXISTS event_actor ON events(actor_ref,at); CREATE INDEX IF NOT EXISTS action_conversation ON actions(conversation,created_at)');
     for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
-    const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
-    if (self) this.selfId = parse<number>(self.value);
+    this.db.exec('PRAGMA user_version=2');
   }
   close() { this.db.close(); }
-  bindAccount(selfId: number) {
-    const row = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
-    if (row && parse<number>(row.value) !== selfId) throw new Error('This database belongs to another QQ account; check the configured account and database path.');
-    this.setSetting('selfId', selfId); this.selfId = selfId;
-  }
   bindPlatformAccount(instance: string, identity: PlatformIdentity) {
     this.transaction(() => {
       const accounts = this.setting<Record<string, PlatformIdentity>>('platformAccounts', {});
       const previous = accounts[instance];
       if (previous && (previous.platform !== identity.platform || previous.accountId !== identity.accountId)) throw new Error(`Adapter ${instance} belongs to another platform account; use a new instance ID.`);
-      if (identity.platform === 'qq' && this.selfId !== undefined && String(this.selfId) === identity.accountId && !Object.values(accounts).some(account => account.platform === 'qq' && account.accountId === identity.accountId)) {
-        for (const row of this.db.prepare("SELECT * FROM events WHERE source IS NULL AND (group_id IS NOT NULL OR actor_id IS NOT NULL)").all()) {
-          const event = this.eventRow(row); const type = event.groupId === undefined || event.payload.message_type === 'private' ? 'private' : 'group';
-          const target = type === 'group' ? event.groupId : event.payload.post_type === 'message_sent' ? event.payload.target_id ?? event.actorId : event.actorId;
-          const conversation = conversationRef(identity, type, String(target));
-          const source = { ...identity, instance, conversation, conversationType: type, ...(event.actorId === undefined ? {} : { actor: personRef('qq', String(event.actorId)) }), own: event.actorId === this.selfId || event.payload.post_type === 'message_sent', addressed: Boolean(row.addressed), attention: isHeartbeat(event.kind) ? 'transport' : isAmbient(event.kind, event.actorId, this.selfId) ? 'ambient' : 'normal' };
-          this.db.prepare('UPDATE events SET source=?,conversation_ref=?,actor_ref=?,ambient_flag=? WHERE id=?').run(json(source), conversation, source.actor ?? null, Number(source.attention === 'ambient'), event.id);
-        }
-        const marks = this.setting<Record<string, number>>('reviewMarks');
-        for (const [key, at] of Object.entries(marks)) { if (/^(group|private):\d+$/.test(key)) { const legacy = conversationOf(key); const ref = conversationRef(identity, legacy.type, String(legacy.id)); marks[ref] = Math.max(marks[ref] ?? 0, at); } }
-        this.setSetting('reviewMarks', marks);
-        for (const row of this.db.prepare("SELECT id,scope FROM memories WHERE scope LIKE 'person:%' OR scope LIKE 'group:%'").all()) {
-          const scope = String(row.scope); let next: string | undefined;
-          if (/^person:\d+$/.test(scope)) next = `person:${personRef('qq', scope.slice(7))}`;
-          if (/^group:\d+$/.test(scope)) next = `conversation:${conversationRef(identity, 'group', scope.slice(6))}`;
-          if (next) this.db.prepare('UPDATE memories SET scope=? WHERE id=?').run(next, String(row.id));
-        }
-        for (const row of this.db.prepare("SELECT id,args FROM actions WHERE conversation IS NULL AND instr(kind,':')=0 AND instr(kind,'__')=0").all()) {
-          const args = parse<Record<string, unknown>>(row.args); const target = args.group_id ?? args.user_id;
-          if (target != null) this.db.prepare('UPDATE actions SET conversation=? WHERE id=?').run(conversationRef(identity, args.group_id != null ? 'group' : 'private', String(target)), String(row.id));
-        }
-      }
       this.setSetting('platformAccounts', { ...accounts, [instance]: identity });
     });
   }
@@ -225,11 +179,13 @@ export class Store {
     });
   }
   receive(input: Omit<EnvironmentEvent, 'id' | 'status' | 'receivedAt'>, processed = false): EnvironmentEvent | undefined {
+    if ('groupId' in input || 'actorId' in input) throw new Error('Use canonical event.source identifiers.');
+    if (input.source) validateSource(input.source);
+    if ((input.kind === 'message' || input.kind.startsWith('notice:') || input.kind.startsWith('request:')) && !input.source) throw new Error('Platform events require a canonical source.');
     processed ||= isHeartbeat(input.kind) || input.source?.attention === 'transport';
     if (this.db.prepare('SELECT 1 FROM tombstones WHERE source_key=?').get(input.key)) return;
     const eventId = id('e'); const receivedAt = Date.now();
-    const addressed = input.source?.addressed ?? (this.selfId !== undefined && addressedTo(this.selfId, input, messageId => this.sentMessage(messageId)));
-    const result = this.db.prepare('INSERT OR IGNORE INTO events(id,source_key,kind,at,group_id,actor_id,text,payload,status,received_at,addressed,source,conversation_ref,actor_ref,ambient_flag) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(eventId, input.key, input.kind, input.at, input.groupId ?? null, input.actorId ?? null, input.text, json(input.payload), processed ? 'processed' : 'pending', receivedAt, addressed ? 1 : 0, input.source ? json(input.source) : null, input.source?.conversation ?? null, input.source?.actor ?? null, input.source ? Number(input.source.attention === 'ambient') : null);
+    const result = this.db.prepare('INSERT OR IGNORE INTO events(id,source_key,kind,at,text,payload,status,received_at,addressed,source,conversation_ref,actor_ref,ambient_flag) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(eventId, input.key, input.kind, input.at, input.text, json(input.payload), processed ? 'processed' : 'pending', receivedAt, Number(input.source?.addressed ?? false), input.source ? json(input.source) : null, input.source?.conversation ?? null, input.source?.actor ?? null, Number(input.source?.attention === 'ambient'));
     if (!result.changes) return;
     const event: EnvironmentEvent = { ...input, id: eventId, status: processed ? 'processed' : 'pending', receivedAt };
     this.notify({ kind: 'environment', event }); return event;
@@ -249,7 +205,7 @@ export class Store {
     return matches[0]!;
   }
   private eventsStarting(digits: string): string[] { return this.db.prepare('SELECT id FROM events WHERE id>=? AND id<? LIMIT 2').all(`e:${digits}`, `e:${digits}~`).map(row => String(row.id)); }
-  private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, groupId: row.group_id ?? undefined, actorId: row.actor_id ?? undefined, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined, ...(row.source ? { source: parse(row.source) } : {}) }; }
+  private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined, ...(row.source ? { source: parse(row.source) } : {}) }; }
   event(eventId: string): EnvironmentEvent | undefined { const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(eventId); return row ? this.eventRow(row) : undefined; }
   /** A review's prompt is perceived by the review alone, which has it as its observation (ADR-0012). */
   recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' AND kind!='memory_maintenance' AND coalesce(json_extract(source,'$.attention'),'')!='transport' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
@@ -295,18 +251,18 @@ export class Store {
   }
   pendingTiming(allowLife = true, resting = false): PendingTiming {
     // Rows from before received_at existed count as long overdue.
-    const row = this.db.prepare(`SELECT min(CASE WHEN coalesce(ambient_flag,ambient(kind,actor_id)) THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN coalesce(ambient_flag,ambient(kind,actor_id)) THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0, resting ? 1 : 0)!;
+    const row = this.db.prepare(`SELECT min(CASE WHEN ambient_flag THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient_flag THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0, resting ? 1 : 0)!;
     const time = (value: unknown) => value == null ? undefined : Number(value);
     return { first: time(row.first), last: time(row.last), ambient: time(row.ambient) };
   }
   pending() { return Number(this.db.prepare("SELECT count(*) AS n FROM events WHERE status='pending'").get()!.n); }
   processedCount() { return this.setting<number>('processedTotal'); }
-  latestGroupMessage(groupId: number, conversation?: string): number | undefined {
-    const row = this.db.prepare(`SELECT json_extract(payload,'$.message_id') AS message_id FROM events WHERE ${conversation ? 'conversation_ref' : 'group_id'}=? AND kind='message' ORDER BY at DESC LIMIT 1`).get(conversation ?? groupId);
+  latestGroupMessage(conversation: string): number | undefined {
+    const row = this.db.prepare(`SELECT json_extract(payload,'$.message_id') AS message_id FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1`).get(conversation);
     return row?.message_id == null ? undefined : Number(row.message_id);
   }
   private memoryRow(row: Record<string, any>): Memory {
-    return { id: row.id, kind: row.kind, title: row.title, content: row.content, importance: row.importance, subjects: parse(row.subjects), groups: parse(row.groups_json), fictional: Boolean(row.fictional), sources: this.db.prepare('SELECT source_id FROM sources WHERE owner_id=?').all(row.id).map(x => String(x.source_id)), supersedes: row.supersedes ?? undefined, ...(row.scope ? { scope: row.scope } : {}), active: Boolean(row.active), createdAt: row.created_at };
+    return { id: row.id, kind: row.kind, title: row.title, content: row.content, importance: row.importance, subjects: parse(row.subjects), conversations: parse(row.conversations_json), fictional: Boolean(row.fictional), sources: this.db.prepare('SELECT source_id FROM sources WHERE owner_id=?').all(row.id).map(x => String(x.source_id)), supersedes: row.supersedes ?? undefined, ...(row.scope ? { scope: row.scope } : {}), active: Boolean(row.active), createdAt: row.created_at };
   }
   memory(memoryId: string): Memory | undefined { const row = this.db.prepare('SELECT * FROM memories WHERE id=?').get(memoryId); return row ? this.memoryRow(row) : undefined; }
   /** Limits bound the digital life's own development writes; operator corrections pass none. */
@@ -324,7 +280,7 @@ export class Store {
     const scope = isDevelopment(input.kind) ? input.scope ?? (input.kind === 'impression' ? undefined : 'global') : undefined;
     let subjects = input.subjects ?? [];
     if (isDevelopment(input.kind)) {
-      if (!scope || !developmentScopes[input.kind].test(scope)) throw new Error('A habit or practice scope is global (the default) or conversation:<canonical ref>; an impression scope is person:<platform>:user:<id>. Legacy group:<id> and person:<qq> are also accepted.');
+      if (!scope || !(input.kind === 'impression' ? parsePersonRef(scope.slice('person:'.length)) && scope.startsWith('person:') : scope === 'global' || scope.startsWith('conversation:') && parseConversationRef(scope.slice('conversation:'.length)))) throw new Error('A habit or practice scope is global (the default) or conversation:<canonical ref>; an impression scope is person:<platform>:user:<id>.');
       if (input.kind === 'impression') {
         const existing = this.db.prepare("SELECT id FROM memories WHERE active=1 AND kind='impression' AND scope=? AND id IS NOT ?").get(scope, input.supersedes ?? null);
         if (existing) throw new Error(`An impression of this person already exists (${existing.id}); revise it with supersedes.`);
@@ -342,22 +298,22 @@ export class Store {
     // A diary entry about a fictional day is fiction too, whatever its kind.
     let fictional = input.kind === 'fiction' || input.fictional === true;
     if (!sources.length && !fictional) throw new Error('A memory must reference IDs of actual experiences or existing memories.');
-    const groups = new Set<number>();
+    const conversations = new Set<string>();
     for (const source of sources) {
       const event = this.event(source); const memory = this.memory(source);
       if (!event && !memory) throw new Error(`Source does not exist or has been deleted: ${source}`);
       if (memory && !memory.active) { const current = this.currentVersion(source); throw new Error(`Source has been revised; read its current version first: ${source}${current ? `. ${current}` : ''}`); }
-      if (event?.groupId) groups.add(event.groupId);
-      for (const group of memory?.groups ?? []) groups.add(group);
+      if (event?.source?.conversation) conversations.add(event.source.conversation);
+      for (const chat of memory?.conversations ?? []) conversations.add(chat);
       fictional ||= memory?.fictional ?? false;
     }
     if (fictional && !allowFiction) throw new Error('Fictional daily life is disabled; fictional experiences and derived content cannot be saved.');
-    for (const group of previous?.groups ?? []) groups.add(group);
+    for (const chat of previous?.conversations ?? []) conversations.add(chat);
     fictional ||= previous?.fictional ?? false;
     if (fictional && !allowFiction) throw new Error('Fictional daily life and revisions must retain their fictional sources.');
     const memoryId = id('m');
     this.transaction(() => {
-      this.db.prepare('INSERT INTO memories(id,kind,title,content,importance,subjects,groups_json,fictional,supersedes,active,created_at,scope) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(memoryId, input.kind, input.title, input.content, input.importance, json(subjects), json([...groups]), fictional ? 1 : 0, input.supersedes ?? null, 1, Date.now(), scope ?? null);
+      this.db.prepare('INSERT INTO memories(id,kind,title,content,importance,subjects,conversations_json,fictional,supersedes,active,created_at,scope) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(memoryId, input.kind, input.title, input.content, input.importance, json(subjects), json([...conversations]), fictional ? 1 : 0, input.supersedes ?? null, 1, Date.now(), scope ?? null);
       for (const source of sources) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(memoryId, source);
       if (previous) {
         // A correction invalidates dependent interpretations, while preserving their history.
@@ -407,8 +363,7 @@ export class Store {
   }
   private ownMessage(source: string): boolean {
     const event = this.event(source); if (!event) return false;
-    const self = this.db.prepare("SELECT value FROM settings WHERE key='selfId'").get();
-    return event.source?.own === true || event.kind.startsWith('snowluma:send_') || (event.kind === 'message' && self !== undefined && event.actorId === parse<number>(self.value));
+    return event.source?.own === true || event.payload.origin === 'self';
   }
   /** Whether the sources, or the memories they cite in turn, reach something it did not produce itself (ADR-0012): recalling its own judgment is not new evidence. */
   private restsOnOthers(sources: string[]): boolean {
@@ -427,7 +382,7 @@ export class Store {
     this.transaction(() => { this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(memoryId); this.log('memory_retired', { id: memoryId, kind: memory.kind, scope: memory.scope }); });
     return { ...memory, active: false };
   }
-  search(query: string, limit = 8, subjects: string[] = [], groups: number[] = [], historical = false, exclude: readonly MemoryKind[] = []): Memory[] {
+  search(query: string, limit = 8, subjects: string[] = [], conversations: string[] = [], historical = false, exclude: readonly MemoryKind[] = []): Memory[] {
     const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])].slice(0, 30);
     const candidates = new Map<string, Record<string, any>>();
     const active = historical ? '' : ' AND active=1';
@@ -444,7 +399,7 @@ export class Store {
       const text = `${memory.title} ${memory.content}`.toLowerCase();
       const matches = terms.filter(term => text.includes(term) || memory.subjects.some(subject => subject.toLowerCase().includes(term))).length;
       const person = memory.subjects.some(x => subjects.includes(x)) ? 8 : 0;
-      const place = memory.groups.some(x => groups.includes(x)) ? 2 : 0;
+      const place = memory.conversations.some(x => conversations.includes(x)) ? 2 : 0;
       const recency = Math.exp(-(now - memory.createdAt) / (30 * 86_400_000));
       return { memory, score: matches * 5 + person + place + memory.importance / 3 + recency, relevant: !query.trim() || matches > 0 || person > 0 || place > 0 };
     }).filter(x => x.relevant && !exclude.includes(x.memory.kind)).sort((a, b) => b.score - a.score).slice(0, limit).map(x => x.memory);
@@ -580,8 +535,8 @@ export class Store {
     if (this.db.isTransaction) write(); else this.transaction(write);
   }
   /** When someone other than the digital life last did something that can start a thought. */
-  lastHeard(selfId: number): number | undefined {
-    const row = this.db.prepare("SELECT max(coalesce(received_at,at)) AS at FROM events WHERE (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND ((source IS NOT NULL AND json_extract(source,'$.own')=0) OR (source IS NULL AND coalesce(actor_id,0)!=?)) AND NOT coalesce(ambient_flag,ambient(kind,actor_id))").get(selfId)!;
+  lastHeard(): number | undefined {
+    const row = this.db.prepare("SELECT max(coalesce(received_at,at)) AS at FROM events WHERE (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND json_extract(source,'$.own')=0 AND NOT ambient_flag").get()!;
     return row.at == null ? undefined : Number(row.at);
   }
   /** Life wakes since the given time, scheduled or offered as free time. */
@@ -595,37 +550,29 @@ export class Store {
     if (through > (marks[conversation] ?? 0)) this.setSetting('reviewMarks', { ...marks, [conversation]: through });
   }
   /** Conversations with messages from others that review has not read yet. */
-  reviewBacklog(selfId: number, now = Date.now()): { conversation: string; messages: number; since: number }[] {
+  reviewBacklog(now = Date.now()): { conversation: string; messages: number; since: number }[] {
     return this.db.prepare(`WITH marks AS (SELECT key AS conversation, value AS at FROM json_each((SELECT value FROM settings WHERE key='reviewMarks')))
-      SELECT c.conversation, count(*) AS messages, min(c.at) AS since FROM (SELECT coalesce(conversation_ref,CASE WHEN group_id IS NOT NULL THEN 'group:'||group_id ELSE 'private:'||actor_id END) AS conversation, at FROM events WHERE kind='message' AND ((source IS NOT NULL AND conversation_ref IS NOT NULL AND json_extract(source,'$.own')=0) OR (source IS NULL AND actor_id IS NOT NULL AND actor_id!=?))) c
-      LEFT JOIN marks m USING(conversation) WHERE c.at>=max(coalesce(m.at,0),?) GROUP BY c.conversation ORDER BY messages DESC`).all(selfId, now - 86_400_000)
+      SELECT c.conversation, count(*) AS messages, min(c.at) AS since FROM (SELECT conversation_ref AS conversation, at FROM events WHERE kind='message' AND conversation_ref IS NOT NULL AND json_extract(source,'$.own')=0) c
+      LEFT JOIN marks m USING(conversation) WHERE c.at>=max(coalesce(m.at,0),?) GROUP BY c.conversation ORDER BY messages DESC`).all(now - 86_400_000)
       .map(row => ({ conversation: String(row.conversation), messages: Number(row.messages), since: Number(row.since) }));
   }
   /** People with an impression who spoke in these conversations since the given times, latest first. */
-  impressionsIn(chats: { conversation: string; since: number }[], selfId: number, limit: number): (number | string)[] {
-    const last = new Map<number | string, number>();
+  impressionsIn(chats: { conversation: string; since: number }[], limit: number): string[] {
+    const last = new Map<string, number>();
     for (const chat of chats) {
       const filter = this.recordFilter(chat.conversation);
-      for (const row of this.db.prepare(`SELECT coalesce(actor_ref,actor_id) AS person, max(at) AS at FROM events WHERE ${filter.events} AND kind='message' AND at>=? AND ((source IS NOT NULL AND json_extract(source,'$.own')=0) OR (source IS NULL AND actor_id!=?)) AND EXISTS (SELECT 1 FROM memories WHERE active=1 AND kind='impression' AND scope='person:'||coalesce(events.actor_ref,events.actor_id)) GROUP BY person`).all(filter.target, chat.since, selfId)) {
-        const person = typeof row.person === 'string' ? row.person : Number(row.person);
+      for (const row of this.db.prepare(`SELECT actor_ref AS person, max(at) AS at FROM events WHERE ${filter.events} AND kind='message' AND at>=? AND json_extract(source,'$.own')=0 AND EXISTS (SELECT 1 FROM memories WHERE active=1 AND kind='impression' AND scope='person:'||events.actor_ref) GROUP BY person`).all(filter.target, chat.since)) {
+        const person = String(row.person);
         last.set(person, Math.max(last.get(person) ?? 0, Number(row.at)));
       }
     }
     return [...last].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([person]) => person);
   }
   private recordFilter(conversation: string): { target: string | number; events: string; actions: string } {
-    if (parseConversationRef(conversation)) return { target: conversation, events: "conversation_ref=? AND (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND coalesce(json_extract(source,'$.attention'),'')!='transport'", actions: "status='success' AND conversation=?" };
-    const { type, id: target } = conversationOf(conversation);
-    const accounts = Object.values(this.setting<Record<string, PlatformIdentity>>('platformAccounts', {}));
-    if (accounts.length) {
-      const qq = accounts.filter(account => account.platform === 'qq' && (this.selfId === undefined || account.accountId === String(this.selfId)));
-      const unique = [...new Map(qq.map(account => [account.accountId, account])).values()];
-      if (unique.length !== 1) throw new Error('Use a canonical conversation reference to select the platform account.');
-      return this.recordFilter(conversationRef(unique[0]!, type, String(target)));
-    }
-    // Typing notices say nothing about how anyone talks; reactions, recalls, and pokes do.
-    return { target, events: `${type === 'group' ? 'group_id=?' : 'group_id IS NULL AND actor_id=?'} AND (kind='message' OR kind LIKE 'notice:%') AND kind!='notice:notify:input_status'`, actions: `status='success' AND ${type === 'group' ? "CAST(json_extract(args,'$.group_id') AS INTEGER)=?" : "json_extract(args,'$.group_id') IS NULL AND CAST(json_extract(args,'$.user_id') AS INTEGER)=?"}` };
+    requireConversationRef(conversation);
+    return { target: conversation, events: "conversation_ref=? AND kind!='notice:notify:input_status' AND (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND coalesce(json_extract(source,'$.attention'),'')!='transport'", actions: "status='success' AND conversation=?" };
   }
+
   /** A page of one conversation from a time on: messages and notices, with this account's completed actions there. Events sharing the last time stay together. */
   conversationRecord(conversation: string, from: number, limit: number, until = Number.MAX_SAFE_INTEGER): { events: EnvironmentEvent[]; actions: Action[]; complete: boolean } {
     const filter = this.recordFilter(conversation);
@@ -638,12 +585,13 @@ export class Store {
     };
   }
   /** The latest items of one conversation containing a phrase or written by one person. */
-  conversationMatches(conversation: string, limit: number, match: { query?: string; person?: number | string; selfId: number }): { events: EnvironmentEvent[]; actions: Action[] } {
+  conversationMatches(conversation: string, limit: number, match: { query?: string; person?: string }): { events: EnvironmentEvent[]; actions: Action[] } {
     const filter = this.recordFilter(conversation);
     const query = match.query?.toLowerCase();
-    const identity = parseConversationRef(conversation);
-    const mine = match.person === 'self' || match.person === match.selfId || identity && match.person === personRef(identity.platform, identity.accountId);
-    const events = mine ? [] : this.db.prepare(`SELECT * FROM events WHERE ${filter.events}${query ? ' AND instr(lower(text),?)>0' : ''}${match.person ? typeof match.person === 'string' ? ' AND actor_ref=?' : ' AND actor_id=?' : ''} ORDER BY at DESC,rowid DESC LIMIT ?`).all(filter.target, ...(query ? [query] : []), ...(match.person ? [match.person] : []), limit).map(row => this.eventRow(row));
+    if (match.person && match.person !== 'self' && !parsePersonRef(match.person)) throw new Error('Use self or a canonical person reference.');
+    const identity = requireConversationRef(conversation);
+    const mine = match.person === 'self' || identity && match.person === personRef(identity.platform, identity.accountId);
+    const events = mine ? [] : this.db.prepare(`SELECT * FROM events WHERE ${filter.events}${query ? ' AND instr(lower(text),?)>0' : ''}${match.person ? ' AND actor_ref=?' : ''} ORDER BY at DESC,rowid DESC LIMIT ?`).all(filter.target, ...(query ? [query] : []), ...(match.person ? [match.person] : []), limit).map(row => this.eventRow(row));
     const actions = match.person && !mine ? [] : this.db.prepare(`SELECT * FROM actions WHERE ${filter.actions}${query ? ' AND instr(lower(args),?)>0' : ''} ORDER BY created_at DESC LIMIT ?`).all(filter.target, ...(query ? [query] : []), limit).map(row => this.action(row));
     return { events: events.reverse(), actions: actions.reverse() };
   }
@@ -653,14 +601,13 @@ export class Store {
     const row = this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND json_extract(payload,'$.message_id')=? ORDER BY at DESC LIMIT 1`).get(filter.target, messageId);
     return row ? this.eventRow(row) : undefined;
   }
-  sentMessage(messageId: number, account?: PlatformIdentity): boolean { return !!this.db.prepare(`SELECT 1 FROM actions WHERE status='success' AND json_extract(result,'$.message_id')=? ${account ? "AND conversation LIKE ?" : "AND (conversation IS NULL OR conversation LIKE 'qq:%')"} LIMIT 1`).get(messageId, ...(account ? [`${account.platform}:${encodeURIComponent(account.accountId)}:%`] : [])); }
-  /** The latest group card or nickname someone used, and a group's latest name. */
-  latestSender(userId: number): { card?: string; nickname?: string } | undefined {
-    const row = this.db.prepare("SELECT json_extract(payload,'$.sender') AS sender FROM events WHERE kind='message' AND actor_id=? AND json_extract(payload,'$.sender') IS NOT NULL ORDER BY at DESC LIMIT 1").get(userId);
-    return row ? parse(row.sender) : undefined;
+  sentMessage(messageId: number, account: PlatformIdentity): boolean { return !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND json_extract(result,'$.message_id')=? AND conversation LIKE ? LIMIT 1").get(messageId, `${account.platform}:${encodeURIComponent(account.accountId)}:%`); }
+  latestSender(person: string): { card?: string; nickname?: string } | undefined {
+    const row = this.db.prepare("SELECT json_extract(source,'$.actorName') AS name, json_extract(payload,'$.sender') AS sender FROM events WHERE actor_ref=? AND (json_extract(source,'$.actorName') IS NOT NULL OR json_extract(payload,'$.sender') IS NOT NULL) ORDER BY at DESC LIMIT 1").get(person);
+    return row ? row.name ? { nickname: String(row.name) } : parse(row.sender) : undefined;
   }
-  groupName(groupId: number): string | undefined {
-    const row = this.db.prepare("SELECT json_extract(payload,'$.group_name') AS name FROM events WHERE group_id=? AND kind='message' AND json_extract(payload,'$.group_name') IS NOT NULL ORDER BY at DESC LIMIT 1").get(groupId);
+  groupName(conversation: string): string | undefined {
+    const row = this.db.prepare("SELECT json_extract(payload,'$.group_name') AS name FROM events WHERE conversation_ref=? AND json_extract(payload,'$.group_name') IS NOT NULL ORDER BY at DESC LIMIT 1").get(conversation);
     return row ? String(row.name) : undefined;
   }
   action(row: Record<string, any>): Action { return { id: row.id, key: row.action_key, fingerprint: row.fingerprint, kind: row.kind, args: parse(row.args), sources: parse(row.source_ids), status: row.status, result: row.result ? parse(row.result) : null, createdAt: row.created_at, ...(row.conversation ? { conversation: row.conversation } : {}) }; }
@@ -680,8 +627,9 @@ export class Store {
     return Object.fromEntries(rows.map(row => [String(row.kind), Number(row.at)]));
   }
   beginAction(key: string, kind: string, args: Record<string, unknown>, sources: string[], triggers: string[] = [], hourlyLimit?: number | null, conversation?: string): { action: Action; fresh: boolean } {
+    if (conversation) requireConversationRef(conversation);
     return this.transaction(() => {
-      const fingerprint = digest({ kind, args: canonical(args) });
+      const fingerprint = actionFingerprint(kind, args);
       const existing = this.db.prepare('SELECT * FROM actions WHERE action_key=?').get(key);
       if (existing) {
         if (existing.fingerprint !== fingerprint) throw new Error('The same action key cannot be used for different actions.');

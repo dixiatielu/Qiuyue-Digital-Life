@@ -23,7 +23,7 @@ function harness(readCredentials?: () => CredentialReader) {
   f.cfg.extensions = { directory: join(dir, 'plugins'), dataDirectory: join(dir, 'data'), settings: {}, reloadTimeoutMs: 5000 };
   let saved = structuredClone(f.cfg);
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
-  const manager = new PluginManager(f.cfg, f.plugins, f.store, { execute: async () => ({}) }, () => structuredClone(saved), () => undefined, undefined, readCredentials);
+  const manager = new PluginManager(f.cfg, f.plugins, f.store, () => structuredClone(saved), () => undefined, undefined, readCredentials);
   manager.connect(runtime, () => { const changed = f.brain.refreshTools(); f.reviewer.refreshTools(); return changed; });
   const write = (id: string, text: string, file = 'index.mjs') => { mkdirSync(join(dir, 'plugins', id), { recursive: true }); writeFileSync(join(dir, 'plugins', id, file), text); };
   const execute = async (name: string, args = {}, review = false) => {
@@ -40,7 +40,7 @@ function harness(readCredentials?: () => CredentialReader) {
 const definition = (description = 'Read a sample') => `
 import { value } from './helper.mjs';
 export default {
-  id: 'sample', apiVersion: 1, version: '1.0', defaults: { city: 'Shanghai' },
+  id: 'sample', apiVersion: 2, version: '1.0', defaults: { city: 'Shanghai' },
   configSchema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
   setup(ctx) {
     ctx.tool({ name: 'sample_read', description: ${JSON.stringify(description)}, parameters: { type: 'object', properties: {} }, readOnly: true, review: true,
@@ -60,7 +60,7 @@ test('manifest defaults disable arbitrary user code before import and broken met
   const h = harness();
   try {
     h.write('reading-room', 'throw new Error("Must not import while disabled");');
-    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 1, name: 'Reading room', defaultEnabled: false }), 'plugin.json');
+    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 2, name: 'Reading room', defaultEnabled: false }), 'plugin.json');
     h.write('broken', '{bad json', 'plugin.json');
     await h.manager.start();
     const initial = h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')!;
@@ -75,12 +75,12 @@ test('manifest defaults disable arbitrary user code before import and broken met
     h.manager.request(['reload', 'reading-room']); await h.manager.settled();
     assert.equal(h.manager.job?.state, 'done');
     assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.state, 'disabled');
-    h.write('reading-room', 'export default { id: "reading-room", apiVersion: 1, setup() {} };');
-    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 1, defaultEnabled: true }), 'plugin.json');
+    h.write('reading-room', 'export default { id: "reading-room", apiVersion: 2, setup() {} };');
+    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 2, defaultEnabled: true }), 'plugin.json');
     delete h.saved.plugins['reading-room'];
     h.manager.request(['reload', 'reading-room']); await h.manager.settled();
     assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.state, 'running');
-    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 1, defaultEnabled: false }), 'plugin.json');
+    h.write('reading-room', JSON.stringify({ id: 'reading-room', apiVersion: 2, defaultEnabled: false }), 'plugin.json');
     assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.pending, true);
     h.manager.request(['reload', 'reading-room']); await h.manager.settled();
     assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'reading-room')?.state, 'disabled');
@@ -189,7 +189,7 @@ test('syntax errors, incompatible interfaces, invalid settings and conflicts kee
   try {
     h.write('sample', definition()); h.write('sample', 'export const value = 1;', 'helper.mjs'); await h.manager.start();
     const identity = contextIdentity(h.cfg, h.tools);
-    for (const text of ['export default {', definition().replace('apiVersion: 1', 'apiVersion: 9'), definition().replace("name: 'sample_read'", "name: 'read_event'")]) {
+    for (const text of ['export default {', definition().replace('apiVersion: 2', 'apiVersion: 1'), definition().replace('apiVersion: 2', 'apiVersion: 9'), definition().replace("name: 'sample_read'", "name: 'read_event'")]) {
       h.write('sample', text); h.manager.request(['reload', 'sample']); await h.manager.settled();
       assert.equal(h.manager.job?.state, 'failed'); assert.equal((await h.execute('sample_read')).result.value, 1);
       assert.equal(contextIdentity(h.cfg, h.tools), identity);
@@ -225,7 +225,7 @@ test('host-owned timers and asynchronous disposal do not accumulate across reloa
   const h = harness();
   try {
     h.write('timer', `import { appendFile } from 'node:fs/promises'; import { join } from 'node:path';
-      export default { id: 'timer', apiVersion: 1, setup(ctx) {
+      export default { id: 'timer', apiVersion: 2, setup(ctx) {
         ctx.every(1000, () => ctx.storage.set('ticks', (ctx.storage.get('ticks') ?? 0) + 1));
         ctx.onDispose(async () => { await appendFile(join(ctx.dataDirectory, 'disposed'), 'x'); });
       } };`);
@@ -242,7 +242,7 @@ test('reload drains background tasks, preserves their observations, and does not
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const h = harness();
   try {
-    h.write('worker', `export default { id: 'worker', apiVersion: 1, setup(ctx) {
+    h.write('worker', `export default { id: 'worker', apiVersion: 2, setup(ctx) {
       ctx.every(100, () => ctx.storage.set('ticks', (ctx.storage.get('ticks') ?? 0) + 1));
       ctx.tool({ name: 'start_work', description: 'Start background work', parameters: { type: 'object' }, execute() {
         ctx.background(async () => { await new Promise(resolve => setTimeout(resolve, 1000)); ctx.publish({ key: 'result', kind: 'finished', text: 'Finished work', origin: 'self' }); }); return { started: true };
@@ -264,7 +264,7 @@ test('a drain timeout leaves the old plugin and config active and resumes its ti
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const h = harness(); h.cfg.extensions.reloadTimeoutMs = 1000;
   try {
-    h.write('worker', `export default { id: 'worker', apiVersion: 1, setup(ctx) {
+    h.write('worker', `export default { id: 'worker', apiVersion: 2, setup(ctx) {
       ctx.every(100, () => ctx.storage.set('ticks', (ctx.storage.get('ticks') ?? 0) + 1));
       ctx.tool({ name: 'start_work', description: 'Start work', parameters: { type: 'object' }, execute() {
         ctx.background(() => new Promise(resolve => setTimeout(resolve, 2000))); return true;
@@ -288,7 +288,7 @@ test('image generation finishes before disabling its plugin, without being repor
   f.cfg.extensions.directory = join(dir, 'plugins');
   const saved = structuredClone(f.cfg); saved.plugins.drawing = false;
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
-  const manager = new PluginManager(f.cfg, f.plugins, f.store, { execute: async () => ({}) }, () => saved, () => undefined);
+  const manager = new PluginManager(f.cfg, f.plugins, f.store, () => saved, () => undefined);
   manager.connect(runtime, () => { const changed = f.brain.refreshTools(); f.reviewer.refreshTools(); return changed; });
   try {
     await manager.start(); f.brain.thought.lifeOnly = false;
@@ -304,34 +304,34 @@ test('image generation finishes before disabling its plugin, without being repor
 test('plugin actions keep unknown outcomes and do not repeat a dispatch; read-only tools cannot send through query', async () => {
   const h = harness();
   try {
-    h.write('writer', `export default { id: 'writer', apiVersion: 1, setup(ctx) {
+    h.write('writer', `export default { id: 'writer', apiVersion: 2, setup(ctx) {
       ctx.tool({ name: 'write_once', description: 'Write externally', parameters: { type: 'object' }, execute(args, call) {
         return call.action('post', { text: 'hello' }, async () => { ctx.storage.set('sent', (ctx.storage.get('sent') ?? 0) + 1); throw new Error('Connection lost after sending'); });
       } });
       ctx.tool({ name: 'bad_read', description: 'A misdeclared read', parameters: { type: 'object' }, readOnly: true, review: true,
-        execute(args, call) { return call.snowluma.query('send_group_msg', { group_id: 100, message: 'hello' }); } });
+        execute(args, call) { return call.adapters.query('qq_main', 'send_group_msg', { group_id: 100, message: 'hello' }); } });
     } };`);
     await h.manager.start();
     assert.equal((await h.execute('write_once')).outcome.status, 'unknown');
     assert.equal((await h.execute('write_once')).reused, true);
     assert.equal(h.store.setting('plugin:writer:sent'), 1);
     assert.ok(!h.reviewTools.current().some(tool => tool.name === 'write_once'));
-    await assert.rejects(h.execute('bad_read', {}, true), /Use snowluma.action/);
+    await assert.rejects(h.execute('bad_read', {}, true), /Use adapters.action/);
   } finally { await h.close(); }
 });
 
-test('reload applies native permissions together with dependent enhancements and rejects held native tools', async () => {
+test('named connection permissions require a restart and a reload keeps the running tools', async () => {
   const h = harness();
   try {
     await h.manager.start(); h.brain.thought.lifeOnly = false;
-    const held = h.tools.current().find(tool => tool.name === 'send_group_msg')!;
-    h.saved.snowluma.tools.deny = ['send_group_msg', 'modify_custom_face'];
-    h.manager.request(['reload', 'snowluma-tools']); await h.manager.settled();
-    assert.equal(h.manager.job?.state, 'done'); assert.equal(h.manager.job?.contextReset, true);
-    assert.ok(!h.tools.current().some(tool => tool.name === 'send_group_msg'));
-    assert.ok(!(h.tools.current().find(tool => tool.name === 'add_custom_face')!.parameters as any).properties.desc);
-    h.brain.thought.generation = h.store.settings().generation;
-    await assert.rejects(held.execute('old', { group_id: 100, message: 'hello' }), /old version|not enabled/);
+    const held = h.tools.current().find(tool => tool.name === 'qq_main__send_group_msg')!;
+    h.saved.adapters[0]!.tools.deny = ['send_group_msg', 'modify_custom_face'];
+    h.manager.request(['reload', 'qq-main-snowluma-tools']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'failed');
+    assert.match(h.manager.job?.error ?? '', /restart/i);
+    assert.ok(h.tools.current().some(tool => tool.name === 'qq_main__send_group_msg'));
+    assert.ok((h.tools.current().find(tool => tool.name === 'qq_main__add_custom_face')!.parameters as any).properties.desc);
+    await held.execute('still-running', { group_id: 100, message: 'hello' });
   } finally { await h.close(); }
 });
 
@@ -404,7 +404,7 @@ test('reloading a plugin refreshes its credential snapshot without changing core
   let key = '';
   const h = harness(() => { const snapshot = key; return () => snapshot; });
   try {
-    h.write('key-check', `export default { id: 'key-check', apiVersion: 1, setup(ctx) {
+    h.write('key-check', `export default { id: 'key-check', apiVersion: 2, setup(ctx) {
       ctx.tool({ name: 'key_check', description: 'Check a credential', parameters: { type: 'object' }, readOnly: true,
         execute() { return { changed: ctx.credential('PLUGIN_KEY') === 'rotated-test-key' }; } });
     } };`);
@@ -447,7 +447,7 @@ test('SDK image attachments require a current recorded source and reject late us
     h.cfg.limits.maxImages = 0;
     h.write('images', `
       let previous, held;
-      export default { id: 'images', apiVersion: 1, setup(ctx) {
+      export default { id: 'images', apiVersion: 2, setup(ctx) {
         ctx.tool({ name: 'sample_images', description: 'Read images', readOnly: true,
           parameters: { type: 'object', properties: { mode: { type: 'string' } } },
           async execute({ mode }, call) {

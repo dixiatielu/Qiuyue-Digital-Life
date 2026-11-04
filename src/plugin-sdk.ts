@@ -1,7 +1,7 @@
-/** Public interface v1. User plugins need not import runtime code: export a plain PluginDefinition. */
+/** Public interface v2. User plugins need not import runtime code: export a plain PluginDefinition. */
 export type JsonSchema = { type?: string; [key: string]: unknown };
 export interface PluginEvent {
-  id: string; kind: string; at: number; text: string; groupId?: number; actorId?: number; payload: unknown; source?: import('./identity.js').EventSource;
+  id: string; kind: string; at: number; text: string; payload: unknown; source?: import('./identity.js').EventSource;
 }
 export interface PluginActionResult {
   outcome: { id: string; status: 'pending' | 'success' | 'failed' | 'unknown'; result: unknown };
@@ -18,11 +18,6 @@ export interface PluginCall {
   adapters: {
     query(instance: string, operation: string, args: Record<string, unknown>): Promise<unknown>;
     action(instance: string, operation: string, args: Record<string, unknown>): Promise<unknown>;
-  };
-  /** Compatibility for plugins using the legacy, unnamed SnowLuma configuration. */
-  snowluma: {
-    query(name: string, args: Record<string, unknown>): Promise<unknown>;
-    action(name: string, args: Record<string, unknown>): Promise<unknown>;
   };
 }
 export interface UserTool {
@@ -60,7 +55,7 @@ export interface PluginContext {
 /** Optional plugin.json sidecar. Safe to inspect without importing executable code. */
 export interface PluginManifest {
   id: string;
-  apiVersion: 1;
+  apiVersion: 2;
   name?: string;
   version?: string;
   description?: string;

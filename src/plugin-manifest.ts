@@ -8,12 +8,12 @@ export function discoverPlugins(directory: string): string[] {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
 }
 export function validateManifest(value: PluginManifest, id: string): PluginManifest {
-  if (!value || value.id !== id || value.apiVersion !== 1) throw new Error(`Plugin ${id} needs a matching id and apiVersion: 1.`);
+  if (!value || value.id !== id || value.apiVersion !== 2) throw new Error(`Plugin ${id} needs a matching id and apiVersion: 2.`);
   for (const key of ['name', 'version', 'description', 'contextVersion'] as const) if (value[key] !== undefined && typeof value[key] !== 'string') throw new Error(`Plugin ${id}.${key} must be a string.`);
   if (value.defaultEnabled !== undefined && typeof value.defaultEnabled !== 'boolean') throw new Error(`Plugin ${id}.defaultEnabled must be a boolean.`);
   if (value.defaults !== undefined && (!value.defaults || typeof value.defaults !== 'object' || Array.isArray(value.defaults))) throw new Error(`Plugin ${id}.defaults must be an object.`);
   if (value.configSchema !== undefined && value.configSchema?.type !== 'object') throw new Error(`Plugin ${id}.configSchema must be an object schema.`);
-  return structuredClone({ id, apiVersion: 1, name: value.name, version: value.version, description: value.description, contextVersion: value.contextVersion, defaultEnabled: value.defaultEnabled, defaults: value.defaults, configSchema: value.configSchema });
+  return structuredClone({ id, apiVersion: 2, name: value.name, version: value.version, description: value.description, contextVersion: value.contextVersion, defaultEnabled: value.defaultEnabled, defaults: value.defaults, configSchema: value.configSchema });
 }
 export function readPluginManifest(directory: string, id: string): PluginManifest | undefined {
   if (!validPluginId(id)) throw new Error('Invalid plugin ID.');

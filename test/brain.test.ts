@@ -1,18 +1,20 @@
+import { beginAction } from './helpers.js';
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-works/pi-ai';
 import { deferred, event, fixture } from './helpers.js';
 import { LifeRuntime } from '../src/runtime.js';
-import { ActionNotDispatchedError } from '../src/snowluma.js';
+import { ActionNotDispatchedError } from '../src/platform.js';
 import { eventRef, type Store } from '../src/store.js';
 import { ChatRecord } from '../src/record.js';
 
 /** A private message from person 7. */
-const say = (store: Store, text: string) => store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, actorId: 7, payload: { message_type: 'private', message: [{ type: 'text', data: { text } }] } })!;
+const say = (store: Store, text: string) => store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, actorId: 7, payload: { message_type: 'private', message: [{ type: 'text', data: { text } }] } }, store))!;
 /** A model call that is still deciding when it is cancelled. */
 const deciding = (started: { resolve: () => void }, decision: string) => async (_context: unknown, options?: { signal?: AbortSignal }) => {
   started.resolve(); await new Promise(resolve => options?.signal?.addEventListener('abort', resolve));
-  return answer(call('send_private_msg', { user_id: 7, message: decision }));
+  return answer(call("qq_main__send_private_msg", { user_id: 7, message: decision }));
 };
 
 test('real Pi loop can choose silence and never forwards ordinary assistant text', async () => {
@@ -31,8 +33,8 @@ test('steering enters the same Pi brain after current tools and changes next act
   try {
     const source = event(f.store, 'Talk about tea', 100);
     f.faux.setResponses([
-      answer(call('send_group_msg', { group_id: 100, message: [{ type: 'reply', data: { id: '-12' } }, { type: 'text', data: { text: 'I like tea too' } }] })),
-      context => { assert.ok(JSON.stringify(context).includes('New message from another group')); return answer(call('send_group_msg', { group_id: 200, message: 'Heard you' })); },
+      answer(call("qq_main__send_group_msg", { group_id: 100, message: [{ type: 'reply', data: { id: '-12' } }, { type: 'text', data: { text: 'I like tea too' } }] })),
+      context => { assert.ok(JSON.stringify(context).includes('New message from another group')); return answer(call("qq_main__send_group_msg", { group_id: 200, message: 'Heard you' })); },
       answer('Done'),
     ]);
     const work = f.brain.run(f.store.claim(10)!); await entered.promise;
@@ -65,8 +67,8 @@ test('uncertain transport outcome cannot be blindly resent through native tools'
   const f = fixture({ execute: async () => { attempts++; throw new Error('receipt lost'); } });
   try {
     event(f.store); f.faux.setResponses([
-      answer(call('send_group_msg', { group_id: 100, message: 'Hello' })),
-      answer(call('send_group_msg', { message: 'Hello', group_id: 100 })), answer('Stop retrying'),
+      answer(call("qq_main__send_group_msg", { group_id: 100, message: 'Hello' })),
+      answer(call("qq_main__send_group_msg", { message: 'Hello', group_id: 100 })), answer('Stop retrying'),
     ]);
     await f.brain.run(f.store.claim(10)!);
     assert.equal(attempts, 1); assert.equal(f.store.actions()[0]?.status, 'unknown');
@@ -77,7 +79,7 @@ test('operator pause aborts current generation but leaves newly received events 
   const entered = deferred(); const release = deferred(); const f = fixture();
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   try {
-    event(f.store); f.faux.setResponses([async () => { entered.resolve(); await release.promise; return answer(call('group_poke', { group_id: 100, user_id: 7 })); }]);
+    event(f.store); f.faux.setResponses([async () => { entered.resolve(); await release.promise; return answer(call("qq_main__group_poke", { group_id: 100, user_id: 7 })); }]);
     runtime.start(); await entered.promise;
     runtime.control('pause'); event(f.store, 'Keep perceiving while paused', 200); release.resolve(); await runtime.idle();
     assert.equal(f.sent.length, 0); assert.equal(f.store.pending(), 2);
@@ -102,11 +104,11 @@ test('default unlimited budgets keep scheduling and acting beyond the former cap
     assert.equal(f.cfg.limits.modelCallsPerDay, null); assert.equal(f.cfg.limits.actionsPerHour, null);
     for (let index = 0; index < 201; index++) f.store.chargeCall('earlier-run', f.cfg.limits.modelCallsPerDay);
     for (let index = 0; index < 31; index++) {
-      const attempt = f.store.beginAction(`earlier-${index}`, 'group_poke', { group_id: 100, user_id: index + 1 }, [], [], f.cfg.limits.actionsPerHour);
+      const attempt = beginAction(f.store, `earlier-${index}`, "qq_main__group_poke", { group_id: 100, user_id: index + 1 }, [], [], f.cfg.limits.actionsPerHour);
       f.store.finishAction(attempt.action.id, 'success', {});
     }
     event(f.store, 'Keep reasoning with unlimited default budgets');
-    f.faux.setResponses([answer(call('send_group_msg', { group_id: 100, message: 'Received' }))]);
+    f.faux.setResponses([answer(call("qq_main__send_group_msg", { group_id: 100, message: 'Received' }))]);
     runtime.start(); await runtime.idle();
     assert.deepEqual(f.sent.map(item => item.kind), ['send_group_msg']);
     assert.equal(f.store.processedCount(), 1); assert.equal(f.store.pending(), 0);
@@ -243,10 +245,10 @@ test('life wakes show when available online activities were last done, other obs
   const f = fixture();
   try {
     f.store.setSetting('lifeEnabled', true);
-    const feeds = f.store.receive({ key: 'tool:feeds', kind: 'snowluma:get_qzone_feeds', at: Date.parse('2026-10-27T12:00:00Z'), text: '[]', payload: { result: [] } }, true)!;
-    const signature = f.store.beginAction('signature', 'set_self_longnick', { longNick: 'Practicing a new song' }, []);
+    const feeds = f.store.receive(qqEvent({ key: 'tool:feeds', kind: 'adapter:qq_main:get_qzone_feeds', at: Date.parse('2026-10-27T12:00:00Z'), text: '[]', payload: { result: [] } }, f.store), true)!;
+    const signature = beginAction(f.store, 'signature', "qq_main__set_self_longnick", { longNick: 'Practicing a new song' }, []);
     f.store.finishAction(signature.action.id, 'success', {});
-    const status = f.store.beginAction('status', 'set_diy_online_status', { face_id: 1, wording: 'Humming along' }, []);
+    const status = beginAction(f.store, 'status', "qq_main__set_diy_online_status", { face_id: 1, wording: 'Humming along' }, []);
     f.store.finishAction(status.action.id, 'success', {});
     const diary = f.store.writeMemory({ kind: 'note', title: 'Today', content: 'A quiet day', importance: 3, sources: [feeds.id] }, false);
     const prompts: string[] = [];
@@ -273,7 +275,7 @@ test('a life wake sees the local weekday, how recent plans went, and something t
     const past = f.store.schedule('Practiced scales on the balcony', 'life', Date.parse('2026-10-29T04:00:00Z')); f.store.finishWake(past.id, 'done');
     const note = f.store.writeMemory({ kind: 'note', title: 'The day the steamer shop closed', content: 'Walked past and it was shut', importance: 4, sources: [source.id] }, false);
     f.store.db.prepare('UPDATE memories SET created_at=? WHERE id=?').run(Date.now() - 2 * 86_400_000, note.id);
-    f.store.writeMemory({ kind: 'impression', title: 'Teases me about buns', content: 'Friendly, jokes a lot', importance: 5, sources: [source.id], scope: 'person:7' }, false);
+    f.store.writeMemory({ kind: 'impression', title: 'Teases me about buns', content: 'Friendly, jokes a lot', importance: 5, sources: [source.id], scope: "person:qq:user:7" }, false);
     f.store.acknowledge(f.store.claim(10)!.batchId);
     let prompt = ''; let request = '';
     f.faux.setResponses([context => { request = JSON.stringify(context); prompt = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations'))); return answer('Rest'); }]);
@@ -368,14 +370,14 @@ test('memory maintenance continues with life mode disabled and runs apart from t
 test('a batch of successful messages, reactions, or pokes ends the thought; another tool or a failure keeps it going', async () => {
   const f = fixture();
   try {
-    event(f.store); f.faux.setResponses([answer([call('send_group_msg', { group_id: 100, message: 'Hi' }), call('group_poke', { group_id: 100, user_id: 7 })]), answer('Must not be called')]);
+    event(f.store); f.faux.setResponses([answer([call("qq_main__send_group_msg", { group_id: 100, message: 'Hi' }), call("qq_main__group_poke", { group_id: 100, user_id: 7 })]), answer('Must not be called')]);
     await f.brain.run(f.store.claim(10)!); assert.equal(f.faux.state.callCount, 1);
-    event(f.store); f.faux.setResponses([answer([call('send_group_msg', { group_id: 100, message: 'Noted' }), call('set_activity', { activity: 'Chatting' })]), answer('Rest')]);
+    event(f.store); f.faux.setResponses([answer([call("qq_main__send_group_msg", { group_id: 100, message: 'Noted' }), call('set_activity', { activity: 'Chatting' })]), answer('Rest')]);
     await f.brain.run(f.store.claim(10)!); assert.equal(f.faux.state.callCount, 3);
   } finally { f.store.close(); }
   const failing = fixture({ execute: async () => { throw new ActionNotDispatchedError('SnowLuma is not connected'); } });
   try {
-    event(failing.store); failing.faux.setResponses([answer(call('send_group_msg', { group_id: 100, message: 'Hi' })), answer('Try later')]);
+    event(failing.store); failing.faux.setResponses([answer(call("qq_main__send_group_msg", { group_id: 100, message: 'Hi' })), answer('Try later')]);
     await failing.brain.run(failing.store.claim(10)!); assert.equal(failing.faux.state.callCount, 2);
   } finally { failing.store.close(); }
 });
@@ -390,7 +392,7 @@ test('a reply from the person being answered cancels the call deciding the reply
       context => {
         const seen = JSON.stringify(context.messages);
         assert.match(seen, /Did you never eat xiaolongbao/); assert.match(seen, /Chatting about dinner/); assert.doesNotMatch(seen, /Stale reply/);
-        return answer(call('send_private_msg', { user_id: 7, message: 'Fresh reply' }));
+        return answer(call("qq_main__send_private_msg", { user_id: 7, message: 'Fresh reply' }));
       },
     ]);
     runtime.start(); await calling.promise;
@@ -416,7 +418,7 @@ test('a cancelled thought leaves its images in view for the next thought, which 
     assert.equal(await f.brain.steer(preempting), false); f.store.releaseBatch(preempting.batchId); await work;
     assert.ok(!f.store.logs().some(log => log.kind === 'context_folded'));
     f.restart();
-    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /aGVsbG8=/); return answer(call('send_private_msg', { user_id: 7, message: 'A cute cat' })); }]);
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /aGVsbG8=/); return answer(call("qq_main__send_private_msg", { user_id: 7, message: 'A cute cat' })); }]);
     await f.brain.run(f.store.claim(10)!);
     assert.deepEqual(f.sent.map(item => item.args.message), ['A cute cat']);
     assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /aGVsbG8=/);
@@ -427,7 +429,7 @@ test('a cancelled thought leaves its images in view for the next thought, which 
 test('an observation shows its events as chat-record lines, with the QQ numbers, message IDs, and image URLs a thought acts on', async () => {
   const f = fixture();
   f.store.setSetting('faces', { 424: { name: '续标识' } });
-  const receive = (kind: string, actorId: number, payload: Record<string, unknown>, groupId?: number) => f.store.receive({ key: crypto.randomUUID(), kind, at: Date.now(), text: '', groupId, actorId, payload })!;
+  const receive = (kind: string, actorId: number, payload: Record<string, unknown>, groupId?: number) => f.store.receive(qqEvent({ key: crypto.randomUUID(), kind, at: Date.now(), text: '', groupId, actorId, payload }, f.store))!;
   try {
     const tea = receive('message', 8, { message_type: 'group', message_id: 40, sender: { nickname: '寒火', card: '' }, message: [{ type: 'text', data: { text: 'Tea at five' } }] }, 100);
     f.store.acknowledge(f.store.claim(10)!.batchId);
@@ -440,7 +442,7 @@ test('an observation shows its events as chat-record lines, with the QQ numbers,
     await f.brain.run(f.store.claim(10)!);
     const time = '\\d\\d:\\d\\d:\\d\\d';
     // Chats come in the order they first appear, and today's events need no date line.
-    assert.match(observed, new RegExp(`^Private chat with 地铁\\(7\\):\\n${time} ${eventRef(typing.id)} 地铁\\(7\\) is typing\\nGroup 100:\\n`, 'm'));
+    assert.match(observed, new RegExp(`^Private chat with 地铁\\(7\\): \\[qq:900:private:7\\]\\n${time} ${eventRef(typing.id)} 地铁\\(7\\) is typing\\nGroup 100: \\[qq:900:group:100\\]\\n`, 'm'));
     assert.match(observed, new RegExp(`^${time} ${eventRef(image.id)} \\[message_id 41\\] 地铁\\(7\\): \\[reply to ${eventRef(tea.id)} \\(寒火\\(8\\)\\)\\] \\[image 0 \\[动画表情\\]\\]$`, 'm'));
     // A reaction to a message the observation does not show says which message, with its message_id.
     assert.match(observed, new RegExp(`^${time} 地铁\\(7\\) reacted \\[emoji 424 续标识\\] to ${eventRef(tea.id)} \\(寒火\\(8\\): Tea at five\\) \\[message_id 40\\]$`, 'm'));
@@ -452,9 +454,9 @@ test('an observation shows its events as chat-record lines, with the QQ numbers,
 });
 
 test('in a group only a mention of or reply to the digital life cancels the call; other messages steer at the boundary', async () => {
-  const f = fixture(); const groupMessage = (actorId: number, text: string, segments: unknown[]) => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, groupId: 100, actorId, payload: { message: segments } })!;
+  const f = fixture(); const groupMessage = (actorId: number, text: string, segments: unknown[]) => f.store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, groupId: 100, actorId, payload: { message: segments } }, f.store))!;
   try {
-    const earlier = f.store.beginAction('earlier-send', 'send_group_msg', { group_id: 100, message: 'Tea is nice' }, []);
+    const earlier = beginAction(f.store, 'earlier-send', "qq_main__send_group_msg", { group_id: 100, message: 'Tea is nice' }, []);
     f.store.finishAction(earlier.action.id, 'success', { message_id: -42 });
     for (const addressed of [[{ type: 'at', data: { qq: '900' } }, { type: 'text', data: { text: ' you?' } }], [{ type: 'reply', data: { id: '-42' } }, { type: 'text', data: { text: 'Which tea?' } }]]) {
       const calling = deferred();
@@ -478,8 +480,8 @@ test('a message that arrives while tools run skips sends to that chat not yet ma
   try {
     say(f.store, 'Guess what I had');
     f.faux.setResponses([
-      answer([call('send_poke', { user_id: 7 }), call('send_private_msg', { user_id: 7, message: 'Stale guess' })]),
-      context => { const seen = JSON.stringify(context.messages); assert.match(seen, /Not sent/); assert.match(seen, /It was hotpot/); return answer(call('send_private_msg', { user_id: 7, message: 'Hotpot, nice' })); },
+      answer([call("qq_main__send_poke", { user_id: 7 }), call("qq_main__send_private_msg", { user_id: 7, message: 'Stale guess' })]),
+      context => { const seen = JSON.stringify(context.messages); assert.match(seen, /Not sent/); assert.match(seen, /It was hotpot/); return answer(call("qq_main__send_private_msg", { user_id: 7, message: 'Hotpot, nice' })); },
     ]);
     const work = f.brain.run(f.store.claim(10)!); await poked.promise;
     say(f.store, 'It was hotpot'); assert.equal(await f.brain.steer(f.store.claim(10)!), true);
@@ -497,7 +499,7 @@ test('after maxPreemptions in a row the next decision is carried out as made', a
     const first = f.brain.run(f.store.claim(10)!); await cancelled.promise;
     say(f.store, 'Two'); const preempting = f.store.claim(10)!;
     assert.equal(await f.brain.steer(preempting), false); f.store.releaseBatch(preempting.batchId); await first;
-    f.faux.setResponses([async () => { calling.resolve(); await release.promise; return answer(call('send_private_msg', { user_id: 7, message: 'As decided' })); }, answer('Quiet')]);
+    f.faux.setResponses([async () => { calling.resolve(); await release.promise; return answer(call("qq_main__send_private_msg", { user_id: 7, message: 'As decided' })); }, answer('Quiet')]);
     const second = f.brain.run(f.store.claim(10)!); await calling.promise;
     say(f.store, 'Three'); assert.equal(await f.brain.steer(f.store.claim(10)!), true);
     release.resolve(); await second;
@@ -508,7 +510,7 @@ test('after maxPreemptions in a row the next decision is carried out as made', a
 
 test('a waking model call sees all held groups together with the message that woke her', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-01T14:30:00Z') });
-  const f = fixture(); f.store.bindAccount(900); f.store.setSetting('lifeEnabled', true);
+  const f = fixture(); f.store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) }); f.store.setSetting('lifeEnabled', true);
   f.cfg.life.freeTime.enabled = false; f.cfg.limits.batchSize = 1;
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   let calls = 0;
@@ -520,7 +522,7 @@ test('a waking model call sees all held groups together with the message that wo
     assert.equal(f.store.dailyCalls(), 0);
     t.mock.timers.tick(1000);
     // A remote clock slightly ahead must not let the backlog displace the waking message.
-    f.store.receive({ key: 'waking', kind: 'message', at: Date.now() + 1000, groupId: 100, actorId: 7, text: 'Are you asleep?', payload: { message: [{ type: 'at', data: { qq: '900' } }, { type: 'text', data: { text: 'Are you asleep?' } }] } });
+    f.store.receive(qqEvent({ key: 'waking', kind: 'message', at: Date.now() + 1000, groupId: 100, actorId: 7, text: 'Are you asleep?', payload: { message: [{ type: 'at', data: { qq: '900' } }, { type: 'text', data: { text: 'Are you asleep?' } }] } }, f.store));
     f.faux.setResponses([context => {
       calls++;
       const observed = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')));
@@ -538,10 +540,10 @@ test('when a rest ends, the group chat it held comes in one observation as a cha
   const f = fixture();
   try {
     const from = Date.now() - 3_600_000;
-    const night = Array.from({ length: 40 }, (_, index) => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: from + index * 60_000, text: `Night ${index}`, groupId: 100, actorId: 7, payload: { message_type: 'group', sender: { nickname: 'Owl' }, message: [{ type: 'text', data: { text: `Night ${index}` } }] } })!);
+    const night = Array.from({ length: 40 }, (_, index) => f.store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: from + index * 60_000, text: `Night ${index}`, groupId: 100, actorId: 7, payload: { message_type: 'group', sender: { nickname: 'Owl' }, message: [{ type: 'text', data: { text: `Night ${index}` } }] } }, f.store))!);
     f.store.setAside(night.map(item => item.id));
     const until = Date.now();
-    f.store.receive({ key: 'rest:1', kind: 'rest_backlog', at: until, text: 'While you rested, group chat waited. Its record follows.', payload: { since: from, until, chats: [{ conversation: 'group:100', from, messages: 40, notices: 0 }] } });
+    f.store.receive(qqEvent({ key: 'rest:1', kind: 'rest_backlog', at: until, text: 'While you rested, group chat waited. Its record follows.', payload: { since: from, until, chats: [{ conversation: "qq:900:group:100", from, messages: 40, notices: 0 }] } }, f.store));
     f.faux.setResponses([context => {
       const text = JSON.stringify(context.messages);
       assert.match(text, /Chat record of group 100, from .* through .*/);
@@ -550,7 +552,7 @@ test('when a rest ends, the group chat it held comes in one observation as a cha
       return answer('Good morning');
     }]);
     await f.brain.run(f.store.claim(20)!);
-    const record = new ChatRecord(f.store, 900, 'group:100').span(from, until, 60);
+    const record = new ChatRecord(f.store, "qq:900:group:100").span(from, until, 60);
     assert.ok(record.omitted > 0);
     assert.doesNotMatch(record.text, /Night 0\b/); assert.match(record.text, /Night 39\b/);
   } finally { f.store.close(); }

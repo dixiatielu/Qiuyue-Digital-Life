@@ -13,6 +13,7 @@
     "node": "^24.22.1 || >=26.12.1"
   },
   "scripts": {
+    "prebuild": "node scripts/clean-dist.mjs",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "check": "tsc --noEmit && tsc -p packages/tsconfig.json",
     "sync:snowluma": "node scripts/sync-snowluma-catalog.mjs",

@@ -1,5 +1,5 @@
 import { Type } from 'typebox';
-import type { Config } from '../config.js';
+import type { AdapterConfig, Config } from '../config.js';
 import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
 import { errorResult } from '../tool-runtime.js';
 import { preferJpeg } from '../web.js';
@@ -64,11 +64,11 @@ const activities: OnlineActivity[] = [
   { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'] },
 ];
 
-export function snowlumaToolsPlugin(config: Config): LifePlugin {
+export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): LifePlugin {
   const snowlumaCatalog = getSnowLumaCatalog().actions;
-  for (const name of [...(config.snowluma.tools.allow === '*' ? [] : config.snowluma.tools.allow), ...config.snowluma.tools.deny]) findSnowLumaAction(name);
+  for (const name of [...(account.tools.allow === '*' ? [] : account.tools.allow), ...account.tools.deny]) findSnowLumaAction(name);
   return {
-    nativeActions: { accounts: [{ platform: 'qq', accountId: String(config.snowluma.selfId) }], definition: name => snowlumaCatalog.find(action => action.name === name), allowed: name => allowedSnowLumaAction(findSnowLumaAction(name), config.snowluma.tools) },
+    nativeActions: { accounts: [{ platform: 'qq', accountId: String(account.accountId) }], definition: name => snowlumaCatalog.find(action => action.name === name), allowed: name => allowedSnowLumaAction(findSnowLumaAction(name), account.tools) },
     id: 'snowluma-tools', enabled: () => config.plugins['snowluma-tools'] !== false,
     tools: runtime => {
       const tool = runtime.jsonTool.bind(runtime);
@@ -128,7 +128,7 @@ export function snowlumaToolsPlugin(config: Config): LifePlugin {
               if (outcome.status !== 'success') throw new Error(JSON.stringify({ actionId, outcome: outcome.status, reused, error: outcome.result, instruction: 'Use inspect_actions to check the action record.' }));
               value = outcome.result;
             }
-            const experience = runtime.record(`snowluma:${action.name}`, value);
+            const experience = runtime.record(`adapter:${account.id}:${action.name}`, value, action.name.startsWith('send_') ? 'self' : 'external');
             const serialized = JSON.stringify(value) ?? 'null';
             const truncated = serialized.length > 12000;
             const metadata = { sourceId: experience.sourceId, ...(actionId ? { actionId, outcome: 'success', reused } : {}), truncated };
@@ -163,9 +163,9 @@ export function snowlumaToolsPlugin(config: Config): LifePlugin {
     },
     activities: activities.map(activity => ({ ...activity, insertBefore: 'Write or reread your diary' })),
     activityInstructions: 'Use load_snowluma_tools for the parameters of unfamiliar tools.',
-    experienceKinds: Object.fromEntries(snowlumaCatalog.map(action => [action.name, `snowluma:${action.name}`])),
+    experienceKinds: Object.fromEntries(snowlumaCatalog.map(action => [action.name, `adapter:${account.id}:${action.name}`])),
     chatActions: [...socialActions], staleActions: [...socialActions],
-    chatTarget: (_tool, args) => snowlumaChat(args),
+    chatTarget: (_tool, args) => snowlumaChat(args, account.accountId),
     endsThought: tool => socialActions.has(tool),
   };
 }

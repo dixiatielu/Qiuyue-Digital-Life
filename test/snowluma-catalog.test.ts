@@ -5,10 +5,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const moduleUrl = new URL('../src/snowluma-catalog.ts', import.meta.url).href;
+const moduleUrl = new URL('../src/adapters/snowluma/catalog.ts', import.meta.url).href;
 function load(file: string, cwd: string) {
   return spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '--eval',
-    `const { snowlumaCatalog, snowlumaCatalogSource } = await import(${JSON.stringify(moduleUrl)}); console.log(JSON.stringify({ names: snowlumaCatalog.map(action => action.name), source: snowlumaCatalogSource }));`],
+    `const { getSnowLumaCatalog } = await import(${JSON.stringify(moduleUrl)}); const { actions: snowlumaCatalog, source: snowlumaCatalogSource } = getSnowLumaCatalog(); console.log(JSON.stringify({ names: snowlumaCatalog.map(action => action.name), source: snowlumaCatalogSource }));`],
   { cwd, env: { ...process.env, QIUYUE_SNOWLUMA_CATALOG: file }, encoding: 'utf8' });
 }
 

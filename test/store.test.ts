@@ -1,3 +1,5 @@
+import { beginAction } from './helpers.js';
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -15,12 +17,12 @@ test('persistence recovers claimed observations, commitments and uncertain side 
     const source = event(store); store.claim(10);
     store.setActivity('Reading a book', [source.id]);
     const wake = store.schedule('Promised to return tomorrow', 'commitment', Date.now() + 100000, [source.id]);
-    const action = store.beginAction('send-1', 'send_group_msg', { group_id: 100, message: 'OK' }, [source.id]);
+    const action = beginAction(store, 'send-1', "qq_main__send_group_msg", { group_id: 100, message: 'OK' }, [source.id]);
     store.close(); store = new Store(join(dir, 'life.sqlite')); store.recover();
     assert.equal(store.pending(), 1); assert.equal(store.settings().activity, 'Reading a book');
     assert.equal(store.wakes()[0]?.id, wake.id); assert.equal(store.actions()[0]?.status, 'unknown');
     assert.deepEqual(store.actions()[0]?.result, { reason: 'Process interrupted; the remote outcome is unconfirmed' });
-    assert.equal(store.beginAction('different-key', 'send_group_msg', { group_id: 100, message: 'OK' }, []).action.id, action.action.id);
+    assert.equal(beginAction(store, 'different-key', "qq_main__send_group_msg", { group_id: 100, message: 'OK' }, []).action.id, action.action.id);
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -60,13 +62,13 @@ test('forgetting removes source, derived memories, state, scheduled work and FTS
     const memory = store.writeMemory({ kind: 'experience', title: 'Secret code', content: source.text, importance: 9, sources: [source.id] }, false);
     const derived = store.writeMemory({ kind: 'note', title: 'Diary', content: source.text, importance: 7, sources: [memory.id] }, false);
     store.setActivity(source.text, [derived.id]); store.schedule(source.text, 'commitment', Date.now() - 1, [memory.id]); store.enqueueDue();
-    const action = store.beginAction('a', 'send_group_msg', { group_id: 100, message: source.text }, [memory.id]);
+    const action = beginAction(store, 'a', "qq_main__send_group_msg", { group_id: 100, message: source.text }, [memory.id]);
     const affected = store.forget(memory.id);
     assert.ok(affected.includes(derived.id)); assert.ok(affected.includes(source.id));
     assert.equal(store.settings().activity, ''); assert.equal(store.wakes().length, 0);
     assert.equal(store.search('mooncake', 10, [], [], true).length, 0);
     assert.equal(store.pending(), 0);
-    assert.equal(store.receive({ ...source, key: 'original-event' }), undefined);
+    assert.equal(store.receive(qqEvent({ ...source, key: 'original-event' }, store)), undefined);
     store.finishAction(action.action.id, 'success', { text: source.text });
     assert.deepEqual(store.actions()[0]?.result, { redacted: true });
     assert.ok(!JSON.stringify(store.status()).includes('mooncake'));
@@ -77,11 +79,11 @@ test('retention preserves pending events and required evidence; processed waterm
   const store = new Store(':memory:');
   try {
     const old = { kind: 'message', at: 1, text: 'Old experience', payload: {} };
-    const retained = store.receive({ ...old, key: 'retained' })!;
+    const retained = store.receive(qqEvent({ ...old, key: 'retained' }, store))!;
     store.writeMemory({ kind: 'experience', title: 'Important experience', content: 'Old experience', importance: 8, sources: [retained.id] }, false);
-    store.receive({ ...old, key: 'forgettable' });
+    store.receive(qqEvent({ ...old, key: 'forgettable' }, store));
     const claimed = store.claim(10)!; store.acknowledge(claimed.batchId); store.acknowledge(claimed.batchId);
-    const pending = store.receive({ ...old, key: 'pending' })!;
+    const pending = store.receive(qqEvent({ ...old, key: 'pending' }, store))!;
     assert.equal(store.processedCount(), 2); assert.equal(store.retain(90), 1);
     assert.equal(store.processedCount(), 2); assert.ok(store.event(retained.id)); assert.ok(store.event(pending.id));
   } finally { store.close(); }
@@ -129,11 +131,11 @@ test('fiction retains provenance and cannot become real evidence', () => {
 test('success is deduplicated for replayed observations, but new events can produce the same action', () => {
   const store = new Store(':memory:');
   try {
-    const first = store.beginAction('a', 'send_group_msg', { group_id: 100, message: 'Hello' }, [], ['e:1']);
+    const first = beginAction(store, 'a', "qq_main__send_group_msg", { group_id: 100, message: 'Hello' }, [], ['e:1']);
     store.finishAction(first.action.id, 'success', {});
-    assert.equal(store.beginAction('b', 'send_group_msg', { group_id: 100, message: 'Hello' }, [], ['e:1']).fresh, false);
-    assert.equal(store.beginAction('c', 'send_group_msg', { group_id: 100, message: 'Hello' }, [], ['e:2']).fresh, true);
-    assert.throws(() => store.beginAction('a', 'send_group_msg', { group_id: 100, message: 'Different' }, []), /same action key/);
+    assert.equal(beginAction(store, 'b', "qq_main__send_group_msg", { group_id: 100, message: 'Hello' }, [], ['e:1']).fresh, false);
+    assert.equal(beginAction(store, 'c', "qq_main__send_group_msg", { group_id: 100, message: 'Hello' }, [], ['e:2']).fresh, true);
+    assert.throws(() => beginAction(store, 'a', "qq_main__send_group_msg", { group_id: 100, message: 'Different' }, []), /same action key/);
   } finally { store.close(); }
 });
 
@@ -151,25 +153,24 @@ test('whole pause stops wakes; life off keeps commitments and blocks life plans'
 
 test('events from before receive times were recorded count as overdue, and ambient events are timed separately', () => {
   const dir = mkdtempSync(join(tmpdir(), 'life-received-')); const path = join(dir, 'life.sqlite');
-  const legacy = new DatabaseSync(path);
-  legacy.exec("CREATE TABLE events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, group_id INTEGER, actor_id INTEGER, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT); INSERT INTO events(id,source_key,kind,at,text,payload) VALUES ('e:old','old','message',1,'Before upgrade','{}')");
-  legacy.close();
   const store = new Store(path);
+  const old = store.receive(qqEvent({ key: 'old', kind: 'message', at: 1, groupId: 100, actorId: 7, text: 'Before receive timestamps', payload: {} }, store))!;
+  store.db.prepare('UPDATE events SET received_at=NULL WHERE id=?').run(old.id);
   try {
     assert.deepEqual(store.pendingTiming(), { first: 0, last: 0, ambient: undefined });
-    assert.equal(store.event('e:old')?.receivedAt, undefined);
-    const typing = store.receive({ key: 'typing', kind: 'notice:notify:input_status', at: 2000, actorId: 7, text: 'notify', payload: {} })!;
+    assert.equal(store.event(old.id)?.receivedAt, undefined);
+    const typing = store.receive(qqEvent({ key: 'typing', kind: 'notice:notify:input_status', at: 2000, actorId: 7, text: 'notify', payload: {} }, store))!;
     assert.deepEqual(store.pendingTiming(), { first: 0, last: typing.receivedAt, ambient: typing.receivedAt });
     assert.equal(store.event(typing.id)?.receivedAt, typing.receivedAt);
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('while the digital life rests, group chat not addressed to it is neither claimed nor timed', () => {
-  const store = new Store(':memory:', true); store.bindAccount(900);
+  const store = new Store(':memory:', true); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   try {
-    const { action } = store.beginAction('send-1', 'send_group_msg', { group_id: 100, message: 'Hi' }, []);
+    const { action } = beginAction(store, 'send-1', "qq_main__send_group_msg", { group_id: 100, message: 'Hi' }, []);
     store.finishAction(action.id, 'success', { message_id: -42 });
-    const receive = (kind: string, payload: Record<string, unknown>, groupId: number | undefined = 100, actorId = 7) => store.receive({ key: crypto.randomUUID(), kind, at: Date.now(), groupId, actorId, text: kind, payload })!;
+    const receive = (kind: string, payload: Record<string, unknown>, groupId: number | undefined = 100, actorId = 7) => store.receive(qqEvent({ key: crypto.randomUUID(), kind, at: Date.now(), groupId, actorId, text: kind, payload }, store))!;
     const say = (...message: unknown[]) => receive('message', { message_type: 'group', message });
     const chatter = say({ type: 'text', data: { text: 'Chatter' } });
     const reaction = receive('notice:group_msg_emoji_like:add', { user_id: 8 }, 100, 8);

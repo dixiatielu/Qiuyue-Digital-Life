@@ -2,13 +2,7 @@ import { api, Card, ConfigField, failed, html, Loading, PageHeader, SaveBar, t, 
 
 /** The configuration sections that have no page of their own; models, plugins, and their endpoints live on theirs. */
 const sections = () => [
-  ['snowluma', t('QQ connection (SnowLuma)', 'QQ 连接（SnowLuma）'), [
-    { path: 'snowluma.url', label: t('WebSocket URL', 'WebSocket 地址'), help: t('The forward OneBot WebSocket of the SnowLuma server, ws:// or wss://.', 'SnowLuma 服务端的正向 OneBot WebSocket，ws:// 或 wss://。') },
-    { path: 'snowluma.tokenEnv', label: t('Credential name', '凭据名称'), help: t('The named credential for the SnowLuma connection.', '用于 SnowLuma 连接的凭据名称。') },
-    { path: 'snowluma.selfId', type: 'int', label: t('QQ account', 'QQ 账号'), warn: t('The database belongs to one account; another account makes the daemon refuse to start.', '数据库绑定一个账号；换成别的账号后常驻进程会拒绝启动。') },
-    { path: 'snowluma.groups', type: 'intlist', label: t('History groups', '补查历史的群'), help: t('One group per line. After a disconnect, missed messages in these groups are recovered. It does not limit which groups she hears live.', '每行一个群号。断线后会补查这些群漏掉的消息；不限制实时接收的范围。') },
-    { path: 'snowluma.maxStreamBytes', type: 'int', label: t('Stream size limit (bytes)', '流式接口大小上限（字节）') },
-  ]],
+  ['adapters', t('Platform accounts', '平台账号'), [{ path: 'adapters', type: 'json', label: t('Connections', '连接设置'), help: t('Each connection has an id, driver and accountId. Connection changes require a restart.', '每个连接包含 id、driver 和 accountId。连接修改在重启后生效。') }]],
   ['life', t('Life', '自主生活'), [
     { path: 'life.enabled', type: 'bool', label: t('Life on at first start', '首次启动时开启自主生活'), help: t('Only the first start reads this; afterwards use the switch on the status page.', '只在第一次启动时读取；之后用状态页的开关。') },
     { path: 'life.allowFiction', type: 'bool', label: t('Allow fictional daily life', '允许虚构日常'), warn: t('Part of the system prompt: changing it starts a fresh working context.', '属于系统提示词：修改后工作上下文会重新开始。') },

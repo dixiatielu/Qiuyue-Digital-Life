@@ -42,7 +42,7 @@ export function imageType(data: Buffer): string | undefined {
   if (data.subarray(0, 4).toString('latin1') === 'RIFF' && data.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
 }
 const drawingId = /^drawing:([0-9a-f-]{36})$/;
-type UnderWay = Record<string, { prompt: string; startedAt: number; model?: string; sources?: string[]; context?: DrawingSource[] }>;
+type UnderWay = Record<string, { prompt: string; startedAt: number; model: string; sources: string[]; context: DrawingSource[] }>;
 
 /**
  * Generated images (ADR-0018): each is generated apart from the thought that started it, since generation takes half a minute or more,
@@ -93,14 +93,11 @@ export class Drawings {
   async recover() {
     this.library.initialize();
     const underWay = this.store.setting<UnderWay>('drawingsUnderWay', {});
-    for (const [id, item] of Object.entries(underWay)) {
-      const picture = this.library.image(id);
-      if (picture && !this.library.get(id)) await this.library.save(id, picture.data, extensions[picture.mimeType]!, {
-        prompt: item.prompt, model: item.model ?? '', createdAt: item.startedAt, sources: item.context ?? this.library.sources(item.sources ?? []),
-      });
-    }
+    for (const [id, item] of Object.entries(underWay)) await this.library.recoverGeneration(id, {
+      prompt: item.prompt, model: item.model, createdAt: item.startedAt, sources: item.context,
+    });
     this.store.transaction(() => {
-      for (const [id, { prompt, startedAt, sources }] of Object.entries(underWay)) this.finish(id, prompt, startedAt, sources ?? [], this.library.image(id) ? undefined : 'The program restarted while the image was being generated.');
+      for (const [id, { prompt, startedAt, sources }] of Object.entries(underWay)) this.finish(id, prompt, startedAt, sources, this.library.image(id) ? undefined : 'The program restarted while the image was being generated.');
       this.store.setSetting('drawingsUnderWay', {});
     });
   }

@@ -1,4 +1,5 @@
-import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { parsePersonRef, requireConversationRef } from '../identity.js';
+import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import sharp from 'sharp';
@@ -32,6 +33,8 @@ export function validateDrawingQuery(value: DrawingQuery) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid gallery query.');
   for (const key of ['query', 'person', 'conversation', 'from', 'to'] as const) if (value[key] !== undefined && (typeof value[key] !== 'string' || value[key]!.length > 500)) throw new Error(`Invalid ${key}.`);
   for (const key of ['from', 'to'] as const) if (value[key] && (!/(Z|[+-]\d{2}:\d{2})$/.test(value[key]!) || !Number.isFinite(Date.parse(value[key]!)))) throw new Error(`${key} must be an ISO time with timezone.`);
+  if (value.person && !parsePersonRef(value.person)) throw new Error('Use a canonical person reference.');
+  if (value.conversation) requireConversationRef(value.conversation);
   if (value.from && value.to && Date.parse(value.from) > Date.parse(value.to)) throw new Error('from must be before to.');
   for (const key of ['favorite', 'archived', 'includeArchived', 'includeDeleted', 'needsDescription'] as const) if (value[key] !== undefined && typeof value[key] !== 'boolean') throw new Error(`Invalid ${key}.`);
   if (value.tags !== undefined && (!Array.isArray(value.tags) || value.tags.length > 20 || value.tags.some(tag => typeof tag !== 'string' || !tag.trim() || tag.length > 60))) throw new Error('Invalid tags.');
@@ -74,28 +77,35 @@ export class DrawingLibrary {
     if (item.deletedAt) return false;
     try { return lstatSync(this.file(item.id, item.extension)).isFile(); } catch { return false; }
   }
+  private original(id: string, extension: string): { data: Buffer; mimeType: string } | undefined {
+    try { const path = this.file(id, extension); if (lstatSync(path).isFile()) return { data: readFileSync(path), mimeType: formats[extension]! }; }
+    catch { /* An unavailable original is represented by the catalog entry. */ }
+  }
   image(id: string, thumbnail = false): { data: Buffer; mimeType: string } | undefined {
     const item = this.get(id);
-    if (item?.deletedAt) return;
-    const extensions = item ? [item.extension] : Object.keys(formats);
-    for (const extension of extensions) {
-      try {
-        const path = this.file(id, extension);
-        if (!lstatSync(path).isFile()) continue;
-        if (thumbnail && lstatSync(this.thumb(id)).isFile()) return { data: readFileSync(this.thumb(id)), mimeType: 'image/webp' };
-        return { data: readFileSync(path), mimeType: formats[extension]! };
-      } catch { /* a missing thumbnail falls back to the original below */ }
+    if (!item || item.deletedAt) return;
+    if (thumbnail) {
+      try { if (lstatSync(this.thumb(id)).isFile()) return { data: readFileSync(this.thumb(id)), mimeType: 'image/webp' }; }
+      catch { /* A missing thumbnail can use the original. */ }
     }
-    if (thumbnail) return this.image(id);
+    return this.original(id, item.extension);
+  }
+  /** Recover only a tracked generation interrupted between committing its file and catalog entry. */
+  async recoverGeneration(id: string, info: Parameters<DrawingLibrary['save']>[3]) {
+    if (this.get(id)) return;
+    for (const extension of Object.keys(formats)) {
+      const image = this.original(id, extension);
+      if (image) { await this.save(id, image.data, extension, info); return; }
+    }
   }
   sources(ids: string[]): DrawingSource[] {
     return [...new Set(ids)].slice(0, 20).map(id => {
       const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(id);
       if (!row) return { id };
       const payload = parse<Record<string, any>>(row.payload);
-      return { id, at: Number(row.at), ...(row.actor_id ? { person: String(row.actor_id) } : {}),
-        ...(row.group_id ? { conversation: `group:${row.group_id}` } : row.actor_id && row.kind === 'message' ? { conversation: `private:${row.actor_id}` } : {}),
-        name: payload.sender?.card || payload.sender?.nickname || undefined, text: String(row.text).slice(0, 400) };
+      const source = row.source ? parse<import('../identity.js').EventSource>(row.source) : undefined;
+      return { id, at: Number(row.at), ...(source?.actor ? { person: source.actor } : {}), ...(source?.conversation ? { conversation: source.conversation } : {}),
+        name: source?.actorName || payload.sender?.card || payload.sender?.nickname || undefined, text: String(row.text).slice(0, 400) };
     });
   }
   async save(id: string, data: Buffer, extension: string, info: { prompt: string; model: string; createdAt: number; sources: DrawingSource[] }) {
@@ -125,37 +135,9 @@ export class DrawingLibrary {
       if (latest && !latest.deletedAt) this.put({ ...latest, previewError: 'Preview unavailable' });
     }
   }
-  /** Import once per ID; deleted rows are tombstones, so old events cannot resurrect a deletion. */
-  async migrate() {
-    this.initialize();
-    // Finish file cleanup after an interrupted or partially failed deletion, including orphaned thumbnails.
+  /** Finish an interrupted deletion without scanning or importing unregistered files. */
+  recoverDeletions() {
     for (const item of this.all()) if (item.deletedAt) this.removeFiles(item);
-    const events = this.db.prepare("SELECT * FROM events WHERE kind='drawing' ORDER BY at").all();
-    for (const row of events) {
-      const payload = parse<Record<string, any>>(row.payload), id = String(payload.drawingId ?? '');
-      if (!drawingIdPattern.test(id) || payload.error !== undefined || this.get(id)) continue;
-      const image = this.image(id);
-      const extension = image ? Object.keys(formats).find(key => formats[key] === image.mimeType)! : 'png';
-      const item: GalleryDrawing = { id, title: '', description: '', note: '', tags: [], favorite: false, archived: false, extension,
-        bytes: image?.data.length ?? 0, createdAt: Number(row.at), timeSource: 'generation', revision: 1,
-        prompt: typeof payload.prompt === 'string' ? payload.prompt : '', model: typeof payload.model === 'string' ? payload.model : undefined,
-        sources: this.sources(Array.isArray(payload.sources) ? payload.sources.filter((id: unknown) => typeof id === 'string') : []) };
-      this.put(item);
-      if (image) await this.preview(item, image.data);
-    }
-    let names: string[] = []; try { names = readdirSync(this.dir); } catch { return; }
-    for (const name of names) {
-      const match = /^([0-9a-f-]{36})\.(png|jpg|webp)$/.exec(name);
-      if (!match) continue;
-      const id = `drawing:${match[1]}`; if (!drawingIdPattern.test(id)) continue;
-      const previous = this.get(id);
-      if (previous?.deletedAt) { this.removeFiles(previous); continue; }
-      if (previous) continue;
-      const path = this.file(id, match[2]!); const stat = lstatSync(path); if (!stat.isFile()) continue;
-      const item: GalleryDrawing = { id, title: '', description: '', prompt: '', note: '', tags: [], favorite: false, archived: false,
-        createdAt: stat.mtimeMs, timeSource: 'file', sources: [], extension: match[2]!, bytes: stat.size, revision: 1 };
-      this.put(item); await this.preview(item, readFileSync(path));
-    }
   }
   markSeen(id: string) {
     const item = this.get(id); if (item && !item.deletedAt && !item.seenAt) this.put({ ...item, seenAt: Date.now() });
@@ -186,9 +168,9 @@ export class DrawingLibrary {
     // Inspect only media fields, so mentioning an ID in a text message is not counted as sharing the picture.
     const uses = (value: any, key = ''): boolean => typeof value === 'string' ? ['file', 'images'].includes(key) && value === id
       : Array.isArray(value) ? value.some(item => uses(item, key)) : value && typeof value === 'object' ? Object.entries(value).some(([key, child]) => uses(child, key)) : false;
-    return this.db.prepare('SELECT id,kind,args,status,created_at FROM actions WHERE instr(args,?)>0 ORDER BY created_at DESC').all(id)
+    return this.db.prepare('SELECT id,kind,args,status,created_at,conversation FROM actions WHERE instr(args,?)>0 ORDER BY created_at DESC').all(id)
       .flatMap(row => { const args = parse<Record<string, any>>(row.args); return uses(args) ? [{ id: String(row.id), kind: String(row.kind), status: String(row.status), at: Number(row.created_at),
-        target: args.group_id ? `group:${args.group_id}` : args.user_id ? `private:${args.user_id}` : row.kind === 'send_qzone_msg' ? 'qzone' : String(row.kind) }] : []; });
+        target: row.conversation ? String(row.conversation) : String(row.kind) }] : []; });
   }
   detail(id: string) {
     const item = this.get(id); return item ? { ...item, available: this.available(item), uses: this.usage(id) } : undefined;

@@ -2,8 +2,7 @@ import { readFileSync } from 'node:fs';
 import type { Config } from './config.js';
 
 export const builtinSystemPrompt = readFileSync(new URL('./prompts/system.md', import.meta.url), 'utf8');
-export const platformSystemPrompt = readFileSync(new URL('./prompts/platform.md', import.meta.url), 'utf8');
-// This boundary preserves the instructions used by checkpoints from before runtime deltas.
+// Separates operator instructions from generated runtime state.
 const currentContext = '\n<!-- current-context -->';
 /** An operator's template must keep the places the program fills and splits. */
 export function checkSystemPrompt(template: string) {
@@ -12,9 +11,9 @@ export function checkSystemPrompt(template: string) {
 }
 checkSystemPrompt(builtinSystemPrompt);
 
-export function systemInstructions(config: Pick<Config, 'persona' | 'life' | 'systemPrompt'> & Partial<Pick<Config, 'adapters'>>, legacy = false): string {
-  const template = (config.systemPrompt ?? (config.adapters === undefined ? builtinSystemPrompt : platformSystemPrompt)).trimEnd();
-  const prompt = legacy ? template.slice(0, template.indexOf(currentContext)) : template.replace(currentContext, '');
+export function systemInstructions(config: Pick<Config, 'persona' | 'life' | 'systemPrompt'>): string {
+  const template = (config.systemPrompt ?? builtinSystemPrompt).trimEnd();
+  const prompt = template.replace(currentContext, '');
   return prompt
     .replace(/<!-- allow-fiction -->(.*?)<!-- \/allow-fiction -->/gs, (_match, text: string) => config.life.allowFiction ? text : '')
     // Insert persona last and use a callback to preserve its literal contents.

@@ -1,3 +1,5 @@
+import { beginAction } from './helpers.js';
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -38,16 +40,16 @@ test('a generated image is searchable and reusable after restart and original ev
     const result = json(await run('imagen', { prompt: '雨夜街景，蓝色灯光，水彩' }));
     await f.plugins.installed().find(plugin => plugin.id === 'drawing')!.idle!();
     const item = h.library.get(result.drawingId)!;
-    assert.equal(item.model, 'actual-model'); assert.equal(item.sources[0]?.conversation, 'group:100');
-    assert.equal(item.sources[0]?.person, '7');
+    assert.equal(item.model, 'actual-model'); assert.equal(item.sources[0]?.conversation, "qq:900:group:100");
+    assert.equal(item.sources[0]?.person, 'qq:user:7');
     await assert.rejects(run('update_drawing', { id: item.id, description: 'Two cats' }), /View the drawing/);
     assert.equal((await run('view_drawing', { id: item.id })).content[1]?.type, 'image');
     await run('update_drawing', { id: item.id, title: '蓝色雨夜', description: '雨中街道，蓝色灯光，没有人物', tags: ['夜景', '水彩'], favorite: true });
     h.store.db.exec("UPDATE events SET status='processed'"); h.store.retain(1, Date.now() + 10 * 86_400_000);
     assert.equal(h.store.event(source.id), undefined);
-    assert.equal(json(await run('search_drawings', { query: '把那张雨夜街道找出来', person: '7' })).items[0].id, item.id);
+    assert.equal(json(await run('search_drawings', { query: '把那张雨夜街道找出来', person: 'qq:user:7' })).items[0].id, item.id);
     const viewed = await run('view_drawing', { id: item.id }); assert.equal(viewed.content[1]?.type, 'image');
-    await run('send_group_msg', { group_id: 100, message: [{ type: 'image', data: { file: item.id } }] });
+    await run("qq_main__send_group_msg", { group_id: 100, message: [{ type: 'image', data: { file: item.id } }] });
     assert.equal(h.library.usage(item.id)[0]?.status, 'success');
     await f.plugins.stop();
     const reopened = new Store(join(h.dir, 'life.sqlite'));
@@ -60,34 +62,67 @@ test('a generated image is searchable and reusable after restart and original ev
   } finally { await f.plugins.stop(); h.close(); }
 });
 
-test('migration retains IDs, unknown provenance, missing files, and deletion tombstones', async () => {
+test('startup uses only the catalog and finishes interrupted deletions without importing old files or events', async () => {
   const h = setup();
+  const f = fixture(undefined, h.store, undefined, (store, cfg) => { cfg.drawing.dir = h.library.dir; return [galleryPlugin(cfg, store)]; });
   try {
-    const old = id(), missing = id(), orphan = id(), failed = id();
-    mkdirSync(h.library.dir, { recursive: true });
+    const kept = await h.save('Already cataloged'), deleted = await h.save('Deleted work');
+    const old = id(), orphan = id();
     writeFileSync(join(h.library.dir, `${old.slice(8)}.png`), png);
-    writeFileSync(join(h.library.dir, `${orphan.slice(8)}.jpg`), Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
-    for (const key of [old, missing, failed]) h.store.receive({ key, kind: 'drawing', at: 1000, text: 'legacy', payload: { drawingId: key, prompt: '一只猫', ...(key === failed ? { error: 'failed' } : {}) } });
-    await h.library.migrate();
-    assert.equal(h.library.all().length, 3); assert.equal(h.library.get(old)?.model, undefined);
-    assert.equal(h.library.get(orphan)?.timeSource, 'file'); assert.equal(h.library.get(orphan)?.prompt, '');
-    assert.equal(h.library.detail(missing)?.available, false); assert.equal(h.library.get(failed), undefined);
-    h.library.delete(old, 1); await h.library.migrate();
-    assert.equal(h.library.search({}).total, 2); assert.ok(h.library.get(old)?.deletedAt);
-    assert.equal(h.library.image(old), undefined);
-    assert.equal(existsSync(join(h.library.dir, `${old.slice(8)}.png`)), false);
-    assert.equal(h.library.get(old)?.id, old);
-  } finally { h.close(); }
+    writeFileSync(join(h.library.dir, `${orphan.slice(8)}.png`), png);
+    h.store.receive({ key: old, kind: 'drawing', at: 1000, text: 'Old work', payload: { drawingId: old, prompt: 'A cat' } });
+    // Simulate interruption after the deletion tombstone was committed, before file removal.
+    h.library.delete(deleted, 1);
+    writeFileSync(join(h.library.dir, `${deleted.slice(8)}.png`), png);
+    mkdirSync(join(h.library.dir, 'thumbnails'), { recursive: true });
+    writeFileSync(join(h.library.dir, 'thumbnails', `${deleted.slice(8)}.webp`), png);
+    await f.plugins.start();
+    assert.equal(h.library.all().length, 2);
+    assert.deepEqual(h.library.image(kept)?.data, png);
+    assert.equal(h.library.get(old), undefined); assert.equal(h.library.image(old), undefined);
+    assert.equal(h.library.get(orphan), undefined); assert.equal(h.library.image(orphan), undefined);
+    assert.ok(existsSync(join(h.library.dir, `${orphan.slice(8)}.png`)), 'unregistered files are left untouched');
+    assert.ok(h.library.get(deleted)?.deletedAt); assert.equal(h.library.image(deleted), undefined);
+    assert.equal(existsSync(join(h.library.dir, `${deleted.slice(8)}.png`)), false);
+    assert.equal(existsSync(join(h.library.dir, 'thumbnails', `${deleted.slice(8)}.webp`)), false);
+    h.library.recoverDeletions(); assert.equal(h.library.search({}).total, 1);
+  } finally { await f.plugins.stop(); h.close(); }
+});
+
+test('a tracked generation interrupted after file commit recovers its catalog and completion exactly once', async () => {
+  const h = setup();
+  const drawings = new Drawings(h.store, { model: 'new-model', paint: async () => png }, h.library.dir);
+  try {
+    const key = id(), sources = [{ id: 'e:source', person: 'qq:user:7', conversation: 'qq:900:group:100', text: 'A fox' }];
+    h.store.setSetting('drawingsUnderWay', { [key]: { prompt: 'A fox', model: 'original-model', startedAt: 1234, sources: ['e:source'], context: sources } });
+    mkdirSync(h.library.dir, { recursive: true });
+    writeFileSync(join(h.library.dir, `${key.slice(8)}.png`), png);
+    await drawings.recover();
+    assert.equal(h.library.get(key)?.model, 'original-model');
+    assert.equal(h.library.get(key)?.createdAt, 1234); assert.deepEqual(h.library.get(key)?.sources, sources);
+    assert.deepEqual(drawings.image(key)?.data, png);
+    const observation = h.store.claim(20)!.events[0]!;
+    assert.equal(observation.payload.error, undefined); assert.equal(observation.payload.origin, 'self');
+    assert.deepEqual(observation.payload.sources, ['e:source']);
+    assert.deepEqual(h.store.setting('drawingsUnderWay'), {});
+    await drawings.recover(); assert.equal(h.library.all().length, 1);
+    assert.equal(h.store.db.prepare("SELECT count(*) AS n FROM events WHERE kind='drawing'").get()!.n, 1);
+    // A tracked task may still refer to an explicitly deleted work; recovery never resurrects it.
+    h.library.delete(key, 1);
+    writeFileSync(join(h.library.dir, `${key.slice(8)}.png`), png);
+    await h.library.recoverGeneration(key, { prompt: 'A fox', model: 'original-model', createdAt: 1234, sources });
+    assert.ok(h.library.get(key)?.deletedAt); assert.equal(drawings.image(key), undefined);
+  } finally { await drawings.stop(); h.close(); }
 });
 
 test('filters, archives, missing files and edits keep search results accurate', async () => {
   const h = setup();
   try {
-    const a = await h.save('窗边的猫', { createdAt: 1000, sources: [{ id: 'old', person: '7', conversation: 'private:7' }] });
+    const a = await h.save('窗边的猫', { createdAt: 1000, sources: [{ id: 'old', person: 'qq:user:7', conversation: "qq:900:private:7" }] });
     const b = await h.save('窗边的花', { createdAt: 2000 });
     h.library.update(a, { title: '小猫', tags: ['水彩'], favorite: true }, 1);
     assert.equal(h.library.search({ query: '窗边', limit: 1 }).nextOffset, 1);
-    assert.equal(h.library.search({ person: '7', conversation: 'private:7', tags: ['水彩'], favorite: true }).items[0]?.id, a);
+    assert.equal(h.library.search({ person: 'qq:user:7', conversation: "qq:900:private:7", tags: ['水彩'], favorite: true }).items[0]?.id, a);
     assert.equal(h.library.search({ from: new Date(1500).toISOString() }).items[0]?.id, b);
     h.library.update(a, { archived: true }, 2); assert.equal(h.library.search({ query: '猫' }).total, 0);
     assert.equal(h.library.search({ query: '猫', includeArchived: true }).total, 1);
@@ -105,10 +140,10 @@ test('usage preserves failed and unknown outcomes and does not mistake mentionin
   try {
     const key = await h.save('a fox');
     for (const status of ['success', 'failed', 'unknown'] as const) {
-      const action = h.store.beginAction(crypto.randomUUID(), 'send_group_msg', { group_id: 100, message: [{ type: 'image', data: { file: key } }] }, [], [status]);
+      const action = beginAction(h.store, crypto.randomUUID(), "qq_main__send_group_msg", { group_id: 100, message: [{ type: 'image', data: { file: key } }] }, [], [status]);
       h.store.finishAction(action.action.id, status, {});
     }
-    const mention = h.store.beginAction('mention', 'send_private_msg', { user_id: 7, message: [{ type: 'text', data: { text: key } }] }, [], []);
+    const mention = beginAction(h.store, 'mention', "qq_main__send_private_msg", { user_id: 7, message: [{ type: 'text', data: { text: key } }] }, [], []);
     h.store.finishAction(mention.action.id, 'success', {});
     assert.deepEqual(h.library.usage(key).map(item => item.status).sort(), ['failed', 'success', 'unknown']);
     assert.equal(h.library.search({}).items[0]?.useCount, 1);

@@ -26,7 +26,7 @@ export function followDisplay(path: string, receive: (packet: DisplayPacket) => 
           const packet = JSON.parse(line);
           if (packet.ok === false) {
             const error = String(packet.error);
-            connection(false, error.includes('Unknown command') ? ui('The daemon does not support live display; restart run with the new version.', '常驻进程尚未支持实时展示，请重启 run 到新版本。') : error);
+            connection(false, error);
             client.destroy(); return;
           }
           if (!['snapshot', 'event', 'ready'].includes(packet.type) || typeof packet.cursor?.instanceId !== 'string' || !Number.isSafeInteger(packet.cursor?.seq)) throw new Error('Invalid live protocol format');

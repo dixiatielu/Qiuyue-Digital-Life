@@ -1,3 +1,4 @@
+import { parseConversationRef, parsePersonRef } from '../identity.js';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import type { Memory } from '../domain.js';
@@ -7,7 +8,7 @@ import { DrawingLibrary, type DrawingQuery } from '../plugins/gallery-store.js';
 type Row = Record<string, any>;
 const parse = (value: unknown) => JSON.parse(String(value));
 const memoryRow = (db: DatabaseSync, row: Row): Memory => ({
-  id: row.id, kind: row.kind, title: row.title, content: row.content, importance: row.importance, subjects: parse(row.subjects), groups: parse(row.groups_json),
+  id: row.id, kind: row.kind, title: row.title, content: row.content, importance: row.importance, subjects: parse(row.subjects), conversations: parse(row.conversations_json),
   fictional: Boolean(row.fictional), sources: db.prepare('SELECT source_id FROM sources WHERE owner_id=?').all(row.id).map(item => String(item.source_id)),
   supersedes: row.supersedes ?? undefined, ...(row.scope ? { scope: row.scope } : {}), active: Boolean(row.active), createdAt: row.created_at,
 });
@@ -23,7 +24,10 @@ export class LifeReader {
   private read<T>(work: (db: DatabaseSync) => T, fallback: T): T {
     if (!existsSync(this.path)) return fallback;
     const db = new DatabaseSync(this.path, { readOnly: true });
-    try { db.exec('PRAGMA busy_timeout=2000'); return work(db); } finally { db.close(); }
+    try {
+      if (Number(db.prepare('PRAGMA user_version').get()!.user_version) !== 2) throw new Error('Database identity format needs migration. Stop the daemon and run identities migrate --config <path>.');
+      db.exec('PRAGMA busy_timeout=2000'); return work(db);
+    } finally { db.close(); }
   }
   private setting(db: DatabaseSync, key: string) { const row = db.prepare('SELECT value FROM settings WHERE key=?').get(key); return row ? parse(row.value) : undefined; }
   private gallery<T>(dir: string, work: (library: DrawingLibrary) => T, fallback: T) {
@@ -65,14 +69,21 @@ export class LifeReader {
     }), []);
   }
   private scopeName(db: DatabaseSync, scope: string): string | undefined {
-    const [type, id] = scope.split(':');
-    if (type === 'group') return db.prepare("SELECT json_extract(payload,'$.group_name') AS name FROM events WHERE group_id=? AND kind='message' AND json_extract(payload,'$.group_name') IS NOT NULL ORDER BY at DESC LIMIT 1").get(Number(id))?.name as string | undefined;
-    if (type === 'person') {
-      const row = db.prepare("SELECT json_extract(payload,'$.sender') AS sender FROM events WHERE kind='message' AND actor_id=? AND json_extract(payload,'$.sender') IS NOT NULL ORDER BY at DESC LIMIT 1").get(Number(id));
-      const sender = row ? parse(row.sender) as { card?: string; nickname?: string } : undefined;
-      return sender?.card || sender?.nickname || undefined;
+    if (scope.startsWith('conversation:')) {
+      const chat = scope.slice('conversation:'.length);
+      if (!parseConversationRef(chat)) return;
+      const row = db.prepare("SELECT json_extract(payload,'$.group_name') AS name FROM events WHERE conversation_ref=? AND json_extract(payload,'$.group_name') IS NOT NULL ORDER BY at DESC LIMIT 1").get(chat);
+      return row?.name ? String(row.name) : undefined;
+    }
+    if (scope.startsWith('person:')) {
+      const person = scope.slice('person:'.length);
+      if (!parsePersonRef(person)) return;
+      const row = db.prepare("SELECT json_extract(source,'$.actorName') AS name, json_extract(payload,'$.sender') AS sender FROM events WHERE actor_ref=? AND (json_extract(source,'$.actorName') IS NOT NULL OR json_extract(payload,'$.sender') IS NOT NULL) ORDER BY at DESC LIMIT 1").get(person);
+      const sender = row?.sender ? parse(row.sender) : undefined;
+      return row?.name ? String(row.name) : sender?.card || sender?.nickname || undefined;
     }
   }
+
   /** A memory with the versions it replaced and the records it rests on. */
   memory(memoryId: string) {
     return this.read(db => {

@@ -1,12 +1,13 @@
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateRawSync } from 'node:zlib';
 import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-works/pi-ai';
 import { FaceCatalog, qqFacesPlugin, unzip, type Face } from '../src/plugins/faces.js';
-import { normalizeEvent } from '../src/snowluma.js';
+import { normalizeEvent } from '../src/adapters/snowluma/index.js';
 import { Store } from '../src/store.js';
 import { PluginHost } from '../src/plugins.js';
-import { createPlugins } from '../src/plugins/index.js';
+import { createPlugins } from './helpers.js';
 import { SemanticRecall } from '../src/recall.js';
 import { config, deferred, event, fixture } from './helpers.js';
 import { embeddingConfig, topics } from './embedding-helpers.js';
@@ -49,14 +50,14 @@ test('observations name faces and reactions and show each face once a thought, a
     return { data: zip({ [`${id}/png/${id}.png`]: { data: PNG, deflate: true } }), type: 'application/zip', url };
   }))]);
   try {
-    f.store.bindAccount(900);
-    const receive = (raw: Record<string, unknown>) => f.store.receive(normalizeEvent({ self_id: 900, group_id: 100, user_id: 7, time: Math.floor(Date.now() / 1000), ...raw }, f.cfg.snowluma)!)!;
+    f.store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+    const receive = (raw: Record<string, unknown>) => f.store.receive(qqEvent(normalizeEvent({ self_id: 900, group_id: 100, user_id: 7, time: Math.floor(Date.now() / 1000), ...raw }, f.cfg.adapters[0]!)!, f.store))!;
     const said = receive({ post_type: 'message', message_type: 'group', message_id: 31, message: [{ type: 'face', data: { id: '424' } }, { type: 'text', data: { text: 'this one?' } }] });
     receive({ post_type: 'notice', notice_type: 'group_msg_emoji_like', message_id: 31, likes: [{ emoji_id: '424', count: 1 }, { emoji_id: '277', count: 1 }, { emoji_id: '128077', count: 1 }] });
     assert.equal(said.text, '[face 424]this one?');
     let observed = '';
     f.faux.setResponses([
-      context => { observed = JSON.stringify(context.messages.findLast(message => message.role === 'user' && JSON.stringify(message).includes('New environment observations'))); return answer(call('view_face', { id: '277' })); },
+      context => { observed = JSON.stringify(context.messages.findLast(message => message.role === 'user' && JSON.stringify(message).includes('New environment observations'))); return answer(call("qq_main__view_face", { id: '277' })); },
       answer('Seen'),
     ]);
     await f.brain.run(f.store.claim(10)!);
@@ -71,8 +72,8 @@ test('observations name faces and reactions and show each face once a thought, a
     // Folded when the thought ends, each picture points back to view_face.
     const context = JSON.stringify(f.brain.agent.state.messages);
     assert.doesNotMatch(context, /"type":"image"/);
-    assert.match(context, /QQ system face 424 续标识, as it looks:"\},\{"type":"text","text":"\[Folded when the thought ended; view it again with view_face\]/);
-    assert.match(context, /"toolName":"view_face".*QQ system face 277 汪汪, as it looks:"\},\{"type":"text","text":"\[Folded when the thought ended; view it again with view_face\]/);
+    assert.match(context, /QQ system face 424 续标识, as it looks:"\},\{"type":"text","text":"\[Folded when the thought ended; view it again with qq_main__view_face\]/);
+    assert.match(context, /"toolName":"qq_main__view_face".*QQ system face 277 汪汪, as it looks:"\},\{"type":"text","text":"\[Folded when the thought ended; view it again with qq_main__view_face\]/);
     // A new thought sees the face again.
     receive({ post_type: 'message', message_type: 'group', message_id: 32, message: [{ type: 'face', data: { id: '424' } }] });
     f.faux.setResponses([context => {
@@ -91,15 +92,15 @@ test('disabling qq-faces hides its tool and names while native QQ reactions rema
   f.brain.thought.lifeOnly = false;
   try {
     f.store.setSetting('faces', { 424: { name: '续标识', url: 'https://example.com/424.zip' } });
-    const held = f.tools.current().find(tool => tool.name === 'view_face')!;
-    assert.ok(f.reviewTools.current().some(tool => tool.name === 'view_face'));
-    f.cfg.plugins['qq-faces'] = false;
-    assert.ok(!f.tools.current().some(tool => tool.name === 'view_face'));
-    assert.ok(!f.reviewTools.current().some(tool => tool.name === 'view_face'));
+    const held = f.tools.current().find(tool => tool.name === "qq_main__view_face")!;
+    assert.ok(f.reviewTools.current().some(tool => tool.name === "qq_main__view_face"));
+    f.cfg.plugins['qq-main-qq-faces'] = false;
+    assert.ok(!f.tools.current().some(tool => tool.name === "qq_main__view_face"));
+    assert.ok(!f.reviewTools.current().some(tool => tool.name === "qq_main__view_face"));
     await assert.rejects(held.execute('held', { id: '424' }), /disabled/);
     assert.deepEqual(await f.plugins.emojiNames(), {});
     assert.deepEqual(f.plugins.knownEmojiNames(), {});
-    f.store.receive({ key: 'face:off', kind: 'message', at: Date.now(), text: '[face 424]', groupId: 100, actorId: 7, payload: { message: [{ type: 'face', data: { id: '424' } }] } });
+    f.store.receive(qqEvent({ key: 'face:off', kind: 'message', at: Date.now(), text: '[face 424]', groupId: 100, actorId: 7, payload: { message: [{ type: 'face', data: { id: '424' } }] } }, f.store));
     f.faux.setResponses([context => {
       const observed = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')));
       assert.match(observed, /\[face 424\]/); assert.doesNotMatch(observed, /续标识|QQ system face|"type":"image"/);
@@ -107,7 +108,7 @@ test('disabling qq-faces hides its tool and names while native QQ reactions rema
     }]);
     await f.brain.run(f.store.claim(10)!);
     assert.equal(catalogs, 0);
-    await f.tools.current().find(tool => tool.name === 'set_group_reaction')!.execute('react', { group_id: 100, message_id: 1, code: '424', is_set: true });
+    await f.tools.current().find(tool => tool.name === "qq_main__set_group_reaction")!.execute('react', { group_id: 100, message_id: 1, code: '424', is_set: true });
     assert.equal(catalogs, 1);
     assert.deepEqual(f.store.setting('faces'), { 424: { name: '续标识', url: 'https://example.com/424.zip' } });
   } finally { f.store.close(); }
@@ -123,12 +124,12 @@ test('chat images keep priority, and a face skipped for budget can be seen later
       { id: 'test-picture', tools: () => [], images: event => event.kind === 'picture' ? [{ label: 'A priority picture', unavailable: '', deferred: '', autoView: true, load: () => ({ data: PNG, mimeType: 'image/png' }) }] : [] },
     ];
   });
-  const receive = () => f.store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text: '[face 424]', groupId: 100, actorId: 7, payload: { message: [{ type: 'face', data: { id: '424' } }] } });
+  const receive = () => f.store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text: '[face 424]', groupId: 100, actorId: 7, payload: { message: [{ type: 'face', data: { id: '424' } }] } }, f.store));
   try {
     f.cfg.limits.maxImages = 1;
-    f.store.receive({ key: 'picture', kind: 'picture', at: Date.now(), text: 'A picture', payload: {} }); receive();
+    f.store.receive(qqEvent({ key: 'picture', kind: 'picture', at: Date.now(), text: 'A picture', payload: {} }, f.store)); receive();
     f.faux.setResponses([
-      context => { const text = JSON.stringify(context); assert.match(text, /A priority picture/); assert.doesNotMatch(text, /QQ system face 424/); return answer(call('get_msg', { message_id: 1 })); },
+      context => { const text = JSON.stringify(context); assert.match(text, /A priority picture/); assert.doesNotMatch(text, /QQ system face 424/); return answer(call("qq_main__get_msg", { message_id: 1 })); },
       context => { assert.match(JSON.stringify(context), /QQ system face 424 续标识, as it looks:/); return answer('Now seen'); },
     ]);
     const running = f.brain.run(f.store.claim(10)!);
@@ -187,7 +188,7 @@ test('concurrent name lookups share the catalog request and cancellation permits
 });
 
 test('recall receives cached emoji names from the host and drops that enhancement when disabled', async () => {
-  const cfg = embeddingConfig(); const store = new Store(':memory:'); store.bindAccount(900);
+  const cfg = embeddingConfig(); const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   store.setSetting('faces', { 424: { name: '小笼包' } });
   const source = event(store, '午饭');
   const memory = store.writeMemory({ kind: 'note', title: '午饭', content: '昨天一起吃小笼包，非常开心', importance: 4, sources: [source.id] }, false);
@@ -198,7 +199,7 @@ test('recall receives cached emoji names from the host and drops that enhancemen
     recall.start(); await recall.idle();
     const face = event(store, '[face 424]'); await recall.idle();
     assert.deepEqual(recall.recall([face]).map(item => item.memory.id), [memory.id]);
-    cfg.plugins['qq-faces'] = false;
+    cfg.plugins['qq-main-qq-faces'] = false;
     const disabled = event(store, '[face 424]'); await recall.idle();
     assert.deepEqual(recall.recall([disabled]), []);
     assert.equal(embedder.calls.flat().filter(text => text === '小笼包').length, 1);

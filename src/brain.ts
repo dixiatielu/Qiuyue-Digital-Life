@@ -1,4 +1,3 @@
-import { parseConversationRef } from './identity.js';
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend } from './model.js';
@@ -6,9 +5,9 @@ import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type I
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
-import type { Action, EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
-import { addressedTo, errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
-import { Store, conversationOf, digest, eventRef } from './store.js';
+import type { EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
+import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
+import { Store, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
@@ -51,9 +50,9 @@ export interface Brain {
 }
 
 /** What a persisted working context belongs to: when any of it changes, the next start begins a fresh one. */
-export function contextIdentity(config: Config, tools: ToolSet, legacy = false) {
+export function contextIdentity(config: Config, tools: ToolSet) {
   const contracts = tools.plugins.installed().filter(plugin => plugin.contextVersion !== undefined && (plugin.enabled?.() ?? true)).map(plugin => [plugin.id, plugin.contextVersion]);
-  return digest({ instructions: systemInstructions(config, legacy), model: config.model, selfId: config.snowluma.selfId, ...(config.adapters ? { accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })) } : {}), tools: tools.current().map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
+  return digest({ instructions: systemInstructions(config), model: config.model, accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })), tools: tools.current().map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
 }
 
 export class PiBrain implements Brain {
@@ -68,7 +67,6 @@ export class PiBrain implements Brain {
   private runtimeSnapshot?: RuntimeSnapshot;
   private readonly meter = new TokenMeter();
   private identity: string;
-  private legacyIdentity: string;
   private pendingRequest: AgentMessage[] = [];
   private pendingRoute = '';
   private compactions: Record<string, unknown>[] = [];
@@ -89,7 +87,6 @@ export class PiBrain implements Brain {
     this.stream = stream;
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
-    this.legacyIdentity = contextIdentity(config, tools, true);
     this.agent = new Agent({
       initialState: { model: config.model.baseUrl ? { ...model, baseUrl: config.model.baseUrl } : model, systemPrompt: this.instructions(), tools: tools.current(), thinkingLevel: config.model.thinkingLevel ?? 'off' },
       streamFn: (target, context, options) => stream(target, context, { ...options, maxTokens: Math.min(config.limits.outputReserveTokens, target.maxTokens) }),
@@ -157,8 +154,8 @@ export class PiBrain implements Brain {
   get streaming() { return this.agent.state.isStreaming && !this.preempted; }
   private display(update: (monitor: Monitor) => void) { if (this.monitor) { try { update(this.monitor); } catch {} } }
   abort() { this.controller.abort(); this.agent.abort(); }
-  private instructions(legacy = false) {
-    return systemInstructions(this.config, legacy);
+  private instructions() {
+    return systemInstructions(this.config);
   }
   /** What the working context already shows of runtime state: what runtime_data has said, and the actions whose results came back to it as tool results. */
   private shown(messages: AgentMessage[], runtime: RuntimeSnapshot): RuntimeSnapshot | undefined {
@@ -284,7 +281,7 @@ export class PiBrain implements Brain {
     if (this.phase !== 'idle') throw new Error('Cannot replace tools during a thought.');
     const identity = contextIdentity(this.config, this.tools);
     const changed = identity !== this.identity;
-    this.identity = identity; this.legacyIdentity = contextIdentity(this.config, this.tools, true);
+    this.identity = identity;
     this.agent.state.tools = this.tools.current();
     if (changed) { this.resetContext(); this.contextGeneration = -1; }
     return changed;
@@ -295,42 +292,31 @@ export class PiBrain implements Brain {
   private restore(checkpoint: ContextCheckpoint) {
     this.agent.reset(); this.agent.state.tools = this.tools.current();
     this.runtimeSnapshot = undefined;
-    let migrated = checkpoint.identity !== this.identity;
-    this.agent.state.messages = checkpoint.messages.flatMap((message): AgentMessage[] => {
-      if (message.role === 'system' && checkpoint.identity !== this.identity && message.content === this.instructions(true)) return [{ ...message, content: this.instructions() }];
-      if (message.role !== 'user' || typeof message.content !== 'string' || !message.content.startsWith('<runtime_data>')) return [message];
-      const data = JSON.parse(message.content.slice('<runtime_data>'.length, message.content.lastIndexOf('</runtime_data>'))) as RuntimeSnapshot;
-      if (!data.format) {
-        // Upgrade the previous snapshot format without losing conversation or archived originals.
-        const current = { ...data, actualActions: (data.actualActions as Action[]).map(action => actionSummary(action)) };
-        const update = runtimeUpdate(current, this.runtimeSnapshot);
-        this.runtimeSnapshot = current; migrated = true;
-        return update ? [{ ...this.runtimeMessage(update), timestamp: message.timestamp }] : [];
+    this.agent.state.messages = checkpoint.messages;
+    for (const message of checkpoint.messages) {
+      if (message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<runtime_data>')) {
+        const data = JSON.parse(message.content.slice('<runtime_data>'.length, message.content.lastIndexOf('</runtime_data>'))) as RuntimeSnapshot;
+        this.runtimeSnapshot = applyRuntimeUpdate(this.runtimeSnapshot, data);
       }
-      this.runtimeSnapshot = applyRuntimeUpdate(this.runtimeSnapshot, data);
-      return [message];
-    });
-    this.meter.anchor = migrated ? undefined : checkpoint.anchor;
+    }
+    this.meter.anchor = checkpoint.anchor;
     this.contextGeneration = checkpoint.generation;
     this.thought.sources = new Set(checkpoint.sources);
   }
   private runtimeContext() {
-    const groups = this.observations.map(event => event.groupId).filter((x): x is number => x !== undefined);
     const recent = this.store.recent(this.config.memory.recentEvents);
     // What is said calls memories to mind, not merely where it is said (ADR-0009); development is supplied by scope below.
     const recalled = this.recall?.recall(this.observations) ?? [];
     for (const source of [...recent, ...recalled.map(item => item.memory)]) this.thought.sources.add(source.id);
     // A review looks at the chats it lists, so their groups and the people who spoke there count as present.
     const chats = this.observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
-    const reviewed = chats.filter(chat => !parseConversationRef(chat.conversation)).map(chat => conversationOf(chat.conversation));
-    const present = this.observations.filter(event => !ownEvent(event, this.config.snowluma.selfId)).map(event => event.source?.actor ?? event.actorId).filter((id): id is number | string => id !== undefined).reverse();
-    const people = [...new Set([...present, ...reviewed.filter(chat => chat.type === 'private').map(chat => chat.id), ...this.store.impressionsIn(chats, this.config.snowluma.selfId, this.config.development.people)])].slice(0, this.config.development.people);
-    const settings = new Set([...groups, ...reviewed.filter(chat => chat.type === 'group').map(chat => chat.id)]);
-    const platformScopes = this.observations.flatMap(event => event.source ? [...(event.source.conversation ? [`conversation:${event.source.conversation}`] : []), ] : []);
-    const development = this.store.development([...platformScopes, ...chats.filter(chat => parseConversationRef(chat.conversation)).map(chat => `conversation:${chat.conversation}`), 'global', ...[...settings].map(id => `group:${id}`), ...people.map(id => `person:${id}`)]);
+    const present = this.observations.filter(event => !ownEvent(event)).flatMap(event => event.source?.actor ? [event.source.actor] : []).reverse();
+    const people = [...new Set([...present, ...this.store.impressionsIn(chats, this.config.development.people)])].slice(0, this.config.development.people);
+    const conversations = [...new Set([...this.observations.flatMap(event => event.source?.conversation ? [event.source.conversation] : []), ...chats.map(chat => chat.conversation)])];
+    const development = this.store.development(['global', ...conversations.map(chat => `conversation:${chat}`), ...people.map(person => `person:${person}`)]);
     // When each was formed, so a judgment from last night's review reads as that rather than as settled.
     const entries = (kind: MemoryKind) => development.filter(memory => memory.kind === kind).map((memory: Memory) => ({ id: memory.id, scope: memory.scope, title: memory.title, content: memory.content, createdAt: new Date(memory.createdAt).toISOString() }));
-    const runtime = { ...(this.config.adapters === undefined ? {} : { platformAccounts: this.store.setting('platformAccounts', {}) }), now: new Date().toISOString(), timeZone: 'Asia/Shanghai', ...(this.config.adapters === undefined ? { selfId: this.config.snowluma.selfId, historyGroups: this.config.snowluma.groups, snowlumaPermissions: this.config.snowluma.tools } : { adapters: this.config.adapters.map(({ id, driver, accountId, tools }) => ({ id, driver, accountId, tools })) }), settings: this.store.settings(), allowFiction: this.config.life.allowFiction, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, groupId: event.groupId, actorId: event.actorId, ...(event.source ? { source: event.source } : {}), text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
+    const runtime = { platformAccounts: this.store.setting('platformAccounts', {}), now: new Date().toISOString(), timeZone: 'Asia/Shanghai', adapters: this.config.adapters.map(({ id, driver, accountId, tools }) => ({ id, driver, accountId, tools })), settings: this.store.settings(), allowFiction: this.config.life.allowFiction, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, ...(event.source ? { source: event.source } : {}), text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
     // Commitments, current activity, pursuits, and development are never selected by probabilistic recall.
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
     while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
@@ -341,7 +327,7 @@ export class PiBrain implements Brain {
     const rests = observation.events.filter(event => event.kind === 'rest_backlog');
     const faces = await this.tools.plugins.emojiNames(observation.events, this.controller.signal);
     // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
-    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, this.config.snowluma.selfId, observation.events, faces, preview)}` }];
+    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, observation.events, faces, preview)}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
     for (const text of this.tools.plugins.observation(observation.events, this.thought)) content.push({ type: 'text', text });
@@ -390,7 +376,7 @@ export class PiBrain implements Brain {
     const items = chats.reduce((sum, chat) => sum + chat.messages + chat.notices, 0) || 1;
     return chats.map(chat => {
       const share = Math.floor(this.config.limits.contextTokens / 4 * (chat.messages + chat.notices) / items);
-      const { text, omitted } = new ChatRecord(this.store, this.config.snowluma.selfId, chat.conversation, faces, undefined, action => this.tools.plugins.actionCaption(action)).span(chat.from, until, share);
+      const { text, omitted } = new ChatRecord(this.store, chat.conversation, faces, undefined, action => this.tools.plugins.actionCaption(action)).span(chat.from, until, share);
       return omitted ? `${text}\n[The earliest ${omitted} lines did not fit; read them with read_chat_record from="${recordTime(chat.from)}".]` : text;
     }).join('\n\n');
   }
@@ -434,7 +420,7 @@ export class PiBrain implements Brain {
   private prepare(generation: number) {
     if (this.contextGeneration !== generation) {
       this.resetContext();
-      const saved = this.store.loadContext(this.identity) ?? this.store.loadContext(this.legacyIdentity);
+      const saved = this.store.loadContext(this.identity);
       if (saved) { try { this.restore(saved); } catch { this.resetContext(); } }
     }
     this.agent.state.tools = this.tools.current();
@@ -449,8 +435,7 @@ export class PiBrain implements Brain {
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = [];
     this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
-    const self = this.config.snowluma.selfId;
-    this.engaged = new Set(observation.events.filter(event => !ownEvent(event, self) && !ambientEvent(event, self)).map(eventChat).filter((chat): chat is string => chat !== undefined));
+    this.engaged = new Set(observation.events.filter(event => !ownEvent(event) && !ambientEvent(event)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true };
@@ -499,7 +484,7 @@ export class PiBrain implements Brain {
   /** A message to the digital life in a chat this thought is engaged in: anything in a private chat, or a mention of or reply to it in a group. */
   private addressed(event: EnvironmentEvent): boolean {
     const chat = eventChat(event);
-    return event.kind === 'message' && chat !== undefined && this.engaged.has(chat) && addressedTo(this.config.snowluma.selfId, event, id => this.store.sentMessage(id));
+    return event.kind === 'message' && chat !== undefined && this.engaged.has(chat) && event.source?.addressed === true;
   }
   /** Stop a thought whose model is deciding without a newer addressed message; a call already answered is left to its tools. */
   private preempt(event: EnvironmentEvent): boolean {

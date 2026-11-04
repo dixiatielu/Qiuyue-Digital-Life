@@ -8,7 +8,7 @@ import { Compile } from 'typebox/compile';
 import { SnowLumaActionError as SnowLumaApiError } from '../src/adapters/snowluma/index.js';
 const unsupportedActions = ['unsupported_test_action', '.compatibility_action'];
 import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools } from '@earendil-works/pi-ai';
-import { allowedSnowLumaAction, findSnowLumaAction, snowlumaCatalog } from '../src/snowluma-catalog.js';
+import { allowedSnowLumaAction, findSnowLumaAction, getSnowLumaCatalog } from '../src/adapters/snowluma/catalog.js';
 import { loadConfig } from '../src/config.js';
 import { event, fixture } from './helpers.js';
 
@@ -21,12 +21,12 @@ test('generated native tools expose canonical native names and schemas directly'
     for (const action of snowlumaCatalog) {
       Compile(action.inputSchema);
       assert.match(action.name, /^[a-zA-Z0-9_-]{1,64}$/);
-      const tool = f.tools.current().find(tool => tool.name === action.name)!;
+      const tool = f.tools.current().find(tool => tool.name === `qq_main__${action.name}`)!;
       assert.ok(tool, action.name);
       // add_custom_face also takes the description it is saved with.
       if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...tool.parameters.properties, desc: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, desc: undefined } });
       else assert.deepEqual(tool.parameters, action.inputSchema);
-      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name)) assert.equal(tool.description, action.summary ?? action.name);
+      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name)) assert.ok(tool.description.replaceAll('qq_main__', '').startsWith(action.summary ?? action.name));
       assert.equal(findSnowLumaAction(action.name), action);
     }
   } finally { f.store.close(); }
@@ -35,15 +35,15 @@ test('generated native tools expose canonical native names and schemas directly'
 test('the native-tool plugin can be switched off while perception, memory, and other plugins continue', async () => {
   const f = fixture(); f.brain.thought.lifeOnly = false;
   try {
-    const held = f.tools.current().find(tool => tool.name === 'send_group_msg')!;
-    const discovery = f.tools.current().find(tool => tool.name === 'search_snowluma_tools')!;
-    f.cfg.plugins['snowluma-tools'] = false;
+    const held = f.tools.current().find(tool => tool.name === "qq_main__send_group_msg")!;
+    const discovery = f.tools.current().find(tool => tool.name === "qq_main__search_snowluma_tools")!;
+    f.cfg.plugins['qq-main-snowluma-tools'] = false;
     const offered = new Set(f.tools.current().map(tool => tool.name));
-    assert.ok(snowlumaCatalog.every(action => !offered.has(action.name)));
-    assert.ok(!offered.has('search_snowluma_tools') && !offered.has('load_snowluma_tools'));
-    assert.ok(offered.has('remember') && offered.has('recall') && offered.has('view_face') && offered.has('share_qzone_feed'));
-    await assert.rejects(held.execute('held', { group_id: 100, message: 'stale' }), /Plugin snowluma-tools is disabled/);
-    await assert.rejects(discovery.execute('held-discovery', { query: 'send' }), /Plugin snowluma-tools is disabled/);
+    assert.ok(snowlumaCatalog.every(action => !offered.has(`qq_main__${action.name}`)));
+    assert.ok(!offered.has('qq_main__search_snowluma_tools') && !offered.has('qq_main__load_snowluma_tools'));
+    assert.ok(offered.has('remember') && offered.has('recall') && offered.has('qq_main__view_face') && offered.has('qq_main__share_qzone_feed'));
+    await assert.rejects(held.execute('held', { group_id: 100, message: 'stale' }), /Plugin qq-main-snowluma-tools is disabled/);
+    await assert.rejects(discovery.execute('held-discovery', { query: 'send' }), /Plugin qq-main-snowluma-tools is disabled/);
     assert.deepEqual(f.sent, []); assert.equal(f.store.actions().length, 0);
     event(f.store, 'A message still arrives');
     f.faux.setResponses([answer('Observed')]); await f.brain.run(f.store.claim(10)!);
@@ -57,8 +57,8 @@ test('the native-tool plugin can be switched off while perception, memory, and o
       return answer('Rest');
     }]);
     await f.brain.run(f.store.claim(10)!);
-    f.cfg.plugins['snowluma-tools'] = true;
-    assert.ok(f.tools.current().some(tool => tool.name === 'send_group_msg'));
+    f.cfg.plugins['qq-main-snowluma-tools'] = true;
+    assert.ok(f.tools.current().some(tool => tool.name === "qq_main__send_group_msg"));
   } finally { f.store.close(); }
 });
 
@@ -67,14 +67,14 @@ test('common social tools include guidance for real identifiers and space visibi
   try {
     const descriptions = new Map(f.tools.current().map(tool => [tool.name, tool.description]));
     for (const name of ['fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone']) {
-      assert.match(descriptions.get(name)!, new RegExp(`SnowLuma native interface ${name}`));
+      assert.match(descriptions.get(`qq_main__${name}`)!, new RegExp(`SnowLuma native interface qq_main__${name}`));
     }
-    assert.match(descriptions.get('send_custom_face')!, /fetch_custom_face_detail.*actual/);
-    assert.match(descriptions.get('add_custom_face')!, /desc.*actually saw.*once the save succeeds.*modify_custom_face.*same batch/);
-    assert.match(descriptions.get('modify_custom_face')!, /desc.*actual image.*emoji_id/);
-    assert.match(descriptions.get('delete_msg')!, /negative values may also be valid/);
-    assert.match(descriptions.get('send_qzone_msg')!, /default is visible to everyone.*64 means only yourself.*target_uins/);
-    assert.match(descriptions.get('comment_qzone')!, /parent comment ID.*reply_uin.*reply_name/);
+    assert.match(descriptions.get('qq_main__send_custom_face')!, /fetch_custom_face_detail.*actual/);
+    assert.match(descriptions.get('qq_main__add_custom_face')!, /desc.*actually saw.*once the save succeeds.*modify_custom_face.*same batch/);
+    assert.match(descriptions.get('qq_main__modify_custom_face')!, /desc.*actual image.*emoji_id/);
+    assert.match(descriptions.get('qq_main__delete_msg')!, /negative values may also be valid/);
+    assert.match(descriptions.get('qq_main__send_qzone_msg')!, /default is visible to everyone.*64 means only yourself.*target_uins/);
+    assert.match(descriptions.get('qq_main__comment_qzone')!, /parent comment ID.*reply_uin.*reply_name/);
   } finally { f.store.close(); }
 });
 
@@ -82,8 +82,8 @@ test('tool discovery supports common wording, category browsing and an empty-res
   const f = fixture();
   f.brain.thought.lifeOnly = false;
   try {
-    assert.ok(f.tools.current().some(tool => tool.name === 'send_private_msg'));
-    const search = f.tools.current().find(tool => tool.name === 'search_snowluma_tools')!;
+    assert.ok(f.tools.current().some(tool => tool.name === "qq_main__send_private_msg"));
+    const search = f.tools.current().find(tool => tool.name === "qq_main__search_snowluma_tools")!;
     const find = async (args: Record<string, unknown>) => JSON.parse((await search.execute('search', args)).content[0]!.text!);
     for (const [query, expected] of [['帮我发私信', 'send_private_msg'], ['撤销消息', 'delete_msg'], ['查看群友列表', 'get_group_member_list'], ['get_forward_msg', 'get_forward_msg'], ['send private message', 'send_private_msg'], ['list group members', 'get_group_member_list']]) {
       assert.ok((await find({ query })).actions.some((action: { name: string }) => action.name === expected), query);
@@ -98,8 +98,8 @@ test('tool discovery supports common wording, category browsing and an empty-res
     assert.equal(page.actions.length, 2);
     assert.equal(page.nextOffset, 2);
     assert.ok(page.actions.every((action: { category: string }) => action.category === messageCategory));
-    f.cfg.snowluma.tools = { allow: '*', deny: ['send_private_msg'] };
-    assert.ok(!f.tools.current().some(tool => tool.name === 'send_private_msg'));
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['send_private_msg'] };
+    assert.ok(!f.tools.current().some(tool => tool.name === "qq_main__send_private_msg"));
     assert.equal((await find({ query: 'send_private_msg' })).actions[0].allowed, false);
   } finally { f.store.close(); }
 });
@@ -109,7 +109,7 @@ test('names outside the catalog cannot be found or described and canonical schem
   f.brain.thought.lifeOnly = false;
   try {
     const names = new Set(snowlumaCatalog.map(action => action.name));
-    const load = f.tools.current().find(tool => tool.name === 'load_snowluma_tools')!;
+    const load = f.tools.current().find(tool => tool.name === "qq_main__load_snowluma_tools")!;
     for (const name of unsupportedActions) {
       assert.throws(() => findSnowLumaAction(name), /Unknown/);
       await assert.rejects(load.execute('load', { names: [name] }), /Unknown/);
@@ -138,15 +138,15 @@ test('all interfaces are callable and detail queries leave the model tool prefix
   try {
     event(f.store, 'Look at Qzone and forwarded messages');
     f.faux.setResponses([
-      context => { prefix = structuredClone(getCurrentTools(context.messages)); assert.ok(prefix.some(tool => tool.name === 'get_forward_msg')); return answer(call('search_snowluma_tools', { query: 'get_forward_msg' })); },
-      context => { assert.ok(JSON.stringify(context).includes(findSnowLumaAction('get_forward_msg').summary!)); return answer(call('load_snowluma_tools', { names: ['get_forward_msg', 'get_qzone_msg_list'] })); },
+      context => { prefix = structuredClone(getCurrentTools(context.messages)); assert.ok(prefix.some(tool => tool.name === "qq_main__get_forward_msg")); return answer(call("qq_main__search_snowluma_tools", { query: 'get_forward_msg' })); },
+      context => { assert.ok(JSON.stringify(context).includes(findSnowLumaAction('get_forward_msg').summary!)); return answer(call("qq_main__load_snowluma_tools", { names: ['get_forward_msg', 'get_qzone_msg_list'] })); },
       context => {
         assert.deepEqual(getCurrentTools(context.messages), prefix);
         assert.match(JSON.stringify(context.messages.at(-1)), /inputSchema/);
         assert.ok(context.messages.length && JSON.stringify(context).length < f.cfg.limits.contextTokens * 8);
-        return answer([call('get_forward_msg', { id: 'forward:1' }), call('get_qzone_msg_list', { target_uin: 7, num: 5 })]);
+        return answer([call("qq_main__get_forward_msg", { id: 'forward:1' }), call("qq_main__get_qzone_msg_list", { target_uin: 7, num: 5 })]);
       },
-      answer(call('load_snowluma_tools', { names: ['get_group_member_info'] })),
+      answer(call("qq_main__load_snowluma_tools", { names: ['get_group_member_info'] })),
       context => {
         assert.deepEqual(getCurrentTools(context.messages), prefix);
         return answer('Observe first');
@@ -155,7 +155,7 @@ test('all interfaces are callable and detail queries leave the model tool prefix
     await f.brain.run(f.store.claim(10)!);
     assert.deepEqual(f.sent.map(item => item.kind), ['get_forward_msg', 'get_qzone_msg_list']);
     assert.equal(f.store.actions().length, 0);
-    assert.ok(f.store.recent(10).some(item => item.kind === 'snowluma:get_forward_msg'));
+    assert.ok(f.store.recent(10).some(item => item.kind === 'adapter:qq_main:get_forward_msg'));
     f.restart(); event(f.store, 'A new run');
     f.faux.setResponses([context => { assert.deepEqual(getCurrentTools(context.messages), prefix); return answer('Rest'); }]);
     await f.brain.run(f.store.claim(10)!);
@@ -167,7 +167,7 @@ test('native sends preserve rich messages, optional fields, private targets and 
   const message = [{ type: 'image', data: { file: 'base64://aGVsbG8=', summary: 'Image' } }, { type: 'face', data: { id: '14' } }];
   try {
     event(f.store);
-    f.faux.setResponses([answer(call('send_group_msg', { group_id: 999, message, auto_escape: false, custom_field: { keep: true } }))]);
+    f.faux.setResponses([answer(call("qq_main__send_group_msg", { group_id: 999, message, auto_escape: false, custom_field: { keep: true } }))]);
     await f.brain.run(f.store.claim(10)!);
     // The send ended that thought; its raw receipt comes with the next one.
     event(f.store, 'Next');
@@ -176,9 +176,9 @@ test('native sends preserve rich messages, optional fields, private targets and 
         const result = context.messages.filter(item => item.role === 'toolResult').at(-1)!;
         assert.equal(result.content[0]?.type, 'text');
         assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), { message_id: -42 });
-        return answer(call('load_snowluma_tools', { names: ['send_private_msg'] }));
+        return answer(call("qq_main__load_snowluma_tools", { names: ['send_private_msg'] }));
       },
-      answer(call('send_private_msg', { user_id: 7, message: 'Private greeting' })),
+      answer(call("qq_main__send_private_msg", { user_id: 7, message: 'Private greeting' })),
     ]);
     await f.brain.run(f.store.claim(10)!);
     assert.deepEqual(f.sent[0], { kind: 'send_group_msg', args: { group_id: 999, message, auto_escape: false, custom_field: { keep: true } } });
@@ -196,9 +196,9 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
     event(f.store);
     f.faux.setResponses([
       answer([
-        call('send_private_msg', { user_id: 7, message: [{ type: 'image', data: { file: avif } }] }),
-        call('send_private_forward_msg', { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') }),
-        call('send_group_msg', { group_id: 100, message: [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }] }),
+        call("qq_main__send_private_msg", { user_id: 7, message: [{ type: 'image', data: { file: avif } }] }),
+        call("qq_main__send_private_forward_msg", { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') }),
+        call("qq_main__send_group_msg", { group_id: 100, message: [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }] }),
       ]),
       answer('Done'),
     ]);
@@ -206,7 +206,7 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
     assert.deepEqual(f.sent[0]!.args.message, [{ type: 'image', data: { file: jpeg } }]);
     assert.deepEqual(f.sent[1]!.args.messages, node('https://a1.qpic.cn/psc?/x!/c'));
     assert.deepEqual(f.sent[2]!.args.message, [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }]);
-    assert.deepEqual(f.store.actions().find(action => action.kind === 'send_private_msg')!.args, { user_id: 7, message: [{ type: 'image', data: { file: jpeg } }] });
+    assert.deepEqual(f.store.actions().find(action => action.kind === 'qq_main__send_private_msg')!.args, { user_id: 7, message: [{ type: 'image', data: { file: jpeg } }] });
   } finally { f.store.close(); }
 });
 
@@ -214,15 +214,15 @@ test('permissions use exact action names, hide denied tools and block detail que
   const f = fixture();
   f.brain.thought.lifeOnly = false;
   try {
-    f.cfg.snowluma.tools = { allow: '*', deny: ['fetch_ptt_text', 'send_group_msg', 'send_packet'] };
-    assert.ok(!f.tools.current().some(tool => tool.name === 'send_group_msg'));
-    assert.equal(allowedSnowLumaAction(findSnowLumaAction('fetch_ptt_text'), f.cfg.snowluma.tools), false);
-    assert.equal(allowedSnowLumaAction(findSnowLumaAction('send_packet'), f.cfg.snowluma.tools), false);
-    const load = f.tools.current().find(tool => tool.name === 'load_snowluma_tools')!;
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['fetch_ptt_text', 'send_group_msg', 'send_packet'] };
+    assert.ok(!f.tools.current().some(tool => tool.name === "qq_main__send_group_msg"));
+    assert.equal(allowedSnowLumaAction(findSnowLumaAction('fetch_ptt_text'), f.cfg.adapters[0]!.tools), false);
+    assert.equal(allowedSnowLumaAction(findSnowLumaAction('send_packet'), f.cfg.adapters[0]!.tools), false);
+    const load = f.tools.current().find(tool => tool.name === "qq_main__load_snowluma_tools")!;
     await assert.rejects(load.execute('load', { names: ['fetch_ptt_text'] }), /not enabled/);
-    f.cfg.snowluma.tools = { allow: [], deny: [] };
+    f.cfg.adapters[0]!.tools = { allow: [], deny: [] };
     assert.ok(!f.tools.current().some(tool => snowlumaCatalog.some(action => action.name === tool.name)));
-    event(f.store); f.faux.setResponses([answer(call('send_group_msg', { group_id: 100, message: 'Must not run' })), answer('Rest')]);
+    event(f.store); f.faux.setResponses([answer(call("qq_main__send_group_msg", { group_id: 100, message: 'Must not run' })), answer('Rest')]);
     await f.brain.run(f.store.claim(10)!); assert.equal(f.sent.length, 0);
   } finally { f.store.close(); }
 });
@@ -233,10 +233,10 @@ test('unknown writes remain deduplicated at the budget limit and read queries st
   f.cfg.limits.actionsPerHour = 1;
   try {
     event(f.store); f.faux.setResponses([
-      answer(call('send_group_msg', { group_id: 100, message: 'Hello' })),
-      answer(call('get_msg', { message_id: -42 })),
-      answer(call('send_group_msg', { message: 'Hello', group_id: 100 })),
-      answer(call('group_poke', { group_id: 100, user_id: 7 })), answer('Done'),
+      answer(call("qq_main__send_group_msg", { group_id: 100, message: 'Hello' })),
+      answer(call("qq_main__get_msg", { message_id: -42 })),
+      answer(call("qq_main__send_group_msg", { message: 'Hello', group_id: 100 })),
+      answer(call("qq_main__group_poke", { group_id: 100, user_id: 7 })), answer('Done'),
     ]);
     await f.brain.run(f.store.claim(10)!);
     assert.deepEqual(attempted, ['send_group_msg', 'get_msg']);
@@ -249,8 +249,8 @@ test('native failures retain SnowLuma error envelopes and definite failure outco
   const f = fixture({ execute: async () => { throw new SnowLumaApiError(response); } });
   try {
     event(f.store); f.faux.setResponses([
-      answer(call('group_poke', { group_id: 100, user_id: 7 })),
-      context => { assert.match(JSON.stringify(context), /Permission denied/); return answer(call('get_msg', { message_id: -42 })); }, answer('Done'),
+      answer(call("qq_main__group_poke", { group_id: 100, user_id: 7 })),
+      context => { assert.match(JSON.stringify(context), /Permission denied/); return answer(call("qq_main__get_msg", { message_id: -42 })); }, answer('Done'),
     ]);
     await f.brain.run(f.store.claim(10)!);
     assert.equal(f.store.actions()[0]?.status, 'failed'); assert.deepEqual(f.store.actions()[0]?.result, response);
@@ -268,7 +268,7 @@ test('QQ status rejection is a failure while uncertain status and message errors
     const f = fixture({ execute: async () => { throw error; } });
     f.brain.thought.lifeOnly = false;
     try {
-      const tool = f.tools.current().find(tool => tool.name === name)!;
+      const tool = f.tools.current().find(tool => tool.name === `qq_main__${name}`)!;
       await assert.rejects(tool.execute('call', args), failure => {
         const result = JSON.parse((failure as Error).message);
         assert.equal(result.outcome, outcome, `${name}: ${error.message}`);
@@ -285,12 +285,12 @@ test('large native results are retained with provenance and can be read in chunk
   const f = fixture({ execute: async () => raw });
   try {
     event(f.store); f.faux.setResponses([
-      answer(call('get_msg', { message_id: -42 })),
+      answer(call("qq_main__get_msg", { message_id: -42 })),
       context => {
         const result = context.messages.filter(item => item.role === 'toolResult').at(-1)!;
         assert.match(JSON.stringify(result), /Result truncated/);
         assert.ok(JSON.stringify(result).length < 14000);
-        const source = f.store.recent(10).find(item => item.kind === 'snowluma:get_msg')!;
+        const source = f.store.recent(10).find(item => item.kind === 'adapter:qq_main:get_msg')!;
         assert.deepEqual(source.payload.result, raw);
         return answer(call('read_event', { id: source.id, offset: 8000 }));
       },
@@ -314,15 +314,15 @@ test('configuration validates native permissions', () => {
   const raw = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
   writeFileSync(join(dir, raw.personaFile), readFileSync(new URL('../persona.example.md', import.meta.url)));
   try {
-    writeFileSync(path, JSON.stringify(raw)); assert.equal(loadConfig(path).snowluma.tools.allow, '*');
-    raw.snowluma.groups = []; writeFileSync(path, JSON.stringify(raw)); assert.deepEqual(loadConfig(path).snowluma.groups, []);
-    raw.snowluma.groups = [-1]; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => loadConfig(path), /group IDs for history recovery/);
-    raw.snowluma.groups = [];
-    raw.snowluma.tools.allow = ['made_up_action']; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => snowlumaToolsPlugin(loadConfig(path)), /Unknown|Invalid/);
-    raw.snowluma.tools.allow = []; raw.snowluma.tools.deny = ['ocr_image']; writeFileSync(path, JSON.stringify(raw)); assert.deepEqual(loadConfig(path).snowluma.tools.allow, []);
+    writeFileSync(path, JSON.stringify(raw)); assert.equal(loadConfig(path).adapters[0]!.tools.allow, '*');
+    raw.adapters[0]!.groups = []; writeFileSync(path, JSON.stringify(raw)); assert.deepEqual(loadConfig(path).adapters[0]!.groups, []);
+    raw.adapters[0]!.groups = [-1]; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => loadConfig(path), /positive QQ group IDs/);
+    raw.adapters[0]!.groups = [];
+    raw.adapters[0]!.tools.allow = ['made_up_action']; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => snowlumaToolsPlugin(loadConfig(path), loadConfig(path).adapters[0]!), /Unknown|Invalid/);
+    raw.adapters[0]!.tools.allow = []; raw.adapters[0]!.tools.deny = ['ocr_image']; writeFileSync(path, JSON.stringify(raw)); assert.deepEqual(loadConfig(path).adapters[0]!.tools.allow, []);
     const names = new Set(snowlumaCatalog.map(action => action.name));
     for (const name of unsupportedActions) {
-      raw.snowluma.tools.deny = [name]; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => snowlumaToolsPlugin(loadConfig(path)), /Unknown|Invalid/);
+      raw.adapters[0]!.tools.deny = [name]; writeFileSync(path, JSON.stringify(raw)); assert.throws(() => snowlumaToolsPlugin(loadConfig(path), loadConfig(path).adapters[0]!), /Unknown|Invalid/);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -359,3 +359,5 @@ test('usage budgets default to unlimited, support explicit caps, and reject inva
     raw.limits.outputReserveTokens = null; assert.throws(load, /outputReserveTokens/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+const snowlumaCatalog = getSnowLumaCatalog().actions;

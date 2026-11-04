@@ -51,7 +51,7 @@ test('fallback excludes accounting metadata and image bytes but includes tool sc
 });
 
 test('old tool results retain provenance and unknown status while the latest tool exchange stays intact', () => {
-  const firstCall = answer(call('get_msg', { message_id: 1 }, { id: 't1' }));
+  const firstCall = answer(call("qq_main__get_msg", { message_id: 1 }, { id: 't1' }));
   const firstResult: AgentMessage = { role: 'toolResult', toolCallId: 't1', toolName: 'get_msg', content: [{ type: 'text', text: 'long body '.repeat(2000) }, { type: 'text', text: 'sourceId=e:1 actionId=a:1 outcome=unknown' }], isError: true, timestamp: 1 };
   const lastCall = answer(call('read_event', { id: 'e:2' }, { id: 't2' }));
   const lastResult: AgentMessage = { ...firstResult, toolCallId: 't2', toolName: 'read_event', timestamp: 2 };

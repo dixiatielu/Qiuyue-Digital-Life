@@ -69,7 +69,7 @@ export function galleryPlugin(config: Config, store: Store, semantics?: Semantic
     tools: runtime => [
       runtime.jsonTool('search_drawings', 'Find your saved images by subject, style, colors, creation prompt, or origin. Search before recreating an old image someone asks for. With no query, browse recent works. Results contain permanent IDs and text, not pictures; use view_drawing to inspect a candidate. Preserve the original social context when deciding where to share it.', Type.Object({
         query: Type.Optional(Type.String({ maxLength: 500 })), from: Type.Optional(Type.String({ description: 'Inclusive ISO time with timezone' })), to: Type.Optional(Type.String({ description: 'Inclusive ISO time with timezone' })),
-        person: Type.Optional(Type.String({ description: 'QQ number involved in the creation' })), conversation: Type.Optional(Type.String({ description: 'group:<id> or private:<id> of the creation' })),
+        person: Type.Optional(Type.String({ description: 'Canonical person reference involved in the creation' })), conversation: Type.Optional(Type.String({ description: 'Canonical conversation reference of the creation' })),
         tags: Type.Optional(tags), favorite: Type.Optional(Type.Boolean()), includeArchived: Type.Optional(Type.Boolean()), needsDescription: Type.Optional(Type.Boolean()),
         limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })), offset: Type.Optional(Type.Integer({ minimum: 0 })),
       }), async (args, signal) => {
@@ -111,7 +111,7 @@ export function galleryPlugin(config: Config, store: Store, semantics?: Semantic
       throw new Error('Unknown gallery management command.');
     },
     start: async () => {
-      await library.migrate();
+      library.initialize(); library.recoverDeletions();
       unsubscribe = store.subscribe(notice => { if (notice.kind === 'environment' && notice.event.kind === 'drawing') recall?.index(); });
       recall?.index();
     },

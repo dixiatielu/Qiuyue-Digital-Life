@@ -1,6 +1,6 @@
 import { Type } from 'typebox';
 import type { SocialAdapter } from '../platform.js';
-import type { Config } from '../config.js';
+import type { AdapterConfig, Config } from '../config.js';
 import type { LifePlugin } from '../plugins.js';
 import { errorResult } from '../tool-runtime.js';
 import { allowedSnowLumaAction, findSnowLumaAction, snowlumaChat } from '../adapters/snowluma/catalog.js';
@@ -32,8 +32,8 @@ export async function ownFeed(social: SocialAdapter, tid: string, signal?: Abort
   return detail.feed as Feed;
 }
 
-export function qzoneSharePlugin(config: Config): LifePlugin {
-  const allowed = (name: string) => allowedSnowLumaAction(findSnowLumaAction(name), config.snowluma.tools);
+export function qzoneSharePlugin(config: Config, account: AdapterConfig): LifePlugin {
+  const allowed = (name: string) => allowedSnowLumaAction(findSnowLumaAction(name), account.tools);
   return {
     id: 'qzone-share',
     tools: runtime => [runtime.tool('share_qzone_feed', "Share a Qzone post into a private or group chat as the card QQ itself sends when sharing a post: Qzone signs the card, and the send returns a receipt. For a post listed in a Qzone result, such as a recommended (空友爱看) post from get_qzone_public_feeds or a post from get_qzone_home_feeds, pass its cell_common.feed_id as tid and the ID of that result as source. For one of your own posts, pass its tid alone. Specify exactly one of user_id or group_id. Qzone warns that anyone holding a shared card can open the post, even in a restricted space, and a recommended post's card carries its author's QQ number; share only what the post's original audience permits. A notice in the result is Qzone's warning for this post.", Type.Object({ tid: Type.String({ description: 'feed_id of the post; for your own post, its tid', minLength: 1, maxLength: 100 }), source: Type.Optional(Type.String({ description: 'Event ID of the result listing the post; omit for your own post', minLength: 1, maxLength: 100 })), user_id: Type.Optional(Type.Integer({ minimum: 1 })), group_id: Type.Optional(Type.Integer({ minimum: 1 })) }), async (args, signal) => {
@@ -63,6 +63,6 @@ export function qzoneSharePlugin(config: Config): LifePlugin {
     activities: [{ activity: 'Share a Qzone post with someone or a group', tools: ['share_qzone_feed'] }],
     experienceKinds: { share_qzone_feed: 'qzone_share' },
     chatActions: ['share_qzone_feed'],
-    chatTarget: (_tool, args) => snowlumaChat(args),
+    chatTarget: (_tool, args) => snowlumaChat(args, account.accountId),
   };
 }

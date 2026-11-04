@@ -1,7 +1,7 @@
 /** @type {import('qiuyue-digital-life/plugin-sdk').PluginDefinition} */
 export default {
   id: 'clock',
-  apiVersion: 1,
+  apiVersion: 2,
   name: '时钟',
   description: '读取指定时区的日期和时间。',
   version: '1.0.0',

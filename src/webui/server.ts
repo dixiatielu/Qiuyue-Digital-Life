@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, webuiSettings, type Config } from '../config.js';
 import { callControl, requestControl } from '../control.js';
 import { errorText } from '../domain.js';
-import { activePluginIds, pluginIds } from '../plugins/index.js';
+import { configuredPluginIds, pluginIds } from '../plugins/index.js';
 import { discoverPlugins } from '../plugin-loader.js';
 import type { PluginManager } from '../plugin-manager.js';
 import { systemInstructions } from '../prompts.js';
@@ -29,7 +29,7 @@ const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.j
 const cookie = 'qiuyue_webui';
 // These contain presentation only. Management modules and every API still require authentication.
 const loginAssets = new Set(['/app/style.css', '/app/favicon.svg', '/app/login.js', '/app/theme.js']);
-const credentialFields: [string, string][] = [['model', 'apiKeyEnv'], ['snowluma', 'tokenEnv'], ['web', 'searchKeyEnv'], ['embedding', 'apiKeyEnv'], ['drawing', 'apiKeyEnv'], ['webui', 'tokenEnv']];
+const credentialFields: [string, string][] = [['model', 'apiKeyEnv'], ['web', 'searchKeyEnv'], ['embedding', 'apiKeyEnv'], ['drawing', 'apiKeyEnv'], ['webui', 'tokenEnv']];
 
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 type Handler = (request: { url: URL; body: any; params: string[] }) => unknown | Promise<unknown>;
@@ -117,9 +117,9 @@ export class WebUi {
       let status: unknown = null;
       if (running) { try { status = await callControl(this.paths.socket, { args: ['status'] }); } catch { /* the live view says why */ } }
       return {
-        lang: config?.uiLanguage ?? (process.env.QIUYUE_UI_LANGUAGE?.toLowerCase() === 'zh' ? 'zh' : 'en'), configPath: this.files.configPath,
+        lang: config?.uiLanguage ?? 'en', configPath: this.files.configPath,
         config: { valid: Boolean(config), error },
-        daemon: { running, pid: running ? daemon.pid : undefined, startedAt, changed: changedSince(startedAt, { config: this.files.configPath, persona: (() => { try { return this.files.personaPath(raw); } catch { return undefined; } })(), prompt: this.files.promptPath(raw), env: this.files.envPath, credentials: this.files.credentials().paths.file }) },
+        daemon: { running, pid: running ? daemon.pid : undefined, startedAt, changed: changedSince(startedAt, { config: this.files.configPath, persona: (() => { try { return this.files.personaPath(raw); } catch { return undefined; } })(), prompt: this.files.promptPath(raw), credentials: this.files.credentials().paths.file }) },
         service: settings.service ? { unit: settings.service, ...await serviceState(settings.service) } : null,
         live: { connected: this.mirror.connected, message: this.mirror.message },
         status, busy: busyReasons(this.mirror, this.reader), activity: this.reader.activity(), counts: this.reader.counts(),
@@ -169,7 +169,7 @@ export class WebUi {
       const { raw, config } = this.current();
       const persona = typeof body.persona === 'string' ? body.persona : config?.persona ?? this.files.persona().text;
       const template = typeof body.template === 'string' ? body.template : config?.systemPrompt;
-      const text = systemInstructions({ persona, adapters: config?.adapters, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template });
+      const text = systemInstructions({ persona, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template });
       return { text, chars: text.length };
     });
 
@@ -180,7 +180,7 @@ export class WebUi {
       catch (error) { runtimeError = errorText(error); }
       const discovered = config ? discoverPlugins(config.extensions.directory) : [];
       const manifests = config ? inspectPluginManifests(config.extensions.directory) : { metadata: {}, errors: {} };
-      const builtins = config ? activePluginIds(config) : pluginIds;
+      const builtins = config ? configuredPluginIds(config) : pluginIds;
       return { ids: [...new Set([...builtins, ...discovered, ...running?.plugins.map(plugin => plugin.id) ?? []])], ...manifests, builtinIds: builtins, switches: raw.plugins ?? {}, inspected: config ? this.continuity(config) : null, error: error ?? null, running, runtimeError, directory: config?.extensions.directory };
     });
     this.on('POST', '/api/plugins/reload', ({ body }) => {
@@ -292,7 +292,7 @@ export class WebUi {
   async handle(request: IncomingMessage, response: ServerResponse, host: string) {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (!this.allowedHost(request, host)) return send(response, 421, 'Unknown host.', 'text/plain; charset=utf-8');
-    if (url.pathname === '/login') return this.login(request, url, response);
+    if (url.pathname === '/login') return this.login(request, response);
     if (request.method === 'GET' && loginAssets.has(url.pathname)) return this.asset(url.pathname, response);
     if (!this.authorized(request)) {
       if (url.pathname.startsWith('/api/')) return send(response, 401, JSON.stringify({ error: 'Sign in with the access token first.' }));
@@ -302,24 +302,22 @@ export class WebUi {
     if (request.method !== 'GET') return send(response, 405, 'Method not allowed.', 'text/plain; charset=utf-8');
     return this.asset(url.pathname, response);
   }
-  private async login(request: IncomingMessage, url: URL, response: ServerResponse) {
+  private async login(request: IncomingMessage, response: ServerResponse) {
     if (request.method !== 'GET' && request.method !== 'POST') return send(response, 405, 'Method not allowed.', 'text/plain; charset=utf-8');
-    let value = url.searchParams.get('token') ?? '';
-    if (request.method === 'POST') {
-      const origin = request.headers.origin;
-      if (origin && origin !== `http://${request.headers.host}` && origin !== `https://${request.headers.host}`) return send(response, 403, 'Cross-site requests are refused.', 'text/plain; charset=utf-8');
-      if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/x-www-form-urlencoded') return send(response, 415, 'Submit the login form.', 'text/plain; charset=utf-8');
-      const chunks: Buffer[] = []; let length = 0;
-      for await (const chunk of request) {
-        length += chunk.length;
-        if (length > 8192) { send(response, 413, 'The token is too long.', 'text/plain; charset=utf-8'); return; }
-        chunks.push(chunk);
-      }
-      value = new URLSearchParams(Buffer.concat(chunks).toString('utf8')).get('token') ?? '';
+    if (request.method === 'GET') return this.signInPage(response, false);
+    const origin = request.headers.origin;
+    if (origin && origin !== `http://${request.headers.host}` && origin !== `https://${request.headers.host}`) return send(response, 403, 'Cross-site requests are refused.', 'text/plain; charset=utf-8');
+    if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/x-www-form-urlencoded') return send(response, 415, 'Submit the login form.', 'text/plain; charset=utf-8');
+    const chunks: Buffer[] = []; let length = 0;
+    for await (const chunk of request) {
+      length += chunk.length;
+      if (length > 8192) { send(response, 413, 'The token is too long.', 'text/plain; charset=utf-8'); return; }
+      chunks.push(chunk);
     }
+    const value = new URLSearchParams(Buffer.concat(chunks).toString('utf8')).get('token') ?? '';
     const given = Buffer.from(value);
     const expected = Buffer.from(this.token);
-    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return this.signInPage(response, request.method === 'POST' || Boolean(value));
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return this.signInPage(response, true);
     send(response, 303, '', 'text/plain', { Location: '/', 'Set-Cookie': `${cookie}=${encodeURIComponent(this.token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` });
   }
   private signInPage(response: ServerResponse, failed: boolean) {
@@ -417,7 +415,7 @@ export async function runWebUi(configPath: string) {
   console.log(ui(`Management page: http://${address}:${settings.port}/`, `管理网页：http://${address}:${settings.port}/`));
   console.log(configured
     ? ui(`Sign in with the value of ${settings.tokenEnv}.`, `使用 ${settings.tokenEnv} 的值登录。`)
-    : ui(`${settings.tokenEnv} is not set; this start's token: http://${address}:${settings.port}/login?token=${token}`, `未设置 ${settings.tokenEnv}；本次启动的令牌：http://${address}:${settings.port}/login?token=${token}`));
+    : ui(`${settings.tokenEnv} is not set; this start's access token: ${token}`, `未设置 ${settings.tokenEnv}；本次启动的访问令牌：${token}`));
   const shutdown = () => { app.close(); server.closeAllConnections(); server.close(); };
   process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown);
 }

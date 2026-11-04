@@ -1,3 +1,4 @@
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, type Message } from '@earendil-works/pi-ai';
@@ -22,7 +23,7 @@ test('memories are embedded line by line, and messages without placeholders, men
 });
 
 test('what people say calls up the memory and line it is about, never development, their shared group alone, or her own messages', async () => {
-  const store = new Store(':memory:'); store.bindAccount(900);
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const song = remember(store, '日记', '晚上的小记：\n1. 练夜曲的副歌又破音了，有点烦\n2. 群友们一直在聊新番，聊得很热闹');
   const lunch = remember(store, '午饭', '地铁请大家吃小笼包，说下次还请', 'experience');
   const habit = remember(store, '习惯', '有人提到夜曲时我会多说两句', 'habit');
@@ -35,7 +36,7 @@ test('what people say calls up the memory and line it is about, never developmen
     assert.deepEqual(new Set(vectorRows(store).map(([id]) => id)), new Set([song.id, lunch.id, habit.id]));
     assert.ok(embedder.calls.flat().includes('日记：1. 练夜曲的副歌又破音了，有点烦'));
     const asked = event(store, '秋月姐姐，昨天那首夜曲练得怎么样了');
-    const mine = store.receive({ key: 'mine', kind: 'message', at: Date.now(), text: '小笼包真好吃', groupId: 100, actorId: 900, payload: {} })!;
+    const mine = store.receive(qqEvent({ key: 'mine', kind: 'message', at: Date.now(), text: '小笼包真好吃', groupId: 100, actorId: 900, payload: {} }, store))!;
     const chat = event(store, '今天随便聊聊');
     await recall.idle();
     assert.ok(embedder.calls.flat().includes('，昨天那首夜曲练得怎么样了'));
@@ -53,7 +54,7 @@ test('what people say calls up the memory and line it is about, never developmen
 });
 
 test('a correction replaces what is recalled, forgetting removes vectors, a restart reuses them, and another model starts over', async () => {
-  const store = new Store(':memory:'); store.bindAccount(900);
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const song = remember(store, '日记', '练夜曲的副歌又破音了，有点烦');
   const lunch = remember(store, '午饭', '地铁请大家吃小笼包，说下次还请');
   let recall = new SemanticRecall(embeddingConfig(), store, topics());
@@ -82,7 +83,7 @@ test('a correction replaces what is recalled, forgetting removes vectors, a rest
 });
 
 test('an unreachable endpoint leaves thoughts without recall and logs once, and a rejected memory does not hold up the rest', async () => {
-  const store = new Store(':memory:'); store.bindAccount(900);
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   let down = true;
   const embedder = topics('topics', texts => down ? new Error('connect ECONNREFUSED') : texts.some(text => text.includes('坏')) ? Object.assign(new Error('HTTP 400'), { status: 400 }) : undefined);
   const errors = () => store.logs(50).filter(log => log.kind === 'recall_error').map(log => log.data as { stage: string; memoryId?: string });
@@ -108,7 +109,7 @@ test('an unreachable endpoint leaves thoughts without recall and logs once, and 
 });
 
 test('a deliberate search finds memories by meaning and by exact words, earlier versions on request, and words alone when the endpoint is down', async () => {
-  const store = new Store(':memory:'); store.bindAccount(900);
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   let down = false;
   const embedder = topics('topics', () => down ? new Error('connect ECONNREFUSED') : undefined);
   const recall = new SemanticRecall(embeddingConfig(), store, embedder);
@@ -144,7 +145,7 @@ test('a deliberate search finds memories by meaning and by exact words, earlier 
 });
 
 test('the recall tool searches by meaning when embedding is on, and records what it found as sources', async () => {
-  const store = new Store(':memory:'); store.bindAccount(900);
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const song = remember(store, '日记', '练夜曲的副歌又破音了，有点烦');
   const recall = new SemanticRecall(embeddingConfig(), store, topics());
   const f = fixture(undefined, store, recall);
@@ -181,7 +182,7 @@ test('the embeddings client posts the model and texts and returns vectors in inp
 });
 
 test('a thought sees the memories its messages call up, with the matching line, instead of everything from the same group', async () => {
-  const store = new Store(':memory:'); store.bindAccount(900);
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const song = remember(store, '日记', '晚上的小记：\n1. 练夜曲的副歌又破音了，有点烦\n2. 群友们一直在聊新番');
   remember(store, '午饭', '地铁请大家吃小笼包，说下次还请');
   const recall = new SemanticRecall(embeddingConfig(), store, topics());

@@ -6,7 +6,6 @@ import { contextIdentity } from '../brain.js';
 import { EmbeddingClient, SemanticRecall } from '../recall.js';
 import { createPlugins, pluginCredentials } from '../plugins/index.js';
 import type { PluginHost } from '../plugins.js';
-import type { SocialAdapter } from '../platform.js';
 
 const offline = () => { throw new Error('Offline inspection takes no action.'); };
 
@@ -14,13 +13,12 @@ const offline = () => { throw new Error('Offline inspection takes no action.'); 
 export function inspectConfig(config: Config, credential: CredentialReader = environmentCredential) {
   const store = new Store(':memory:');
   try {
-    const social: SocialAdapter = { execute: async () => offline() };
     let plugins!: PluginHost;
     const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding, fetch, credential), () => plugins.knownEmojiNames()) : undefined;
-    plugins = createPlugins(config, store, social, recall, credential);
-    const tools = createTools(config, store, social, offline, recall, plugins);
+    plugins = createPlugins(config, store, recall, credential);
+    const tools = createTools(config, store, offline, recall, plugins);
     return {
-      identities: [contextIdentity(config, tools), contextIdentity(config, tools, true)],
+      identities: [contextIdentity(config, tools)],
       plugins: plugins.enabledIds(), tools: tools.current().map(tool => tool.name), credentials: pluginCredentials(config, credential),
     };
   } finally { store.close(); }

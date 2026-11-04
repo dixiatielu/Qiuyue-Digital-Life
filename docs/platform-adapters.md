@@ -13,7 +13,7 @@ These counts describe fixed source versions, not a promise that every future ups
 
 ## Configuration
 
-Existing configurations that omit `adapters` keep their unnamed SnowLuma tools and prompt. To opt into named adapters, add this array to the ordinary configuration (IDs below are examples):
+Every configuration declares `adapters`. Existing installations must run the offline migration below. A new configuration includes this array (IDs below are examples):
 
 ```json
 {
@@ -41,7 +41,7 @@ Existing configurations that omit `adapters` keep their unnamed SnowLuma tools a
 
 Replace `accountId` with each actual account ID, as a decimal string. The connection verifies it before dispatch. Put the Telegram bot token in the usual credential store under `TELEGRAM_BOT_TOKEN`. The native names become `qq_main__get_qzone_feeds` and `telegram_main__sendMessage`. Permissions use original operation names. `allow: "*"` includes destructive, administrative, paid, and connection-management APIs; use `deny` or an explicit allow list when appropriate. Tool availability also depends on platform-side account permissions.
 
-An explicit `adapters` array replaces the legacy SnowLuma connection. A Telegram-only configuration can omit `snowluma` and needs neither a SnowLuma service nor its catalog cache. `adapters: []` runs the core and ordinary plugins without built-in platform connections. `npm ci` installs the official `@snowluma/sdk` dependency for the built-in SnowLuma adapter; it does not install or start the SnowLuma server. Run `npm run sync:snowluma` when using that adapter to prepare its versioned catalog. See [dependency licenses](../THIRD_PARTY_NOTICES.md).
+The top-level `snowluma` key and unscoped QQ plugin switches are rejected. A Telegram-only configuration needs neither a SnowLuma service nor its catalog cache. `adapters: []` runs the core and ordinary plugins without built-in platform connections. `npm ci` installs the official `@snowluma/sdk` dependency for the built-in SnowLuma adapter; it does not install or start the SnowLuma server. Run `npm run sync:snowluma` when using that adapter to prepare its versioned catalog. See [dependency licenses](../THIRD_PARTY_NOTICES.md).
 
 Named connection plugins and user plugins registering adapters require a daemon restart when changed. This prevents two versions from polling the same account during a reload. Ordinary capability plugins still reload between thoughts. Their capability entries indicate when restart is required. For named SnowLuma, switches such as `qq-main-snowluma-tools` and `qq-main-qq-stickers` address the individual plugin; disabling the native connection plugin also stops that account's reception. The Telegram plugin ID is `adapter-telegram-main`.
 
@@ -71,7 +71,27 @@ Polling is serialized with model calls to `getUpdates`, `setWebhook`, `deleteWeb
 
 Platform identifiers are strings. Examples of canonical conversation references are `qq:1000000001:group:1000000004`, `telegram:1000000002:private:1000000003`, and `telegram:1000000002:thread:-100123%2F17`. Conversation identity includes the platform account and excludes the implementation name. Raw native payloads remain in the event; normalized source context supplies the actor, conversation, whether the event is addressed to the Agent, and whether it is the Agent's own echo.
 
-On first binding of a named QQ adapter to an existing database's QQ account, migration adds canonical context to the old records, maps conversation review marks and development scopes, and annotates action conversations in one transaction. Event IDs, memory IDs, source links, original payloads and action IDs remain intact. Repeating the migration is safe. Reusing an instance ID for another account is rejected. Keep the same database, account ID, and instance ID when changing an adapter implementation.
+Reusing an instance ID for another account is rejected. Keep the same database, account ID, and instance ID when changing an adapter implementation. Development scopes use `conversation:<canonical conversation ref>` and `person:<platform>:user:<id>`; `global` remains available for habits and practices.
+
+## Offline upgrade
+
+Stop the daemon and management page, including any service that would restart them, then run the new code:
+
+```sh
+npm run dev -- identities migrate --config config.json
+npm run build
+npm start -- validate --config config.json
+```
+
+The command accepts the previous database schema, including installations already using named adapters. An unnamed QQ connection becomes `qq_main`; its `selfId` becomes the string `accountId`, connection settings move into `adapters`, and its QQ plugin switches become `qq-main-<capability>`. It needs the original QQ account configuration to resolve old records. Ambiguous or conflicting account bindings fail without committing the database conversion.
+
+Before converting, it saves private configuration and SQLite backups next to their originals and prints both paths. SQLite backup includes committed WAL contents. The transaction converts event context, memory conversations/subjects/scopes, review marks, gallery provenance and action names/fingerprints, marks historical drawing events as self-originated, and removes obsolete local `saved` bookmark flags from reading caches while preserving notes, cursors and confirmed platform favorites; it removes old numeric identity columns and marks the database as format 2. IDs, source keys, tombstones, plans, source links and action outcomes are retained. Pending and unknown actions still prevent duplicate dispatch. Native API parameters and message payloads remain native. Historical prose and context records remain evidence rather than being text-rewritten.
+
+The old working context is retained as a historical `context_records` entry (subject to ordinary forgetting and retention) and replaced with a fresh one at the next thought; long-term memories and continuing state remain. Sticker vectors are derived data and are rebuilt separately for each account. Run the command again after an interrupted config replacement: a committed database is recognized, so conversion is not applied twice. A completed migration returns `migrated: false` on subsequent runs. Database failures roll back; a live daemon or an existing migration lock prevents conversion. After a process crash, confirm that no migration is running before removing a stale `<database>.identities.lock` file.
+
+Update user plugins and their `plugin.json` to SDK `apiVersion: 2`: replace `call.snowluma.query/action(name, args)` with `call.adapters.query/action(instance, name, args)`, and read canonical identity from `event.source` instead of numeric `groupId`/`actorId`. Rebuild packaged plugins with `npm run build:plugins`. If an operator-supplied system prompt names old tools or scopes, update those instructions too; the migration never rewrites user code or persona text. Restart the daemon and management page after validation.
+
+To roll back, stop all processes, retain the migrated files separately, and restore the printed configuration and database backups together with the previous code/plugin versions. Move aside the migrated database's `-wal` and `-shm` companions before restoring its backup. Do not restore only the configuration while leaving the migrated database in place.
 
 ## External adapters
 
@@ -97,6 +117,6 @@ ctx.adapter({
 });
 ```
 
-The adapter is trusted local code. Supply a complete catalog with explicit provenance and a version; do not flatten every platform into a shared `send_message` subset. Validate account identity, preserve native payloads, honor cancellation, and retain platform-specific capabilities. `ctx.adapter` registers contributions during setup; reception starts only at activation. Adapter instances need unique tool namespaces. Other plugins can call `call.adapters.query(instance, operation, args)` or `call.adapters.action(instance, operation, args)` under host permissions and action rules. The legacy `call.snowluma` remains available only with the unnamed connection.
+The adapter is trusted local code. Supply a complete catalog with explicit provenance and a version; do not flatten every platform into a shared `send_message` subset. Validate account identity, preserve native payloads, honor cancellation, and retain platform-specific capabilities. `ctx.adapter` registers contributions during setup; reception starts only at activation. Adapter instances need unique tool namespaces. Other plugins can call `call.adapters.query(instance, operation, args)` or `call.adapters.action(instance, operation, args)` under host permissions and action rules. `call.snowluma` is not part of SDK v2.
 
 To regenerate Telegram declarations, run `npm run sync:telegram` and review the complete diff. The package and generator are pinned in `package-lock.json`; the generator's `glob` dependency is overridden to a patched release; generation also copies the MIT notice. Unit and integration tests use local servers and fixtures, not real platform accounts.

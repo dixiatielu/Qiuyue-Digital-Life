@@ -1,3 +1,4 @@
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
@@ -27,7 +28,7 @@ const response = (result: unknown) => new Response(JSON.stringify({ ok: true, re
 function bind(store: Store, host: PluginHost) {
   const cfg = config(); cfg.adapters = [];
   const thought: ThoughtContext = { generation: store.settings().generation, sources: new Set(), triggers: new Set(), lifeOnly: false };
-  const runtime = new ToolRuntime(cfg, store, { execute: async () => { throw new Error('Wrong legacy dispatch'); } }, () => thought, host);
+  const runtime = new ToolRuntime(cfg, store, () => thought, host);
   const tools = host.bind(runtime)([]);
   const run = async (name: string, args: Record<string, unknown> = {}) => {
     const tool = tools.find(tool => tool.name === name); assert.ok(tool, name);
@@ -68,7 +69,7 @@ test('one host exposes every SnowLuma and Telegram operation and routes each acc
     return response(operation === 'getMe' ? { id: 900, username: 'example_bot' } : operation === 'getWebhookInfo' ? { url: '' } : { message_id: 56, chat: { id: -100123, type: 'channel' }, extra: { preserved: true } });
   });
   const cfg = config(); cfg.adapters = [tg({ id: 'qq_main', driver: 'snowluma', url: `ws://127.0.0.1:${(server.address() as any).port}` }), tg()];
-  const store = new Store(':memory:'); const host = createPlugins(cfg, store, { execute: async () => { throw new Error('legacy'); } }, undefined, () => '900:dummy_test_token');
+  const store = new Store(':memory:'); const host = createPlugins(cfg, store, undefined, () => '900:dummy_test_token');
   try {
     const h = bind(store, host); await host.start();
     for (const action of getSnowLumaCatalog().actions) assert.ok(h.tools.some(tool => tool.name === `qq_main__${action.name}`), action.name);
@@ -123,19 +124,19 @@ test('Telegram updates preserve raw payloads and string identities, persist offs
     assert.deepEqual(event.payload, update); assert.equal(event.source!.actor, 'telegram:user:4503599627370111'); assert.equal(event.source!.addressed, true);
     assert.equal(event.source!.conversation, 'telegram:900:thread:-100123%2F17');
     assert.equal(store.setting('adapter:telegram:900:offset'), 45);
-    assert.equal(store.reviewBacklog(0).find(chat => chat.conversation === event.source!.conversation)?.messages, 1);
-    assert.match(new ChatRecord(store, 0, event.source!.conversation!).page(0, 20).text, /Friend.*hello/);
+    assert.equal(store.reviewBacklog().find(chat => chat.conversation === event.source!.conversation)?.messages, 1);
+    assert.match(new ChatRecord(store, event.source!.conversation!).page(0, 20).text, /Friend.*hello/);
     await h.run('tg_main__getUpdates', { timeout: 0, offset: 44 });
     assert.equal(store.db.prepare("SELECT count(*) AS n FROM events WHERE kind='message'").get()!.n, 1, 'update replay deduplicates');
   } finally { await host.stop(); store.close(); }
 });
 
-test('QQ identity migration preserves event, memory, source and action IDs and separates another account', () => {
-  const store = new Store(':memory:'); store.bindAccount(900);
-  const event = store.receive({ key: 'old', kind: 'message', at: 123, groupId: 100, actorId: 7, text: 'legacy', payload: { message_id: 1, message: [{ type: 'text', data: { text: 'legacy' } }] } })!;
-  const memory = store.writeMemory({ kind: 'impression', scope: 'person:7', title: 'Friend', content: 'Likes music', importance: 5, sources: [event.id] }, false);
-  const action = store.beginAction('old-action', 'send_group_msg', { group_id: 100, message: 'hello' }, [event.id], [], null).action;
-  store.finishAction(action.id, 'success', { message_id: 2 }); store.setSetting('reviewMarks', { 'group:100': 100 });
+test('binding a canonical QQ account preserves records and separates another account', () => {
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+  const event = store.receive(qqEvent({ key: 'old', kind: 'message', at: 123, groupId: 100, actorId: 7, text: 'legacy', payload: { message_id: 1, message: [{ type: 'text', data: { text: 'legacy' } }] } }, store))!;
+  const memory = store.writeMemory({ kind: 'impression', scope: "person:qq:user:7", title: 'Friend', content: 'Likes music', importance: 5, sources: [event.id] }, false);
+  const action = store.beginAction('old-action', "qq_main__send_group_msg", { group_id: 100, message: 'hello' }, [event.id], [], null, "qq:900:group:100").action;
+  store.finishAction(action.id, 'success', { message_id: 2 }); store.setSetting('reviewMarks', { "qq:900:group:100": 100 });
   try {
     store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: '900' });
     assert.deepEqual(store.event(event.id)!.payload, event.payload);
@@ -155,7 +156,7 @@ test('third-party plugins register native catalogs through the public SDK and ob
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-native-plugin-')); const store = new Store(':memory:'); const cfg = config();
   cfg.extensions.directory = dir; cfg.extensions.dataDirectory = join(dir, 'data');
   const { mkdirSync } = await import('node:fs'); mkdirSync(join(dir, 'example'));
-  writeFileSync(join(dir, 'example', 'index.mjs'), `export default { id: 'example', apiVersion: 1, setup(ctx) {
+  writeFileSync(join(dir, 'example', 'index.mjs'), `export default { id: 'example', apiVersion: 2, setup(ctx) {
     ctx.adapter({ instance: 'discord_main', platform: 'discord', accountId: '18446744073709551615', version: 'fixture-1',
       actions: [{ name: 'sendMessage', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] }, readOnly: false }, { name: 'deleteMessage', inputSchema: { type: 'object' }, readOnly: false }], permissions: { allow: '*', deny: ['deleteMessage'] },
       execute: async (operation, args) => ({ operation, args }),
@@ -177,10 +178,10 @@ test('third-party plugins register native catalogs through the public SDK and ob
 test('Telegram-only config and core inspection do not require SnowLuma credentials or a catalog', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-telegram-config-'));
   const raw = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
-  raw.personaFile = 'persona.md'; delete raw.snowluma; raw.adapters = [tg()];
+  raw.personaFile = 'persona.md'; raw.adapters = [tg()];
   writeFileSync(join(dir, 'persona.md'), 'A continuing identity.'); writeFileSync(join(dir, 'config.json'), JSON.stringify(raw));
   try {
-    const cfg = loadConfig(join(dir, 'config.json')); assert.equal(cfg.snowluma.selfId, 0); assert.equal(cfg.adapters![0]!.accountId, '900');
+    const cfg = loadConfig(join(dir, 'config.json')); assert.ok(!('snowluma' in cfg)); assert.equal(cfg.adapters![0]!.accountId, '900');
     const run = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `import { loadConfig } from './src/config.ts'; import { inspectConfig } from './src/webui/inspect.ts'; console.log(inspectConfig(loadConfig(${JSON.stringify(join(dir, 'config.json'))}), () => undefined).tools.includes('tg_main__sendMessage'));`], { cwd: new URL('..', import.meta.url), env: { ...process.env, QIUYUE_SNOWLUMA_CATALOG: '/does-not-exist/catalog.json' }, encoding: 'utf8' });
     assert.equal(run.status, 0, run.stderr); assert.equal(run.stdout.trim(), 'true');
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -253,15 +254,15 @@ test('native media reaches image perception without exposing token URLs', async 
 test('messages on another platform recall the same memories and review finds canonical impressions', async () => {
   const { SemanticRecall } = await import('../src/recall.js');
   const store = new Store(':memory:'); const cfg = config(); cfg.adapters = [];
-  const original = store.receive({ key: 'original', kind: 'message', at: Date.now(), groupId: 100, actorId: 7, text: 'music', payload: {} })!;
+  const original = store.receive(qqEvent({ key: 'original', kind: 'message', at: Date.now(), groupId: 100, actorId: 7, text: 'music', payload: {} }, store))!;
   const memory = store.writeMemory({ kind: 'experience', title: 'Music', content: 'We talked about a song yesterday.', importance: 5, sources: [original.id] }, false);
   const recall = new SemanticRecall(cfg, store, { model: 'fixture', embed: async texts => texts.map(() => new Float32Array([1, 0])) });
   try {
     recall.start(); await recall.idle();
-    const message = store.receive({ key: 'telegram', kind: 'message', at: Date.now(), text: 'The same song again', payload: {}, source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: 'telegram:900:private:7', conversationType: 'private', actor: 'telegram:user:7', own: false, addressed: true, attention: 'normal' } })!;
+    const message = store.receive(qqEvent({ key: 'telegram', kind: 'message', at: Date.now(), text: 'The same song again', payload: {}, source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: 'telegram:900:private:7', conversationType: 'private', actor: 'telegram:user:7', own: false, addressed: true, attention: 'normal' } }, store))!;
     await recall.idle(); assert.equal(recall.recall([message])[0]!.memory.id, memory.id);
     store.writeMemory({ kind: 'impression', title: 'Friend', content: 'Enjoys the same song', importance: 5, scope: 'person:telegram:user:7', sources: [message.id] }, false);
-    assert.deepEqual(store.impressionsIn([{ conversation: message.source!.conversation!, since: 0 }], 0, 10), ['telegram:user:7']);
-    const own = store.receive({ ...message, key: 'own', source: { ...message.source!, own: true, actor: 'telegram:user:900' } })!; await recall.idle(); assert.equal(recall.queries([own]).length, 0);
+    assert.deepEqual(store.impressionsIn([{ conversation: message.source!.conversation!, since: 0 }], 10), ['telegram:user:7']);
+    const own = store.receive(qqEvent({ ...message, key: 'own', source: { ...message.source!, own: true, actor: 'telegram:user:900' } }, store))!; await recall.idle(); assert.equal(recall.queries([own]).length, 0);
   } finally { await recall.stop(); store.close(); }
 });

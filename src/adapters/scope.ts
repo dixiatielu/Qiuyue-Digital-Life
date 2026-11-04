@@ -4,7 +4,7 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { NativeActionDefinition } from '../platform.js';
 
 /** Scope a plugin without altering the native declarations its implementation works with. */
-export function scopePlugin(plugin: LifePlugin, instance: string, actions: readonly NativeActionDefinition[], adapter: SocialAdapter, conversation?: (legacy: string) => string): LifePlugin {
+export function scopePlugin(plugin: LifePlugin, instance: string, actions: readonly NativeActionDefinition[], adapter: SocialAdapter): LifePlugin {
   const names = new Map(actions.map(action => [nativeToolName(instance, action.name), action.name]));
   const qualify = (name: string) => { const qualified = nativeToolName(instance, name); names.set(qualified, name); return qualified; };
   const local = (name: string) => names.get(name);
@@ -33,7 +33,7 @@ export function scopePlugin(plugin: LifePlugin, instance: string, actions: reado
     activityInstructions: plugin.activityInstructions ? instructions(plugin.activityInstructions) : undefined,
     experienceKinds: plugin.experienceKinds ? Object.fromEntries(Object.entries(plugin.experienceKinds).map(([tool, kind]) => [qualify(tool), kind])) : undefined,
     endsThought: plugin.endsThought ? (tool, details) => { const raw = local(tool); return !!raw && plugin.endsThought!(raw, details); } : undefined,
-    chatTarget: plugin.chatTarget ? (tool, args) => { const raw = local(tool); const chat = raw ? plugin.chatTarget!(raw, args) : undefined; return chat && conversation ? conversation(chat) : chat; } : undefined,
+    chatTarget: plugin.chatTarget ? (tool, args) => { const raw = local(tool); const chat = raw ? plugin.chatTarget!(raw, args) : undefined; return chat; } : undefined,
     actionCaption: plugin.actionCaption ? action => { const raw = local(action.kind); return raw ? plugin.actionCaption!({ ...action, kind: raw }) : undefined; } : undefined,
     decorateTool: plugin.decorateTool ? (tool, runtime) => {
       const raw = local(tool.name); if (!raw) return tool;

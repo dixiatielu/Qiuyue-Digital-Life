@@ -1,3 +1,5 @@
+import { beginAction } from './helpers.js';
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Brain } from '../src/brain.js';
@@ -116,7 +118,7 @@ test('ambient events ride along with other events and never start or steer a tho
     steer: async observation => { steers.push(kinds(observation.events)); store.acknowledge(observation.batchId); return true; },
     consolidate: async () => {}, abort: () => {},
   };
-  const typing = () => store.receive({ key: crypto.randomUUID(), kind: 'notice:notify:input_status', at: Date.now(), actorId: 7, text: 'notify', payload: { status_text: 'typing' } })!;
+  const typing = () => store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'notice:notify:input_status', at: Date.now(), actorId: 7, text: 'notify', payload: { status_text: 'typing' } }, store))!;
   const runtime = new LifeRuntime(cfg, store, brain);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); };
   try {
@@ -124,7 +126,7 @@ test('ambient events ride along with other events and never start or steer a tho
     typing(); await step(cfg.limits.ambientDelayMs - 1); assert.deepEqual(runs, []);
     event(store, 'The message that was being typed'); await step(0);
     assert.deepEqual(runs, [['notice:notify:input_status', 'message']]);
-    store.receive({ key: crypto.randomUUID(), kind: 'notice:group_msg_emoji_like:add', at: Date.now(), groupId: 100, actorId: 8, text: 'group_msg_emoji_like', payload: {} });
+    store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'notice:group_msg_emoji_like:add', at: Date.now(), groupId: 100, actorId: 8, text: 'group_msg_emoji_like', payload: {} }, store));
     typing(); await step(0); assert.deepEqual(steers, []);
     event(store, 'Follow-up'); await step(0);
     assert.deepEqual(steers, [['notice:group_msg_emoji_like:add', 'notice:notify:input_status', 'message']]);
@@ -177,7 +179,7 @@ test('a quiet stretch, its length drawn afresh each time, offers free time when 
     store.schedule('Evening practice', 'life', Date.now() + 48 * 3_600_000);
     event(store, 'Hello'); runtime.start(); await flush(); assert.equal(runs.length, 1);
     // The first stretch drew 15 minutes; a reaction does not break it.
-    store.receive({ key: 'reaction', kind: 'notice:group_msg_emoji_like:add', at: Date.now(), groupId: 100, actorId: 8, text: 'group_msg_emoji_like', payload: {} });
+    store.receive(qqEvent({ key: 'reaction', kind: 'notice:group_msg_emoji_like:add', at: Date.now(), groupId: 100, actorId: 8, text: 'group_msg_emoji_like', payload: {} }, store));
     await step(14 * minute); assert.equal(offered(), 0);
     await step(minute); assert.equal(offered(), 1);
     assert.deepEqual(runs.at(-1), [{ wakeKind: 'life', freeTime: true }]);
@@ -226,7 +228,7 @@ test('rest marked on a planned wake holds free time back until that wake comes o
 test('a rest holds group chat not addressed to her until a thought starts, and its end brings only what waited since', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-01T14:30:00Z') });
   const cfg = config(); cfg.life.freeTime.enabled = false;
-  const store = new Store(':memory:', true); store.bindAccount(900);
+  const store = new Store(':memory:', true); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const runs: string[][] = []; const notes: Record<string, unknown>[] = [];
   const brain: Brain = {
     streaming: true, thought: thought(),
@@ -247,21 +249,21 @@ test('a rest holds group chat not addressed to her until a thought starts, and i
     await step(60_000);
     const night = Array.from({ length: 15 }, (_, index) => event(store, `Night ${index}`));
     event(store, 'Elsewhere', 200);
-    store.receive({ key: crypto.randomUUID(), kind: 'notice:group_msg_emoji_like:add', at: Date.now(), groupId: 100, actorId: 8, text: 'group_msg_emoji_like', payload: { user_id: 8 } });
-    store.receive({ key: crypto.randomUUID(), kind: 'notice:notify:input_status', at: Date.now(), actorId: 7, text: 'notify', payload: {} });
+    store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'notice:group_msg_emoji_like:add', at: Date.now(), groupId: 100, actorId: 8, text: 'group_msg_emoji_like', payload: { user_id: 8 } }, store));
+    store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'notice:notify:input_status', at: Date.now(), actorId: 7, text: 'notify', payload: {} }, store));
     await step(cfg.limits.ambientDelayMs); assert.deepEqual(runs, []);
-    store.receive({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), actorId: 7, text: 'Still up?', payload: { message_type: 'private', message: [{ type: 'text', data: { text: 'Still up?' } }] } });
+    store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), actorId: 7, text: 'Still up?', payload: { message_type: 'private', message: [{ type: 'text', data: { text: 'Still up?' } }] } }, store));
     await step(0); assert.deepEqual(runs, [['notice:notify:input_status', 'Still up?', 'rest_backlog']]);
     assert.deepEqual(notes, [{ since, until: Date.now(), chats: [
-      { conversation: 'group:100', from: since + 60_000, messages: 15, notices: 1 },
-      { conversation: 'group:200', from: since + 60_000, messages: 1, notices: 0 },
+      { conversation: "qq:900:group:100", from: since + 60_000, messages: 15, notices: 1 },
+      { conversation: "qq:900:group:200", from: since + 60_000, messages: 1, notices: 0 },
     ] }]);
     await step(1000);
     const later = event(store, 'After going back to sleep');
     await step(8 * hour); await step(0);
     assert.deepEqual(runs.slice(1), [['wake', 'rest_backlog']]);
     assert.deepEqual(notes[1], { since, until: Date.now(), chats: [
-      { conversation: 'group:100', from: later.at, messages: 1, notices: 0 },
+      { conversation: "qq:900:group:100", from: later.at, messages: 1, notices: 0 },
     ] });
     // What a rest held is perceived through the note, not observed event by event, so it brings no memory review closer.
     assert.equal(store.event(night[0]!.id)?.status, 'processed');
@@ -274,7 +276,7 @@ for (const trigger of ['mention', 'reply', 'private', 'poke', 'commitment'] as c
   test(`a ${trigger} during rest brings all held chats into the same thought`, async t => {
     t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-01T14:30:00Z') });
     const cfg = config(); cfg.life.freeTime.enabled = false; cfg.limits.batchSize = 1;
-    const store = new Store(':memory:', true); store.bindAccount(900);
+    const store = new Store(':memory:', true); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
     const runs: Parameters<Brain['run']>[0][] = [];
     const brain: Brain = {
       streaming: true, thought: thought(),
@@ -284,7 +286,7 @@ for (const trigger of ['mention', 'reply', 'private', 'poke', 'commitment'] as c
     const runtime = new LifeRuntime(cfg, store, brain);
     try {
       if (trigger === 'reply') {
-        const { action } = store.beginAction('earlier-reply', 'send_group_msg', { group_id: 100, message: 'Hi' }, []);
+        const { action } = beginAction(store, 'earlier-reply', "qq_main__send_group_msg", { group_id: 100, message: 'Hi' }, []);
         store.finishAction(action.id, 'success', { message_id: -42 });
       }
       store.schedule('Get up', 'life', Date.now() + 8 * 3_600_000, [], true);
@@ -293,20 +295,20 @@ for (const trigger of ['mention', 'reply', 'private', 'poke', 'commitment'] as c
       await runtime.tick(); await runtime.idle();
       assert.equal(runs.length, 0);
       t.mock.timers.tick(1000);
-      const waking = store.receive({ key: 'waking', at: Date.now(), actorId: 7, text: 'Wake up',
+      const waking = store.receive(qqEvent({ key: 'waking', at: Date.now(), actorId: 7, text: 'Wake up',
         kind: trigger === 'poke' ? 'notice:notify:poke' : trigger === 'commitment' ? 'wake' : 'message',
         ...(trigger === 'mention' || trigger === 'reply' || trigger === 'poke' ? { groupId: 100 } : {}),
         payload: trigger === 'mention' ? { message: [{ type: 'at', data: { qq: '900' } }] }
           : trigger === 'reply' ? { message: [{ type: 'reply', data: { id: '-42' } }] }
           : trigger === 'poke' ? { target_id: 900 }
           : trigger === 'commitment' ? { wakeKind: 'commitment' } : { message_type: 'private' },
-      })!;
+      }, store))!;
       await runtime.tick(); await runtime.idle();
       assert.equal(runs.length, 1);
       assert.ok(runs[0]!.events.some(item => item.id === waking.id));
       const backlog = runs[0]!.events.find(item => item.kind === 'rest_backlog');
       assert.ok(backlog, 'the waking thought must include the held chat record');
-      assert.deepEqual((backlog.payload.chats as { conversation: string }[]).map(chat => chat.conversation), ['group:100', 'group:200']);
+      assert.deepEqual((backlog.payload.chats as { conversation: string }[]).map(chat => chat.conversation), ["qq:900:group:100", "qq:900:group:200"]);
       assert.ok(held.every(item => store.event(item.id)?.status === 'processed'));
       assert.equal(store.pending(), 0);
       assert.equal(store.resting(), true);
@@ -317,7 +319,7 @@ for (const trigger of ['mention', 'reply', 'private', 'poke', 'commitment'] as c
 test('a failed waking thought keeps its backlog for retry, including after runtime restart', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-01T14:30:00Z') });
   const cfg = config(); cfg.life.freeTime.enabled = false; cfg.limits.batchSize = 1;
-  const store = new Store(':memory:', true); store.bindAccount(900);
+  const store = new Store(':memory:', true); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const runs: Parameters<Brain['run']>[0][] = [];
   const brain: Brain = {
     streaming: true, thought: thought(),
@@ -333,7 +335,7 @@ test('a failed waking thought keeps its backlog for retry, including after runti
     store.schedule('Get up', 'life', Date.now() + 8 * 3_600_000, [], true);
     runtime.start(); await flush();
     event(store, 'Waiting during sleep');
-    store.receive({ key: 'waking', kind: 'message', at: Date.now(), actorId: 7, text: 'Wake up', payload: { message_type: 'private' } });
+    store.receive(qqEvent({ key: 'waking', kind: 'message', at: Date.now(), actorId: 7, text: 'Wake up', payload: { message_type: 'private' } }, store));
     await runtime.tick(); await runtime.idle();
     const backlog = runs[0]!.events.find(item => item.kind === 'rest_backlog')!;
     assert.ok(backlog); assert.equal(store.event(backlog.id)?.status, 'pending');
@@ -362,7 +364,7 @@ test('a life wake waiting out a thought during rest does not steer held chat ear
     store.schedule('Get up', 'life', Date.now() + 8 * 3_600_000, [], true);
     store.schedule('Another planned activity', 'life', Date.now() + 1000);
     runtime.start(); await flush();
-    store.receive({ key: 'waking', kind: 'message', at: Date.now(), actorId: 7, text: 'Wake up', payload: { message_type: 'private' } });
+    store.receive(qqEvent({ key: 'waking', kind: 'message', at: Date.now(), actorId: 7, text: 'Wake up', payload: { message_type: 'private' } }, store));
     await runtime.tick(); await flush();
     const held = event(store, 'While the thought runs');
     t.mock.timers.tick(1000); await runtime.tick(); await flush();

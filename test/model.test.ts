@@ -7,7 +7,8 @@ import { fauxAssistantMessage as answer } from '@earendil-works/pi-ai';
 import { createModelBackend, resolveModel, type ModelConfig } from '../src/model.js';
 import { PiBrain } from '../src/brain.js';
 import { Store } from '../src/store.js';
-import { createTools } from '../src/tools.js';
+import { createTools } from './helpers.js';
+
 import { config, event, fixture } from './helpers.js';
 import { Credentials, credentialPaths } from '../src/credentials.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -98,7 +99,7 @@ test('custom gateway handles real Pi tool cycles and preserves the remote model 
       assert.equal(request.body.model, custom.id);
       assert.equal(request.body.max_tokens, 8192);
       assert.ok(request.body.tools.some((tool: any) => tool.function.name === 'set_activity'));
-      assert.ok(request.body.tools.some((tool: any) => tool.function.name === 'send_custom_face'));
+      assert.ok(request.body.tools.some((tool: any) => tool.function.name === "qq_main__send_custom_face"));
       assert.equal(request.body.tools.length, tools.current().length);
       assert.ok(request.body.tools.some((tool: any) => tool.function.name === 'search_drawings'));
       assert.deepEqual(request.body.tools, requests[0]!.body.tools);

@@ -1,3 +1,4 @@
+import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
@@ -7,14 +8,14 @@ import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import { SnowLumaWebSocketClient } from '@snowluma/sdk';
 import { Store, eventRef } from '../src/store.js';
-import { normalizeEvent, SnowLumaAdapter } from '../src/snowluma.js';
+import { normalizeEvent, SnowLumaAdapter } from '../src/adapters/snowluma/index.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
 import { publicAddress, publicFetch } from '../src/web.js';
 import { compactionSplit, estimatedContextTokens, messageTokens } from '../src/context.js';
 import { fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { config, deferred, event, fixture } from './helpers.js';
-import { snowlumaCatalog } from '../src/snowluma-catalog.js';
+import { getSnowLumaCatalog } from '../src/adapters/snowluma/catalog.js';
 import { SnowLumaActionError as SnowLumaApiError } from '../src/adapters/snowluma/index.js';
 const unsupportedActions = ['unsupported_test_action', '.compatibility_action'];
 import { LifeRuntime } from '../src/runtime.js';
@@ -23,7 +24,7 @@ test('SnowLuma adapter uses the official SDK, stores notices and history, and pa
   const cfg = config(); const store = new Store(':memory:');
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
   const addr = server.address(); assert.ok(typeof addr === 'object' && addr);
-  cfg.snowluma.url = `ws://127.0.0.1:${addr.port}`;
+  cfg.adapters[0]!.url = `ws://127.0.0.1:${addr.port}`;
   const requests: { action: string; params: Record<string, unknown> }[] = [];
   const received = deferred();
   server.on('connection', socket => {
@@ -41,8 +42,8 @@ test('SnowLuma adapter uses the official SDK, stores notices and history, and pa
       socket.send(JSON.stringify({ status: 'ok', retcode: 0, data: result, echo: request.echo }));
     });
   });
-  store.receive(normalizeEvent({ post_type: 'message', self_id: 900, group_id: 100, user_id: 7, time: 80, message_id: 10, message: 'Previously online' }, cfg.snowluma)!);
-  const adapter = new SnowLumaAdapter(cfg.snowluma, store, () => { if (store.pending() >= 8) received.resolve(); });
+  store.receive(qqEvent(normalizeEvent({ post_type: 'message', self_id: 900, group_id: 100, user_id: 7, time: 80, message_id: 10, message: 'Previously online' }, cfg.adapters[0]!)!, store));
+  const adapter = new SnowLumaAdapter(cfg.adapters[0]!, store, () => { if (store.pending() >= 8) received.resolve(); });
   try {
     assert.ok(adapter.client instanceof SnowLumaWebSocketClient);
     await adapter.connect();
@@ -72,7 +73,7 @@ test('every exposed action reaches the protocol unchanged, including multi-frame
   const cfg = config(); const store = new Store(':memory:');
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
   const addr = server.address(); assert.ok(typeof addr === 'object' && addr);
-  cfg.snowluma.url = `ws://127.0.0.1:${addr.port}`;
+  cfg.adapters[0]!.url = `ws://127.0.0.1:${addr.port}`;
   const requests: { action: string; params: Record<string, unknown> }[] = [];
   let streamFailure = false;
   server.on('connection', socket => socket.on('message', data => {
@@ -94,7 +95,7 @@ test('every exposed action reaches the protocol unchanged, including multi-frame
       if (action.name !== 'upload_file_stream') send({ type: 'response', native_action: action.name });
     } else socket.send(JSON.stringify({ status: 'ok', retcode: 0, data: { native_action: action.name }, echo: request.echo }));
   }));
-  const adapter = new SnowLumaAdapter(cfg.snowluma, store, () => {});
+  const adapter = new SnowLumaAdapter(cfg.adapters[0]!, store, () => {});
   try {
     await adapter.connect();
     for (const action of snowlumaCatalog) {
@@ -110,13 +111,13 @@ test('every exposed action reaches the protocol unchanged, including multi-frame
     const names = new Set(snowlumaCatalog.map(action => action.name));
     for (const name of unsupportedActions) await assert.rejects(adapter.execute(name, {}), /Unknown/);
     assert.equal(requests.length, beforeUnknown);
-    cfg.snowluma.tools.deny = ['fetch_ptt_text'];
+    cfg.adapters[0]!.tools.deny = ['fetch_ptt_text'];
     const beforeDenied = requests.length;
     await assert.rejects(adapter.execute('fetch_ptt_text', { message_id: -42 }), /not enabled/);
     assert.equal(requests.length, beforeDenied);
     streamFailure = true;
     await assert.rejects(adapter.execute('test_download_stream', {}), error => error instanceof SnowLumaApiError && error.retcode === 1403);
-    streamFailure = false; cfg.snowluma.maxStreamBytes = 1;
+    streamFailure = false; cfg.adapters[0]!.maxStreamBytes = 1;
     await assert.rejects(adapter.execute('test_download_stream', {}), /maxStreamBytes/);
     const beforeCancelled = requests.length;
     await assert.rejects(adapter.execute('send_group_msg', { group_id: 999, message: 'Not sent' }, AbortSignal.abort()), /abort/i);
@@ -128,54 +129,54 @@ test('every exposed action reaches the protocol unchanged, including multi-frame
 });
 
 test('normalization preserves rich messages from all groups while rejecting other accounts and non-events', () => {
-  const cfg = config().snowluma;
+  const cfg = config().adapters[0]!;
   const raw = { post_type: 'message', self_id: 900, group_id: 100, user_id: 7, time: 1, message_id: -3, message: '[CQ:reply,id=-2][CQ:at,qq=900]Take a look[CQ:image,url=https://example.com/a.png][CQ:record,file=a.amr]' };
   const normalized = normalizeEvent(raw, cfg)!;
   assert.equal(normalized.key, 'qq:900:group:100:message:-3'); assert.ok(normalized.text.includes('[@900]'));
   assert.deepEqual((normalized.payload.message as any[]).map(s => s.type), ['reply', 'at', 'text', 'image', 'record']);
-  assert.equal(normalizeEvent({ ...raw, group_id: 999 }, cfg)?.groupId, 999);
+  assert.equal(normalizeEvent({ ...raw, group_id: 999 }, cfg)?.source?.conversation, 'qq:900:group:999');
   assert.equal(normalizeEvent({ ...raw, self_id: 901 }, cfg), undefined);
   assert.equal(normalizeEvent({ self_id: 900, status: 'ok', retcode: 0, data: {} }, cfg), undefined);
   assert.equal(normalizeEvent({ ...raw, post_type: '' }, cfg), undefined);
 });
 
 test('the digital life\'s own pokes come back as ambient notices attributed to it', () => {
-  const cfg = config().snowluma; const store = new Store(':memory:'); store.bindAccount(900);
+  const cfg = config().adapters[0]!; const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const poke = (fields: Record<string, unknown>) => normalizeEvent({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', self_id: 900, time: 100, ...fields }, cfg)!;
   try {
     // In a private chat QQ names the other person as user_id and target_id; sender_id is who poked.
     const privateEcho = poke({ user_id: 7, target_id: 7, sender_id: 900 }); const groupEcho = poke({ group_id: 100, user_id: 900, target_id: 7 });
     const incoming = poke({ user_id: 7, target_id: 900, sender_id: 7 });
-    assert.deepEqual([privateEcho.actorId, groupEcho.actorId, incoming.actorId], [900, 900, 7]);
-    store.receive(privateEcho); store.receive(groupEcho);
+    assert.deepEqual([privateEcho.source?.actor, groupEcho.source?.actor, incoming.source?.actor], ['qq:user:900', 'qq:user:900', 'qq:user:7']);
+    store.receive(qqEvent(privateEcho, store)); store.receive(qqEvent(groupEcho, store));
     assert.equal(store.pendingTiming().first, undefined); assert.notEqual(store.pendingTiming().ambient, undefined);
-    store.receive(incoming); assert.notEqual(store.pendingTiming().first, undefined);
+    store.receive(qqEvent(incoming, store)); assert.notEqual(store.pendingTiming().first, undefined);
   } finally { store.close(); }
 });
 
 test('private message keys separate peers and groups, preserve direction, and deduplicate redelivery', () => {
-  const cfg = config().snowluma; const store = new Store(':memory:');
+  const cfg = config().adapters[0]!; const store = new Store(':memory:');
   const raw = { post_type: 'message', message_type: 'private', self_id: 900, user_id: 7, time: 1, message_id: -3, message: 'Private chat' };
   try {
     const first = normalizeEvent(raw, cfg)!;
-    assert.equal(first.groupId, undefined); assert.equal(first.actorId, 7);
+    assert.equal(first.source?.conversationType, 'private'); assert.equal(first.source?.actor, 'qq:user:7');
     assert.equal(first.key, 'qq:900:private:7:message:-3');
-    assert.ok(store.receive(first)); assert.equal(store.receive(normalizeEvent(raw, cfg)!), undefined);
-    assert.ok(store.receive(normalizeEvent({ ...raw, user_id: 8 }, cfg)!));
-    assert.ok(store.receive(normalizeEvent({ ...raw, message_type: 'group', group_id: 7 }, cfg)!));
+    assert.ok(store.receive(qqEvent(first, store))); assert.equal(store.receive(qqEvent(normalizeEvent(raw, cfg)!, store)), undefined);
+    assert.ok(store.receive(qqEvent(normalizeEvent({ ...raw, user_id: 8 }, cfg)!, store)));
+    assert.ok(store.receive(qqEvent(normalizeEvent({ ...raw, message_type: 'group', group_id: 7 }, cfg)!, store)));
     const sent = normalizeEvent({ ...raw, post_type: 'message_sent', message_id: -4 }, cfg)!;
     assert.equal(sent.payload.post_type, 'message_sent'); assert.equal(sent.payload.message_type, 'private');
-    assert.ok(store.receive(sent));
+    assert.ok(store.receive(qqEvent(sent, store)));
     assert.equal(store.pending(), 4);
   } finally { store.close(); }
 });
 
 test('Protocol pushes reach observation after pause while heartbeats remain stored outside model context', { timeout: 10000 }, async () => {
-  const f = fixture(); f.cfg.snowluma.groups = [];
+  const f = fixture(); f.cfg.adapters[0]!.groups = [];
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
   const addr = server.address(); assert.ok(typeof addr === 'object' && addr);
-  f.cfg.snowluma.url = `ws://127.0.0.1:${addr.port}`;
+  f.cfg.adapters[0]!.url = `ws://127.0.0.1:${addr.port}`;
   const actions: string[] = [];
   server.on('connection', socket => socket.on('message', data => {
     const request = JSON.parse(data.toString()); actions.push(request.action);
@@ -192,7 +193,7 @@ test('Protocol pushes reach observation after pause while heartbeats remain stor
     { post_type: 'future_push', custom: { content: 'Extended event' } },
   ].map((push, index) => ({ ...push, self_id: 900, time: 100 + index }));
   const received = deferred();
-  const adapter = new SnowLumaAdapter(f.cfg.snowluma, f.store, () => {
+  const adapter = new SnowLumaAdapter(f.cfg.adapters[0]!, f.store, () => {
     void runtime.tick();
     if (f.store.pending() === pushes.length) received.resolve();
   });
@@ -216,11 +217,11 @@ test('Protocol pushes reach observation after pause while heartbeats remain stor
       const content = user.content as { type: string; text: string }[];
       const observations = content[0]!.text;
       assert.equal(observations.match(/^(\d{4}-\d\d-\d\d )?\d\d:\d\d:\d\d #[0-9a-f]{8} /gm)?.length, pushes.length);
-      assert.match(observations, /^Private chat with 7:\n(.+\n)*.+ \[message_id 21\] 7: Private chat observation$/m);
+      assert.match(observations, /^Private chat with 7: \[qq:900:private:7\]\n(.+\n)*.+ \[message_id 21\] 7: Private chat observation$/m);
       assert.match(observations, / \[message_id 22\] me: Own output$/m);
-      assert.match(observations, /^Group 999:\n(.+\n)*.+ \[message_id 23\] 8: Observation from an unconfigured group$/m);
+      assert.match(observations, /^Group 999: \[qq:900:group:999\]\n(.+\n)*.+ \[message_id 23\] 8: Observation from an unconfigured group$/m);
       assert.match(observations, / 7 recalled their message #[0-9a-f]{8} \(7\)$/m);
-      assert.match(observations, / \[request:friend:\] 8 \{"user_id":8,"flag":"friend-flag","comment":"Add me as a friend"\}$/m);
+      assert.match(observations, / \[request:friend:\] qq:user:8 \{"user_id":8,"flag":"friend-flag","comment":"Add me as a friend"\}$/m);
       assert.doesNotMatch(observations, /heartbeat/);
       assert.match(observations, / \[meta_event:lifecycle:connect\]$/m);
       assert.match(observations, / \[future_push:\] \{"custom":\{"content":"Extended event"\}\}$/m);
@@ -229,7 +230,7 @@ test('Protocol pushes reach observation after pause while heartbeats remain stor
     runtime.control('resume'); await runtime.tick(); await runtime.idle();
     assert.equal(f.store.processedCount(), pushes.length); assert.equal(f.sent.length, 0);
     assert.equal(f.store.pending(), 0);
-    assert.ok(f.store.recent(20).some(e => e.kind === 'perception_gap' && !e.groupId));
+    assert.ok(f.store.recent(20).some(e => e.kind === 'perception_gap' && !e.source?.conversation));
     assert.ok(!f.store.logs().some(log => log.kind === 'thought_error'));
   } finally {
     await adapter.close(); await runtime.stop(); for (const client of server.clients) client.terminate();
@@ -285,3 +286,5 @@ test('public readers refuse local/private/reserved addresses and non-HTTP protoc
   assert.equal(publicAddress('8.8.8.8'), true); assert.equal(publicAddress('2606:4700:4700::1111'), true);
   for (const url of ['http://127.0.0.1/', 'http://[::1]/', 'file:///etc/passwd', 'https://user:secret@example.com/']) await assert.rejects(publicFetch(url, { maxBytes: 100, timeoutMs: 1000 }));
 });
+
+const snowlumaCatalog = getSnowLumaCatalog().actions;

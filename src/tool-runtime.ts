@@ -1,10 +1,10 @@
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { TSchema } from 'typebox';
 import type { Config } from './config.js';
-import { errorText, type Memory } from './domain.js';
+import type { Memory } from './domain.js';
 import { Store, type RevisionReach } from './store.js';
-import { definitelyFailed, nativeErrorResult, nativeToolName, type SocialAdapter } from './platform.js';
-import type { PluginHost } from './plugins.js';
+import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName } from './platform.js';
+import { PluginHost } from './plugins.js';
 
 /** A review hands revisions affecting unfinished matters back to the conversations (ADR-0012). */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
@@ -19,11 +19,13 @@ export const jsonResult = (result: unknown): AgentToolResult<any> => ({ content:
 
 /** Shared execution rules for built-in and plugin tools. Plugins never create their own action receipts. */
 export class ToolRuntime {
-  constructor(readonly config: Config, readonly store: Store, private social: SocialAdapter, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate'> & Partial<Pick<PluginHost, 'nativeDefinition' | 'nativeAllowed' | 'nativeExecute' | 'chatTarget'>> = { resolveMedia: value => value, decorate: tool => tool }, private namespace?: string) {}
-  scoped(instance: string) { return new ToolRuntime(this.config, this.store, this.social, this.context, this.extensions, instance); }
+  constructor(readonly config: Config, readonly store: Store, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate' | 'nativeDefinition' | 'nativeAllowed' | 'nativeExecute' | 'chatTarget'> = new PluginHost([]), private namespace?: string) {}
+  scoped(instance: string) { return new ToolRuntime(this.config, this.store, this.context, this.extensions, instance); }
   private name(name: string) { return this.namespace ? nativeToolName(this.namespace, name) : name; }
   private dispatch(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-    return this.extensions.nativeExecute?.(this.name(name), args, signal) ?? this.social.execute(this.name(name), args, signal);
+    const result = this.extensions.nativeExecute(this.name(name), args, signal);
+    if (!result) throw new ActionNotDispatchedError(`Unknown native interface: ${name}`);
+    return result;
   }
   resolveMedia(value: unknown): unknown { return this.extensions.resolveMedia(value); }
   decorate(tool: AgentTool): AgentTool {
@@ -31,9 +33,9 @@ export class ToolRuntime {
     return { ...decorated, name: tool.name };
   }
   check(signal?: AbortSignal) { ensureCurrent(this.store, this.context(), signal); }
-  allowed(name: string) { return this.extensions.nativeAllowed?.(this.name(name)) ?? this.social.allowed?.(this.name(name)) ?? false; }
+  allowed(name: string) { return this.extensions.nativeAllowed(this.name(name)); }
   definition(name: string) {
-    const definition = this.extensions.nativeDefinition?.(this.name(name)) ?? this.social.definition?.(this.name(name));
+    const definition = this.extensions.nativeDefinition(this.name(name));
     if (!definition) throw new Error(`Unknown native interface: ${name}`);
     return definition;
   }
@@ -46,9 +48,9 @@ export class ToolRuntime {
   jsonTool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<unknown> | unknown): AgentTool {
     return this.tool(name, description, parameters, async (args, signal) => jsonResult(await execute(args, signal)));
   }
-  record(kind: string, result: unknown) {
+  record(kind: string, result: unknown, origin?: 'self' | 'external') {
     this.check();
-    const event = this.store.receive({ key: `tool:${crypto.randomUUID()}`, kind, at: Date.now(), text: JSON.stringify(result), payload: { result } }, true)!;
+    const event = this.store.receive({ key: `tool:${crypto.randomUUID()}`, kind, at: Date.now(), text: JSON.stringify(result), payload: { result, ...(origin ? { origin } : {}) } }, true)!;
     this.context().sources.add(event.id);
     return { sourceId: event.id, result };
   }
@@ -80,7 +82,7 @@ export class ToolRuntime {
         const result = await perform(async (action, parameters) => {
           this.check(signal);
           if (!this.allowed(action)) throw new Error('The operator has not enabled this native interface.');
-          dispatched = this.extensions.nativeDefinition?.(this.name(action))?.name ?? this.social.definition?.(this.name(action))?.name ?? action;
+          dispatched = this.definition(action).name;
           return this.dispatch(action, parameters, signal);
         });
         this.store.finishAction(attempt.action.id, 'success', result, this.extensions.chatTarget?.(this.name(name), args));

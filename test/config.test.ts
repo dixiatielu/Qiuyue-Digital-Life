@@ -13,7 +13,8 @@ test('plugin overrides are optional and validate names and independent boolean s
     const path = join(dir, 'config.json');
     const load = (plugins?: unknown) => { writeFileSync(path, JSON.stringify({ ...base, plugins })); return loadConfig(path); };
     assert.deepEqual(load().plugins, {});
-    assert.deepEqual(load({ 'web-search': false, 'web-reader': true, 'qzone-share': false, drawing: false, 'qq-stickers': false, 'qq-faces': false, 'snowluma-tools': false }).plugins, { 'web-search': false, 'web-reader': true, 'qzone-share': false, drawing: false, 'qq-stickers': false, 'qq-faces': false, 'snowluma-tools': false });
+    assert.throws(() => load({ 'snowluma-tools': false }), /identities migrate/);
+    assert.deepEqual(load({ 'web-search': false, 'web-reader': true, 'qq-main-qzone-share': false, drawing: false, 'qq-main-qq-stickers': false, 'qq-main-qq-faces': false, 'qq-main-snowluma-tools': false }).plugins, { 'web-search': false, 'web-reader': true, 'qq-main-qzone-share': false, drawing: false, 'qq-main-qq-stickers': false, 'qq-main-qq-faces': false, 'qq-main-snowluma-tools': false });
     for (const plugins of [null, [], 'drawing', false]) assert.throws(() => load(plugins), /plugins must be an object/);
     assert.equal(load({ 'my-weather': true }).plugins['my-weather'], true, 'user plugin IDs need no source registration');
     assert.throws(() => load({ '../weather': true }), /Invalid plugin ID/);

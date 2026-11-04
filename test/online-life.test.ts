@@ -12,7 +12,7 @@ import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-
 import { bilibiliReference } from '../packages/bilibili/index.js';
 import { xiaohongshuReference } from '../packages/xiaohongshu/index.js';
 import { PlatformNetwork, ReadingHistory, networkDefaults } from '../packages/online-reading/index.js';
-import { createPlugins } from '../src/plugins/index.js';
+import { createPlugins } from './helpers.js';
 import { ToolRuntime, type ThoughtContext } from '../src/tool-runtime.js';
 import { PluginHost } from '../src/plugins.js';
 import { Store } from '../src/store.js';
@@ -89,7 +89,7 @@ async function harness(t: TestContext, platform: 'bilibili' | 'xiaohongshu', fet
   cfg.extensions.settings[platform] = settings;
   const thought: ThoughtContext = { generation: store.settings().generation, sources: new Set(), triggers: new Set(), lifeOnly: false };
   const host = new PluginHost([await loadedPlugin(t, platform, cfg, store, fetcher, credential)]);
-  const tools = host.bind(new ToolRuntime(cfg, store, { execute: async () => ({}) }, () => thought))([]);
+  const tools = host.bind(new ToolRuntime(cfg, store, () => thought))([]);
   const raw = (name: string, args: Record<string, unknown> = {}, signal?: AbortSignal) => tools.find(tool => tool.name === name)!.execute('test', args, signal);
   const run = async (name: string, args: Record<string, unknown> = {}, signal?: AbortSignal) => {
     const result = await raw(name, args, signal);
@@ -345,7 +345,7 @@ test('Xiaohongshu native favorite and unfavorite use account actions; lost recei
     const lost = await h.run('xhs_keep', { id: note, saved: false });
     assert.equal(lost.action.outcome.status, 'unknown'); assert.equal(lost.localUpdated, false); assert.equal(transport.state.favorite, false);
     const history = (await h.run('xhs_history')).items[0];
-    assert.equal(history.saved, true); assert.equal(history.platformFavorite.saved, true);
+    assert.equal('saved' in history, false); assert.equal(history.platformFavorite.saved, true);
     await h.run('xhs_keep', { id: note, saved: false });
     assert.equal(transport.requests.filter(r => r.url.pathname.endsWith('/favorite')).length, 2, 'unknown dispatch is not replayed');
     assert.ok(!JSON.stringify(h.store.actions()).includes('private-token'));

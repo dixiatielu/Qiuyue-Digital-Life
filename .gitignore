@@ -2,7 +2,6 @@ node_modules/
 dist/
 .env
 .env.*
-!.env.example
 config.json
 persona.md
 system-prompt.md
@@ -15,3 +14,8 @@ coverage/
 credentials.json
 credentials.json.*.tmp
 /output/
+
+# Offline identity migration backups and temporary locks may contain private configuration.
+*.before-identities-*
+*.identities-*.tmp
+*.identities.lock
