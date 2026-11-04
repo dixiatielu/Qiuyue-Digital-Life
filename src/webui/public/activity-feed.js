@@ -39,7 +39,7 @@ function FeedEntry({ view, onPreview }) {
   if (message) return html`<li class=${`feed-entry feed-chat ${outgoing ? 'outgoing' : 'incoming'}`}>
     <div class="feed-avatar" aria-hidden="true">${outgoing ? html`<${Icon} name="moon" />` : [...view.title][0]}</div>
     <article class="feed-chat-body" aria-label=${`${view.title} · ${time(item.at)}`}>
-      <header class="feed-message-head"><strong>${view.title}</strong>${view.source ? html`<span class="feed-source">${view.source}</span>` : null}${timestamp}</header>
+      <header class="feed-message-head"><strong>${view.title}</strong>${view.source ? html`<span class="feed-source">${view.source}</span>` : null}${timestamp}${view.state ? html`<${Badge} kind=${view.tone}>${outcomeLabel(view.state)}<//>` : null}</header>
       <div class=${`feed-bubble ${view.tone === 'bad' || view.tone === 'warn' ? view.tone : ''}`}>
         <div class=${long && !expanded ? 'feed-folded' : ''}><${MessageContent} parts=${message.parts} onPreview=${onPreview} /></div>
         ${long ? html`<button class="feed-more" aria-expanded=${expanded} onClick=${() => setExpanded(!expanded)}>${expanded ? t('Show less', '收起') : t('Read the full message', '展开整条消息')}</button>` : null}

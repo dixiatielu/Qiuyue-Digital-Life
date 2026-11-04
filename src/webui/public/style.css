@@ -358,7 +358,7 @@ button.feed-more { background:none; border:0; padding:8px 0 0; color:var(--accen
 .feed-event-head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
 .feed-event-head strong { font-size:13px; font-weight:550; overflow-wrap:anywhere; }
 .feed-event-head time { margin-left:auto; }
-.feed-event-head .badge { font-size:10px; padding:1px 6px; }
+.feed-message-head .badge,.feed-event-head .badge { font-size:10px; padding:1px 6px; }
 .feed-event-source { margin-top:5px; font-size:11px; color:var(--muted); }
 .feed-prose { font-size:12px; color:var(--muted); line-height:1.8; white-space:pre-wrap; margin:8px 0 0; }
 .feed-facts { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 0; }
