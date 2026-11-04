@@ -6,7 +6,7 @@ One Agent owns the persona, memory, pursuits, and action ledger. A platform adap
 
 | Driver | Coverage | Transport | Catalog provenance |
 | --- | --- | --- | --- |
-| `snowluma` | 212 canonical operations at the pinned revision; existing compatibility filtering retained | Official `@snowluma/sdk` 2.3.4 WebSocket client, including streaming frames | User-local catalog from SnowLuma commit `e9faec0e28298c6837ecd41d6132900c7bf08343`; restricted upstream license |
+| `snowluma` | 212 canonical operations at the pinned revision; existing compatibility filtering retained | Official `@snowluma/sdk` 2.4.0 WebSocket client, including streaming frames | User-local catalog from SnowLuma commit `e44e4ced17c5911b9aa9db449ba29f2d9e567d2a`; restricted upstream license |
 | `telegram` | All 187 `ApiMethods` members, including aliases, in `@grammyjs/types` 5.0.0 | Telegram Bot API HTTP, multipart uploads, optional long polling | Generated from MIT-licensed declarations; license included beside the catalog |
 
 These counts describe fixed source versions, not a promise that every future upstream API is already supported. NapCat and Discord can use the same plugin contract; this change does not include their production adapters. The SnowLuma adapter uses its own native catalog; it does not claim complete NapCat coverage.

@@ -3,7 +3,7 @@ import { SNOWLUMA_ACTIONS } from '@snowluma/sdk';
 
 // Keep restricted upstream material in the ignored local cache, under its own license.
 // Pin the source so catalog changes can be checked together with SDK upgrades.
-const commit = process.argv[2] ?? 'e9faec0e28298c6837ecd41d6132900c7bf08343';
+const commit = process.argv[2] ?? 'e44e4ced17c5911b9aa9db449ba29f2d9e567d2a';
 if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Provide the full SnowLuma Git commit SHA.');
 const base = `https://raw.githubusercontent.com/SnowLuma/SnowLuma/${commit}/`;
 async function fetchSource(path) {
