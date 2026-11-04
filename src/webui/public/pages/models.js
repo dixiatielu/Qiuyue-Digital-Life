@@ -5,8 +5,11 @@ const thinking = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const sameEndpoint = (profile, section) => section?.baseUrl && profile.apiKeyEnv === section.apiKeyEnv && (!section.api || profile.api === section.api) && new URL(profile.baseUrl).href.replace(/\/+$/, '') === new URL(section.baseUrl).href.replace(/\/+$/, '');
 const safeSame = (profile, section) => { try { return sameEndpoint(profile, section); } catch { return false; } };
 
-function ModelList({ models, id }) {
-  return html`<datalist id=${id}>${(models ?? []).map(model => html`<option value=${model} />`)}</datalist>`;
+function ModelList({ models, id, value }) {
+  // Keep candidates in sync with the input instead of relying on native popup filtering.
+  const query = (value ?? '').trim().toLowerCase();
+  const matches = (models ?? []).filter(model => model.toLowerCase().includes(query));
+  return html`<datalist id=${id}>${matches.map(model => html`<option key=${model} value=${model} />`)}</datalist>`;
 }
 async function listModels(profile, set) {
   try { const { models } = await api('/api/providers/models', { method: 'POST', body: { provider: profile } }); set(models); toast(t(`${models.length} models`, `${models.length} 个模型`), 'ok'); }
@@ -133,7 +136,7 @@ function ModelEditor({ form, profiles, path = 'model', title = t('Primary thinki
           <option value="">—</option>${(providers.data?.providers ?? []).map(id => html`<option value=${id}>${id}</option>`)}</select></div>`}
       ${custom ? html`<div class="field"><div class="field-label"><label>${t('Model ID', '模型 ID')}</label></div>
           <div class="row"><input list=${listId} value=${model.id ?? ''} onInput=${event => setModel({ ...model, id: event.currentTarget.value })} spellcheck="false" />
-          <button class="ghost tiny" onClick=${() => listModels({ id: path, name: model.provider || 'model', api: model.api, baseUrl: model.baseUrl, apiKeyEnv: model.apiKeyEnv }, setModels)}>${t('List', '获取列表')}</button></div><${ModelList} id=${listId} models=${models} /></div>`
+          <button class="ghost tiny" onClick=${() => listModels({ id: path, name: model.provider || 'model', api: model.api, baseUrl: model.baseUrl, apiKeyEnv: model.apiKeyEnv }, setModels)}>${t('List', '获取列表')}</button></div><${ModelList} id=${listId} models=${models} value=${model.id} /></div>`
         : html`<div class="field"><div class="field-label"><label>${t('Model', '模型')}</label></div><select value=${model.id ?? ''} onChange=${event => setModel({ ...model, id: event.currentTarget.value })}>
           <option value="">—</option>${(catalog.data?.models ?? []).map(item => html`<option value=${item.id} disabled=${!item.input.includes('image')}>${item.id}${item.input.includes('image') ? '' : t(' (no images)', '（不支持图片）')}${item.reasoning ? ' · reasoning' : ''}</option>`)}</select></div>`}
       ${custom ? html`
@@ -169,7 +172,7 @@ function Endpoint({ form, profiles, section, title, help, fields, testable }) {
     <div class="fields">
       <${ConfigField} form=${form} path=${`${section}.enabled`} type="bool" label=${t('On', '启用')} />
       <${ConfigField} form=${form} path=${`${section}.baseUrl`} label=${t('Base URL', '接口地址')} />
-      <div class="field"><div class="field-label"><label>${t('Model', '模型')}</label></div><input list=${`${section}-models`} value=${form.get(`${section}.model`) ?? ''} placeholder=${form.effective[section]?.model ?? ''} onInput=${event => form.set(`${section}.model`, event.currentTarget.value || undefined)} spellcheck="false" /><${ModelList} id=${`${section}-models`} models=${models} /></div>
+      <div class="field"><div class="field-label"><label>${t('Model', '模型')}</label></div><input list=${`${section}-models`} value=${form.get(`${section}.model`) ?? ''} placeholder=${form.effective[section]?.model ?? ''} onInput=${event => form.set(`${section}.model`, event.currentTarget.value || undefined)} spellcheck="false" /><${ModelList} id=${`${section}-models`} models=${models} value=${form.get(`${section}.model`)} /></div>
       <${ConfigField} form=${form} path=${`${section}.apiKeyEnv`} label=${t('Credential name', '凭据名称')} />
       ${fields.map(field => html`<${ConfigField} form=${form} ...${{ ...field, path: `${section}.${field.path}` }} />`)}
     </div>
