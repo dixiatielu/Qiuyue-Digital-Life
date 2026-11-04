@@ -16,6 +16,10 @@ Single-context layout: root `GLOSSARY.md` and `docs/adr/`. Read `docs/agents/dom
 
 Write all documentation under `docs/research/` in English.
 
+## Completing changes
+
+After completing a feature or bug fix and passing the relevant checks, create a focused local Git commit without waiting for a separate user request. Stage only changes belonging to the task, and report the commit ID and validation results in the final response.
+
 ## Code Review Rules
 
 For Issue triage and PR review, read `CONTRIBUTING.md` and the relevant ADRs. Report actionable problems with evidence, their impact, and the affected file and line when applicable.
