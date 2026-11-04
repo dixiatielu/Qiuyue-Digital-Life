@@ -162,6 +162,10 @@ QQ 原生工具、图像生成（`imagen`）、网页搜索、网页阅读、空
 
 领域术语和设计决定见[术语表](GLOSSARY.md)与[架构决策记录](docs/adr/)。
 
+## 参与贡献
+
+提交 Issue 或 PR 前，请阅读[贡献指南](CONTRIBUTING.md)，了解问题描述、本地验证和审核规则。欢迎使用中文或英文参与。
+
 ## 许可证
 
 本项目原创代码采用 [MIT](LICENSE) 许可。SnowLuma SDK 和本地准备的接口目录保留各自的[上游许可](THIRD_PARTY_NOTICES.md)。

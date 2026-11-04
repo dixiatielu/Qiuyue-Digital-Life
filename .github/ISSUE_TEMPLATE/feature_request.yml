@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a use case, behavior change, and acceptance criteria.
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You may write this request in English or Chinese. Search existing issues first.
+        Discuss substantial features or architecture changes here before implementing them.
+        Use synthetic or sanitized examples and keep credentials and private chat content out of this public request.
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Problem or use case
+      description: Describe the situation and the limitation you want to address.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_behavior
+    attributes:
+      label: Proposed behavior
+      description: Explain what should change and how someone would use it.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: List observable outcomes that would show this request has been addressed.
+      placeholder: |
+        - When ..., the system should ...
+        - Existing ... behavior should continue to work.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility and design considerations
+      description: Describe any known effects on configuration, stored data, adapters, or plugins. Cite relevant ADRs if the proposal changes an existing decision. Leave blank if unknown.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional workarounds or other approaches you considered.

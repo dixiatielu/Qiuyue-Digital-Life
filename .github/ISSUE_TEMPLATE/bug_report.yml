@@ -1,0 +1,60 @@
+name: Bug report
+description: Report unexpected behavior with a reproducible example.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You may write this report in English or Chinese. Search existing issues first.
+        Use synthetic or sanitized examples. Keep credentials, private chat records, personal information, configuration files, and runtime databases out of this public report.
+        For exploitable vulnerabilities, use private vulnerability reporting if enabled, or ask the maintainer for a private contact channel before sharing details.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Which project version or commit exhibits the problem?
+      placeholder: Version number or git commit hash
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your operating system, Node.js version, and relevant adapter or plugin names and versions.
+      placeholder: |
+        Operating system:
+        Node.js version:
+        Adapters and plugins:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest example that demonstrates the problem, using sanitized inputs.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include the error message or a sanitized screenshot if useful.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Optional relevant log excerpts. Remove secrets and private data before pasting.
+      render: text

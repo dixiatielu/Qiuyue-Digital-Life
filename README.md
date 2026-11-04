@@ -162,6 +162,10 @@ Omitted switches preserve existing behavior. The `drawing` plugin also requires 
 
 For the domain vocabulary and design decisions, see the [glossary](GLOSSARY.md) and [architecture decision records](docs/adr/).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for Issue and PR guidelines, local checks, and review expectations. Contributions are welcome in Chinese or English.
+
 ## License
 
 [MIT](LICENSE) for this project's original code. The SnowLuma SDK and locally prepared API catalog retain their [upstream licenses](THIRD_PARTY_NOTICES.md).
