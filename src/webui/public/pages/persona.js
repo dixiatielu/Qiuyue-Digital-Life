@@ -6,7 +6,7 @@ export function History({ kind, current, onLoad, saved }) {
   const list = useAsync(() => api(`/api/history/${kind}`), [kind, saved]);
   const [open, setOpen] = useState(null);
   const view = async item => { try { setOpen({ ...item, text: (await api(`/api/history/${kind}/${item.id}`)).text }); } catch (error) { failed(error); } };
-  return html`<${Card} title=${t('Versions', '历史版本')} actions=${html`<button class="ghost tiny" aria-label=${t('Refresh versions', '刷新历史版本')} onClick=${list.reload}>↻</button>`}>
+  return html`<${Card} title=${t('Versions', '历史版本')} actions=${html`<button class="ghost tiny" aria-label=${t('Refresh versions', '刷新历史版本')} title=${t('Refresh versions', '刷新历史版本')} onClick=${list.reload}>${t('Refresh', '刷新')}</button>`}>
     ${list.data?.length ? html`<ul class="versions">${list.data.map((item, index) => html`<li><button class="link" onClick=${() => view(item)}>${time(item.at)}</button>${index === 0 ? html` <${Badge}>${t('latest', '最新')}<//>` : null}<span class="muted small"> ${item.size} B</span></li>`)}</ul>`
       : html`<p class="muted small">${t('Each save keeps the version before and after it.', '每次保存都会保留修改前后的版本。')}</p>`}
     ${open ? html`<${Modal} wide title=${`${t('Version', '版本')} ${time(open.at)}`} onClose=${() => setOpen(null)}
