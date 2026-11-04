@@ -25,7 +25,8 @@ const video = 'BV1xx411c7mD', note = '64f1a2b3c4d5e6f7a8b9c0d1';
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 function fastClock(t: TestContext) { let now = Date.now(); t.mock.method(Date, 'now', () => now += 2000); return (ms: number) => { now += ms; }; }
 function biliTransport(options: { noSubtitles?: boolean; subtitleFailure?: boolean; commentFailure?: boolean; externalSubtitle?: boolean } = {}) {
-  const state = { loggedIn: true, favorite: false, loseFavoriteResponse: false, failFavoriteConfirmation: false, defaultFolder: true };
+  const state = { loggedIn: true, favorite: false, loseFavoriteResponse: false, failFavoriteConfirmation: false, defaultFolder: true,
+    liked: false, loseLikeResponse: false, failLikeConfirmation: false, invalidLikeState: false, likeCode: 0 };
   const requests: { url: URL; init?: RequestInit }[] = [];
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input)); requests.push({ url, init });
@@ -40,6 +41,13 @@ function biliTransport(options: { noSubtitles?: boolean; subtitleFailure?: boole
         if (!state.failFavoriteConfirmation) state.favorite = Boolean(form.get('add_media_ids'));
         if (state.loseFavoriteResponse) throw new Error('Disconnected after changing remote state');
         return json({ code: 0, data: { prompt: false } });
+      }
+      case '/x/web-interface/archive/relation': return json({ code: 0, data: { like: state.invalidLikeState ? 0 : state.liked } });
+      case '/x/web-interface/archive/like': {
+        if (state.likeCode !== 0) return json({ code: state.likeCode });
+        if (!state.failLikeConfirmation) state.liked = new URLSearchParams(String(init?.body)).get('like') === '1';
+        if (state.loseLikeResponse) throw new Error('Disconnected after changing remote state');
+        return json({ code: 0 });
       }
       case '/x/web-interface/popular': return json({ code: 0, data: { list: [{ bvid: video, title: 'Clouds', owner: { name: 'Painter' } }], no_more: true } });
       case '/x/web-interface/wbi/search/type': return json({ code: 0, data: { result: [{ type: 'video', bvid: video, title: '<em>Clouds</em>', author: 'Painter' }, { type: 'ketang', bvid: '', title: 'Paid course' }], numPages: 2 } });
@@ -159,7 +167,8 @@ test('video URLs are constrained, short links lose credentials, and untrusted su
 });
 
 function xhsTransport() {
-  const state = { loggedIn: true, failedDetail: false, differentNote: false, favorite: false, loseFavoriteResponse: false, images: ['https://sns-webpic-qc.xhscdn.com/cloud.jpg'] };
+  const state = { loggedIn: true, failedDetail: false, differentNote: false, favorite: false, loseFavoriteResponse: false, images: ['https://sns-webpic-qc.xhscdn.com/cloud.jpg'],
+    liked: false, loseLikeResponse: false, failLikeConfirmation: false, invalidLikeState: false, wrongLikeReceipt: false };
   const requests: { url: URL; init?: RequestInit }[] = [];
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input)); requests.push({ url, init });
@@ -174,8 +183,13 @@ function xhsTransport() {
         if (state.loseFavoriteResponse) throw new Error('Lost response after remote state changed');
         return json({ success: true, data: { feed_id: note, success: true, message: 'ok' } });
       }
+      case '/api/v1/feeds/like': {
+        if (!state.failLikeConfirmation) state.liked = !JSON.parse(String(init?.body)).unlike;
+        if (state.loseLikeResponse) throw new Error('Lost response after remote state changed');
+        return json({ success: true, data: { feed_id: state.wrongLikeReceipt ? 'another-note' : note, success: true, message: 'ok' } });
+      }
       case '/api/v1/feeds/detail': return state.failedDetail ? json({ error: 'private-token private details' }) : json({ success: true, data: { feed_id: note, data: {
-        note: { noteId: state.differentNote ? '74f1a2b3c4d5e6f7a8b9c0d1' : note, title: 'Cloud painting', desc: 'My watercolor method', type: 'normal', user: { nickname: 'Artist' }, imageList: state.images.map(urlDefault => ({ urlDefault })) },
+        note: { noteId: state.differentNote ? '74f1a2b3c4d5e6f7a8b9c0d1' : note, title: 'Cloud painting', desc: 'My watercolor method', type: 'normal', user: { nickname: 'Artist' }, imageList: state.images.map(urlDefault => ({ urlDefault })), interactInfo: { liked: state.invalidLikeState ? null : state.liked } },
         comments: { list: [{ id: 'c1', content: 'Nice clouds', userInfo: { nickname: 'Viewer' } }], hasMore: true },
       } } });
       default: throw new Error(`Unexpected ${url.pathname}`);
@@ -399,4 +413,154 @@ test('Bilibili requires login and an unambiguous folder, and an unverified write
       }
     } finally { h.store.close(); }
   }
+});
+
+for (const platform of ['bilibili', 'xiaohongshu'] as const) {
+  const prefix = platform === 'bilibili' ? 'bili' : 'xhs', id = platform === 'bilibili' ? video : note;
+  const transportFor = () => platform === 'bilibili' ? biliTransport() : xhsTransport();
+  const likeWrites = (transport: ReturnType<typeof transportFor>) => transport.requests.filter(r => r.url.pathname.endsWith('/like'));
+
+  test(`${platform} likes and unlikes use explicit native state, persist across restart and remain separate from favorites`, async t => {
+    fastClock(t); const transport = transportFor(), dir = mkdtempSync(join(tmpdir(), 'qiuyue-likes-'));
+    let h = await harness(t, platform, transport.fetcher, new Store(join(dir, 'life.sqlite')));
+    try {
+      await assert.rejects(h.run(`${prefix}_like`, { id, liked: true }), /Read or discover/);
+      assert.equal(transport.requests.length, 0);
+      await h.run(`${prefix}_browse`);
+      const liked = await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(liked.confirmed, true); assert.equal(liked.localUpdated, true); assert.equal(transport.state.liked, true);
+      assert.equal(h.store.actions()[0]?.kind, `plugin:${platform}:like`);
+      const repeated = await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(repeated.unchanged, true); assert.equal(likeWrites(transport).length, 1);
+      assert.equal((await h.run(`${prefix}_history`, { savedOnly: true })).items.length, 0, 'a like is not a favorite');
+      h.store.close(); h = await harness(t, platform, transport.fetcher, new Store(join(dir, 'life.sqlite')));
+      const cached = (await h.run(`${prefix}_history`)).items[0];
+      assert.equal(cached.platformLike.liked, true); assert.ok(cached.platformLike.checkedAt > 0);
+      assert.equal(cached.platformFavorite, undefined); assert.equal(cached.readAt, undefined, 'liking is not reading');
+      await h.run(`${prefix}_keep`, { id, saved: true });
+      assert.equal((await h.run(`${prefix}_history`)).items[0].platformLike.liked, true);
+      const unliked = await h.run(`${prefix}_like`, { id, liked: false });
+      assert.equal(unliked.confirmed, true); assert.equal(transport.state.liked, false);
+      const history = (await h.run(`${prefix}_history`)).items[0];
+      assert.equal(history.platformLike.liked, false); assert.equal(history.platformFavorite.saved, true);
+      const writes = likeWrites(transport); assert.equal(writes.length, 2);
+      for (const [index, request] of writes.entries()) {
+        assert.equal(request.init?.method, 'POST'); assert.equal(request.init?.redirect, 'manual');
+        if (platform === 'bilibili') {
+          const form = new URLSearchParams(String(request.init?.body));
+          assert.equal(request.url.hostname, 'api.bilibili.com');
+          assert.equal(form.get('aid'), '42'); assert.equal(form.get('like'), index === 0 ? '1' : '2'); assert.equal(form.get('csrf'), 'private-csrf');
+          assert.match(new Headers(request.init?.headers).get('cookie')!, /SESSDATA=private-session/);
+        } else {
+          assert.deepEqual(JSON.parse(String(request.init?.body)), { feed_id: note, xsec_token: 'note-access-token', unlike: index === 1 });
+          assert.equal(new Headers(request.init?.headers).get('authorization'), 'Bearer private-token');
+        }
+      }
+      const publicData = JSON.stringify([h.store.actions(), await h.run(`${prefix}_history`)]);
+      for (const secret of ['private-session', 'private-csrf', 'private-token', 'note-access-token']) assert.ok(!publicData.includes(secret));
+    } finally { h.store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test(`${platform} lost like receipts survive restart, reconcile by reading and never blindly repeat a write`, async t => {
+    fastClock(t); const transport = transportFor(), dir = mkdtempSync(join(tmpdir(), 'qiuyue-lost-like-'));
+    let h = await harness(t, platform, transport.fetcher, new Store(join(dir, 'life.sqlite')));
+    try {
+      await h.run(`${prefix}_browse`); transport.state.loseLikeResponse = true;
+      const lost = await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(lost.action.outcome.status, 'unknown'); assert.equal(lost.localUpdated, false); assert.equal(transport.state.liked, true);
+      assert.equal((await h.run(`${prefix}_history`)).items[0].platformLike, undefined);
+      h.store.close(); h = await harness(t, platform, transport.fetcher, new Store(join(dir, 'life.sqlite')));
+      transport.state.loseLikeResponse = false;
+      const reconciled = await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(reconciled.confirmed, true); assert.equal(reconciled.unchanged, true); assert.equal(likeWrites(transport).length, 1);
+      transport.state.liked = false; // A later change cannot make the old unknown attempt safe to repeat.
+      const blocked = await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(blocked.action.reused, true); assert.equal(blocked.action.outcome.status, 'unknown'); assert.equal(blocked.localUpdated, false);
+      assert.equal(likeWrites(transport).length, 1);
+    } finally { h.store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test(`${platform} malformed like state blocks dispatch and an unverified write preserves the last confirmed local state`, async t => {
+    fastClock(t); const transport = transportFor(), h = await harness(t, platform, transport.fetcher);
+    try {
+      await h.run(`${prefix}_browse`);
+      await h.run(`${prefix}_like`, { id, liked: false });
+      transport.state.invalidLikeState = true;
+      await assert.rejects(h.run(`${prefix}_like`, { id, liked: true }), /invalid.*like state/);
+      assert.equal(likeWrites(transport).length, 0); assert.equal(h.store.actions().length, 0);
+      transport.state.invalidLikeState = false; transport.state.failLikeConfirmation = true;
+      const result = await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(result.action.outcome.status, 'unknown'); assert.equal(result.localUpdated, false);
+      assert.equal((await h.run(`${prefix}_history`)).items[0].platformLike.liked, false);
+      await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(likeWrites(transport).length, 1);
+    } finally { h.store.close(); }
+  });
+
+  test(`${platform} like actions respect login, pause and the shared action budget`, async t => {
+    const advance = fastClock(t); const transport = transportFor(), h = await harness(t, platform, transport.fetcher);
+    try {
+      await h.run(`${prefix}_browse`);
+      transport.state.loggedIn = false; advance(60_000);
+      await assert.rejects(h.run(`${prefix}_like`, { id, liked: true }), /login|logged in/i);
+      transport.state.loggedIn = true;
+      h.store.setSetting('paused', true);
+      const before = transport.requests.length;
+      await assert.rejects(h.run(`${prefix}_like`, { id, liked: true }), /paused/);
+      assert.equal(transport.requests.length, before); h.store.setSetting('paused', false);
+      h.cfg.limits.actionsPerHour = 0;
+      await assert.rejects(h.run(`${prefix}_like`, { id, liked: true }), /rate limit/);
+      assert.equal(likeWrites(transport).length, 0); assert.equal(h.store.actions().length, 0);
+    } finally { h.store.close(); }
+  });
+
+  test(`${platform} a reused success receipt cannot confirm a like that was subsequently removed`, async t => {
+    fastClock(t); const transport = transportFor(), h = await harness(t, platform, transport.fetcher);
+    try {
+      await h.run(`${prefix}_browse`); h.thought.triggers.add(event(h.store).id);
+      await h.run(`${prefix}_like`, { id, liked: true });
+      await h.run(`${prefix}_like`, { id, liked: false });
+      const result = await h.run(`${prefix}_like`, { id, liked: true });
+      assert.equal(result.action.reused, true); assert.equal(result.action.outcome.status, 'success');
+      assert.equal(result.confirmed, false); assert.equal(result.localUpdated, false); assert.equal(likeWrites(transport).length, 2);
+      assert.equal((await h.run(`${prefix}_history`)).items[0].platformLike.liked, false);
+    } finally { h.store.close(); }
+  });
+}
+
+test('Bilibili likes require both login cookies and cool down after a risk-control response', async t => {
+  fastClock(t);
+  for (const credential of ['', 'SESSDATA=private-session', 'bili_jct=private-csrf']) {
+    const transport = biliTransport(), h = await harness(t, 'bilibili', transport.fetcher, undefined, {}, credential);
+    try {
+      await h.run('bili_browse');
+      await assert.rejects(h.run('bili_like', { id: video, liked: true }), /Cookie/);
+      assert.equal(h.store.actions().length, 0);
+    } finally { h.store.close(); }
+  }
+  const transport = biliTransport(), h = await harness(t, 'bilibili', transport.fetcher);
+  try {
+    await h.run('bili_browse'); transport.state.likeCode = -352;
+    const result = await h.run('bili_like', { id: video, liked: true });
+    assert.equal(result.action.outcome.status, 'unknown'); assert.equal(result.localUpdated, false);
+    const before = transport.requests.length;
+    await assert.rejects(h.run('bili_like', { id: video, liked: true }), /cooling down/);
+    assert.equal(transport.requests.length, before);
+  } finally { h.store.close(); }
+});
+
+test('Xiaohongshu likes require a private locator and validate both note identity and the action receipt', async t => {
+  fastClock(t); const transport = xhsTransport(), h = await harness(t, 'xiaohongshu', transport.fetcher);
+  try {
+    new ReadingHistory(storage(h.store, 'xiaohongshu')).discover([{ id: note, title: 'Note', url: `https://www.xiaohongshu.com/explore/${note}`, author: 'A' }]);
+    await assert.rejects(h.run('xhs_like', { id: note, liked: true }), /access token/);
+    assert.equal(transport.requests.length, 0);
+    await h.run('xhs_browse'); transport.state.differentNote = true;
+    await assert.rejects(h.run('xhs_like', { id: note, liked: true }), /different note/);
+    assert.equal(h.store.actions().length, 0);
+    transport.state.differentNote = false; transport.state.wrongLikeReceipt = true;
+    const result = await h.run('xhs_like', { id: note, liked: true });
+    assert.equal(result.action.outcome.status, 'unknown'); assert.equal(result.localUpdated, false);
+    assert.equal((await h.run('xhs_history')).items[0].platformLike, undefined);
+  } finally { h.store.close(); }
 });

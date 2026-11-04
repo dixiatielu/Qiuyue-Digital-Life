@@ -74,6 +74,26 @@ export class XiaohongshuReader implements OnlineReader {
     });
     return { confirmed: action.outcome.status === 'success', saved, action };
   }
+  async like(item: ReadingEntry, liked: boolean, call: PluginCall) {
+    const token = item.locator?.token;
+    if (!token) throw new Error('Discover this note again to obtain its current access token before liking.');
+    await this.login(call.signal);
+    const currentLike = async (signal: AbortSignal) => {
+      const result = await this.request('feeds/detail', signal, { feed_id: item.id, xsec_token: token, load_all_comments: false });
+      const note = result.data?.note;
+      if (note?.noteId !== item.id || typeof note.interactInfo?.liked !== 'boolean') throw new Error('Xiaohongshu returned an invalid or different note like state.');
+      return note.interactInfo.liked as boolean;
+    };
+    if (await currentLike(call.signal) === liked) return { confirmed: true, liked, unchanged: true };
+    const action = await call.action('like', { id: item.id, liked }, async signal => {
+      const result = await this.request('feeds/like', signal, { feed_id: item.id, xsec_token: token, unlike: !liked });
+      if (result.success !== true || result.feed_id !== item.id) throw new Error('Xiaohongshu did not confirm the requested like action.');
+      if (await currentLike(signal) !== liked) throw new Error('Xiaohongshu like state could not be confirmed after dispatch.');
+      return { id: item.id, liked, platform: 'xiaohongshu' };
+    });
+    // A reused success receipt may predate an unlike or a change in another client.
+    return { confirmed: action.outcome.status === 'success' && !action.reused, liked, action };
+  }
   async read(input: string, previous: ReadingEntry | undefined, _restart: boolean, signal?: AbortSignal) {
     const reference = xiaohongshuReference(input);
     previous ??= this.history.get(reference.id);

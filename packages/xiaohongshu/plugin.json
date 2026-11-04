@@ -1,9 +1,9 @@
 {
   "id": "xiaohongshu",
   "apiVersion": 2,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "name": "小红书",
-  "description": "通过已登录的 xiaohongshu-mcp 搜索、图文一起阅读，并执行账号原生收藏／取消收藏。",
+  "description": "通过已登录的 xiaohongshu-mcp 搜索、图文一起阅读，并执行账号原生点赞／取消点赞和收藏／取消收藏。",
   "defaultEnabled": false,
   "defaults": {
     "timeoutMs": 60000,
@@ -64,5 +64,5 @@
     ],
     "additionalProperties": false
   },
-  "contextVersion": "2"
+  "contextVersion": "3"
 }

@@ -76,13 +76,38 @@ export class BilibiliReader implements OnlineReader {
     const videos = list.filter((value: any) => !value.type || value.type === 'video');
     return { items: videos.slice(0, 10).map(value => this.item(value)), more: query ? page < Number(data.numPages) : !data.no_more && list.length >= 10, mode: query ? 'search' : 'popular (not personalized recommendations)' };
   }
-  async favorite(item: ReadingEntry, saved: boolean, call: PluginCall) {
+  private async account(signal: AbortSignal) {
     const cookies = Object.fromEntries((this.cookie() ?? '').split(';').map(part => {
       const at = part.indexOf('='); return at < 0 ? ['', ''] : [part.slice(0, at).trim(), part.slice(at + 1).trim()];
     }));
-    if (!cookies.SESSDATA || !cookies.bili_jct) throw new Error('Bilibili native favorites require a logged-in Cookie containing SESSDATA and bili_jct. Configure the plugin Cookie credential first.');
-    const user = await this.request('/x/web-interface/nav', call.signal);
+    if (!cookies.SESSDATA || !cookies.bili_jct) throw new Error('Bilibili native account actions require a logged-in Cookie containing SESSDATA and bili_jct. Configure the plugin Cookie credential first.');
+    const user = await this.request('/x/web-interface/nav', signal);
     if (user.isLogin !== true || !Number.isSafeInteger(user.mid) || user.mid <= 0) throw new Error('Bilibili login is unavailable; refresh the configured Cookie.');
+    return { cookies, user };
+  }
+  async like(item: ReadingEntry, liked: boolean, call: PluginCall) {
+    const { cookies } = await this.account(call.signal);
+    const video = await this.signed('/x/web-interface/wbi/view', { bvid: item.id }, call.signal);
+    if (video.bvid !== item.id || !Number.isSafeInteger(video.aid) || video.aid <= 0) throw new Error('Bilibili returned a different or invalid video.');
+    const currentLike = async (signal: AbortSignal) => {
+      const relation = await this.request(`/x/web-interface/archive/relation?aid=${video.aid}`, signal);
+      if (typeof relation.like !== 'boolean') throw new Error('Bilibili returned an invalid video like state.');
+      return relation.like as boolean;
+    };
+    if (await currentLike(call.signal) === liked) return { confirmed: true, liked, unchanged: true };
+    const action = await call.action('like', { id: item.id, liked }, async signal => {
+      const body = new URLSearchParams({ aid: String(video.aid), like: liked ? '1' : '2', csrf: cookies.bili_jct! });
+      const result = await this.network.json(api + '/x/web-interface/archive/like', { method: 'POST', headers: { ...this.headers(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }, signal);
+      if ([-352, -412, -509].includes(result.code)) this.network.coolDown();
+      if (result.code !== 0) throw new Error(`Bilibili like request failed with code ${Number(result.code)}.`);
+      if (await currentLike(signal) !== liked) throw new Error('Bilibili like state could not be confirmed after dispatch.');
+      return { id: item.id, liked, platform: 'bilibili' };
+    });
+    // A reused success receipt may predate an unlike or a change in another client.
+    return { confirmed: action.outcome.status === 'success' && !action.reused, liked, action };
+  }
+  async favorite(item: ReadingEntry, saved: boolean, call: PluginCall) {
+    const { cookies, user } = await this.account(call.signal);
     const video = await this.signed('/x/web-interface/wbi/view', { bvid: item.id }, call.signal);
     if (video.bvid !== item.id || !Number.isSafeInteger(video.aid) || video.aid <= 0) throw new Error('Bilibili returned a different or invalid video.');
     const path = `/x/v3/fav/folder/created/list-all?up_mid=${user.mid}&type=2&rid=${video.aid}`;

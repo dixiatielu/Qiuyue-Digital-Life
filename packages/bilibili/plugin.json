@@ -1,9 +1,9 @@
 {
   "id": "bilibili",
   "apiVersion": 2,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "name": "B 站",
-  "description": "搜索与阅读视频简介、可用字幕和评论，保留续读进度；使用已登录账号原生收藏／取消收藏。",
+  "description": "搜索与阅读视频简介、可用字幕和评论，保留续读进度；使用已登录账号原生点赞／取消点赞和收藏／取消收藏。",
   "defaultEnabled": false,
   "defaults": {
     "timeoutMs": 20000,
@@ -65,5 +65,5 @@
     ],
     "additionalProperties": false
   },
-  "contextVersion": "2"
+  "contextVersion": "3"
 }
