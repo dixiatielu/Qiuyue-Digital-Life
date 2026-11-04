@@ -31,6 +31,13 @@ export interface UserTool {
   review?: boolean;
   execute(args: any, call: PluginCall): unknown | Promise<unknown>;
 }
+export interface UserActivity {
+  activity: string;
+  /** Alternative ways to take part; offered while at least one tool is available. */
+  tools: string[];
+  /** Stable activity guidance, injected into system instructions while available. No persona or changing state. */
+  instructions?: string;
+}
 export interface PluginContext {
   readonly id: string;
   readonly settings: Readonly<Record<string, any>>;
@@ -42,7 +49,7 @@ export interface PluginContext {
   /** Register an entire native API catalog during setup. */
   adapter(adapter: NativeAdapterDefinition): void;
   observe(provider: (events: readonly PluginEvent[]) => string[]): void;
-  activity(activity: { activity: string; tools: string[] }): void;
+  activity(activity: UserActivity): void;
   /** Begins after activation. Calls never overlap and are drained before reload. */
   every(ms: number, work: (signal: AbortSignal) => void | Promise<void>): void;
   /** Start work from a tool, return immediately, then publish its result as an observation. */
@@ -59,7 +66,7 @@ export interface PluginManifest {
   name?: string;
   version?: string;
   description?: string;
-  /** Bump when observation or activity meaning changes while tool declarations stay the same. */
+  /** Bump for semantic changes not visible in tool declarations or activity instructions. */
   contextVersion?: string;
   defaults?: Record<string, unknown>;
   configSchema?: JsonSchema;

@@ -18,6 +18,8 @@ import { tmpdir } from 'node:os';
 
 export function config() {
   const value = loadConfig(new URL('../config.example.json', import.meta.url).pathname);
+  // Prompt-pressure fixtures must not depend on the length of the editable example persona.
+  value.persona = 'Qiuyue, a virtual singer with her own interests and daily life.';
   value.adapters[0]!.accountId = '900'; value.adapters[0]!.groups = [100, 200]; value.web.enabled = false;
   value.limits.tickMs = 10000; value.limits.debounceMs = 0;
   return value;

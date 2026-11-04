@@ -52,7 +52,9 @@ export interface Brain {
 /** What a persisted working context belongs to: when any of it changes, the next start begins a fresh one. */
 export function contextIdentity(config: Config, tools: ToolSet) {
   const contracts = tools.plugins.installed().filter(plugin => plugin.contextVersion !== undefined && (plugin.enabled?.() ?? true)).map(plugin => [plugin.id, plugin.contextVersion]);
-  return digest({ instructions: systemInstructions(config), model: config.model, accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })), tools: tools.current().map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
+  const current = tools.current();
+  const instructions = systemInstructions(config, tools.plugins.activityPrompts(new Set(current.map(tool => tool.name))));
+  return digest({ instructions, model: config.model, accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })), tools: current.map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
 }
 
 export class PiBrain implements Brain {
@@ -160,8 +162,10 @@ export class PiBrain implements Brain {
   private display(update: (monitor: Monitor) => void) { if (this.monitor) { try { update(this.monitor); } catch {} } }
   abort() { this.controller.abort(); this.agent.abort(); }
   private instructions() {
-    return systemInstructions(this.config);
+    return systemInstructions(this.config, this.activityPrompts());
   }
+  /** Read-only management preview, using this brain's actual tool permissions. */
+  activityPrompts() { return this.tools.plugins.activityPrompts(new Set(this.tools.current().map(tool => tool.name))); }
   /** What the working context already shows of runtime state: what runtime_data has said, and the actions whose results came back to it as tool results. */
   private shown(messages: AgentMessage[], runtime: RuntimeSnapshot): RuntimeSnapshot | undefined {
     const previous = this.runtimeSnapshot;
@@ -428,7 +432,7 @@ export class PiBrain implements Brain {
   /** When each available online activity was last done, so a life wake knows what it can actually do. */
   private onlineLife() {
     const available = new Set(this.tools.current().map(tool => tool.name));
-    const activities = this.tools.plugins.activities(onlineActivities).map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
+    const activities = this.tools.plugins.activities(onlineActivities, available);
     if (!activities.length) return;
     const experienceKind = (tool: string) => this.tools.plugins.experienceKind(tool);
     const last = this.store.lastExperienced(activities.flatMap(item => item.tools.map(experienceKind)));
@@ -439,8 +443,7 @@ export class PiBrain implements Brain {
       const current = args ? setter!.read(args) : undefined;
       return { activity, tools, lastDone: at ? new Date(at).toISOString() : `not in the last ${this.config.memory.retentionDays} days`, ...(current !== undefined ? { lastSetTo: current } : {}) };
     });
-    const instructions = this.tools.plugins.activityInstructions();
-    return `Online activities available for your own life, with when you last did each. Life activities can be actual online activities like these, not only fictional daily life. What happens there, such as new posts or comments, never comes to you by itself; you see it only by checking.${instructions ? ` ${instructions}` : ''}\n${JSON.stringify(status)}`;
+    return `Online activities available for your own life, with when you last did each. Life activities can be actual online activities like these, not only fictional daily life.\n${JSON.stringify(status)}`;
   }
   /** Load the persisted working context unless this process already holds it for the current management state. */
   private prepare(generation: number) {

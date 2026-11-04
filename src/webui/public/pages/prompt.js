@@ -11,7 +11,12 @@ function FinalPrompt({ template }) {
   const preview = useAsync(() => api('/api/prompt/preview', { method: 'POST', body: { template } }), [template]);
   if (!preview.data) return html`<${Loading} state=${preview} />`;
   return html`<${Card} title=${t('Final system prompt', '最终系统提示词')} actions=${html`<span class="muted small">${t(`${preview.data.chars} characters`, `${preview.data.chars} 字`)}</span><button onClick=${preview.reload}>${t('Refresh', '刷新')}</button>`}>
-    <p class="muted small">${t('Current template with the saved persona inserted.', '当前模板插入已保存人格后的完整内容。')}</p><pre class="preview">${preview.data.text}</pre>
+    <p class="muted small">${t('Current template with the saved persona and available activity guidance inserted.', '当前模板插入已保存人格和可用活动提示词后的内容。')}</p>
+    <p class="muted small">${preview.data.pluginSource === 'running'
+      ? t('Activity guidance comes from the running plugins. Saved changes take effect after reload or restart.', '活动提示词来自正在运行的插件；已保存的修改需重载或重启后生效。')
+      : preview.data.pluginSource === 'builtin'
+        ? t('The running plugin preview is unavailable. Only built-in activities from saved settings are shown; user plugin guidance is omitted.', '无法获取运行中插件的提示词；当前只显示已保存配置对应的内置活动，不包含用户插件提示词。')
+        : t('Activity guidance is unavailable until the configuration can be loaded or the daemon is running.', '配置可加载或常驻进程运行后，才能预览活动提示词。')}</p><pre class="preview">${preview.data.text}</pre>
   <//>`;
 }
 

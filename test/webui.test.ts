@@ -194,7 +194,9 @@ test('the persona and the system prompt are checked before saving, and the opera
   assert.equal(systemInstructions(config), 'You are:\nQiuyue, who likes snow.\n\nOld part.\nNew part.');
   assert.equal(systemInstructions({ ...config, life: { ...config.life, allowFiction: true } }), 'You are:\nQiuyue, who likes snow.\n\nOld part.\nNew part. Fiction.');
   const preview = await call('/api/prompt/preview', { method: 'POST', body: { template: 'Hi {{persona}}\n<!-- current-context -->\n' } });
-  assert.equal(preview.body.text, 'Hi Qiuyue, who likes snow.\n');
+  assert.equal(preview.body.pluginSource, 'builtin');
+  assert.ok(preview.body.text.startsWith('Hi Qiuyue, who likes snow.\n'));
+  assert.equal(preview.body.text, systemInstructions({ ...config, systemPrompt: 'Hi {{persona}}\n<!-- current-context -->\n' }, inspectConfig(config).activityPrompts));
   const after = await call('/api/prompt');
   assert.equal(after.body.override, template);
   assert.equal(after.body.builtinChanged, false);
@@ -337,6 +339,9 @@ test('the capabilities page discovers user plugins without importing them in the
   const result = await call('/api/plugins');
   assert.equal(result.status, 200); assert.ok(result.body.ids.includes('unloaded'));
   assert.equal(result.body.running, null); assert.equal(result.body.inspected.unknown, true);
+  const preview = await call('/api/prompt/preview', { method: 'POST' });
+  assert.equal(preview.status, 200); assert.equal(preview.body.pluginSource, 'builtin');
+  assert.ok(preview.body.activities.every((item: any) => item.plugin !== 'unloaded'));
   assert.equal((await call('/api/plugins/reload', { method: 'POST', body: { id: 'unloaded' }, headers: { Authorization: '' } })).status, 401);
   assert.equal((await call('/api/plugins/reload', { method: 'POST', body: { id: '../unloaded' } })).status, 400);
 }));
@@ -350,9 +355,9 @@ test('capabilities show daemon versions and schema, and apply saved settings thr
   const brain = { thought, streaming: false, run: async () => {}, review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {} };
   const runtime = new LifeRuntime(cfg, store, brain, brain);
   const manager = new PluginManager(cfg, host, store, () => loadConfig(path), () => undefined);
-  manager.connect(runtime, () => { const next = contextIdentity(cfg, tools), changed = next !== identity; identity = next; return changed; });
+  manager.connect(runtime, () => { const next = contextIdentity(cfg, tools), changed = next !== identity; identity = next; return changed; }, () => host.activityPrompts(new Set(tools.current().map(tool => tool.name))));
   mkdirSync(join(dir, 'plugins/clock'), { recursive: true });
-  writeFileSync(join(dir, 'plugins/clock/index.mjs'), readFileSync(new URL('../examples/plugins/clock/index.mjs', import.meta.url)));
+  writeFileSync(join(dir, 'plugins/clock/index.mjs'), readFileSync(new URL('../examples/plugins/clock/index.mjs', import.meta.url), 'utf8').replace('setup(ctx) {', `setup(ctx) { ctx.activity({ activity: 'Check the time', tools: ['clock_read'], instructions: 'Clock guidance from the active plugin.' });`));
   const server = await serveControl(cfg.socket, request => handleControl(store, request, runtime, manager));
   try {
     await manager.start();
@@ -360,10 +365,15 @@ test('capabilities show daemon versions and schema, and apply saved settings thr
     const clock = listed.body.running.plugins.find((item: any) => item.id === 'clock');
     assert.equal(clock.state, 'running'); assert.equal(clock.version, '1.0.0');
     assert.equal(clock.configSchema.properties.timeZone.type, 'string');
+    const preview = await call('/api/prompt/preview', { method: 'POST', body: { template: 'Draft {{persona}}\n<!-- current-context -->' } });
+    assert.equal(preview.body.pluginSource, 'running');
+    assert.equal(preview.body.text, systemInstructions({ ...cfg, systemPrompt: 'Draft {{persona}}\n<!-- current-context -->' }, host.activityPrompts(new Set(tools.current().map(tool => tool.name)))));
+    assert.ok(preview.body.text.includes('Clock guidance from the active plugin.'));
     const config = await call('/api/config');
     assert.equal((await call('/api/config', { method: 'PUT', body: { raw: { ...config.body.raw, plugins: { clock: false } }, hash: config.body.hash } })).status, 200);
     const pending = await call('/api/plugins');
     assert.equal(pending.body.running.plugins.find((item: any) => item.id === 'clock').pending, true);
+    assert.ok((await call('/api/prompt/preview', { method: 'POST' })).body.text.includes('Clock guidance from the active plugin.'), 'saved switches do not hide the running contribution before reload');
     const reload = await call('/api/plugins/reload', { method: 'POST', body: { id: 'clock' } });
     assert.equal(reload.status, 200); assert.ok(['preparing', 'waiting', 'applying', 'done'].includes(reload.body.state));
     await manager.settled();
@@ -371,6 +381,9 @@ test('capabilities show daemon versions and schema, and apply saved settings thr
     assert.equal(after.body.running.job.state, 'done'); assert.equal(after.body.running.job.contextReset, true);
     assert.equal(after.body.running.plugins.find((item: any) => item.id === 'clock').state, 'disabled');
     assert.ok(!tools.current().some(tool => tool.name === 'clock_read'));
+    const disabledPreview = await call('/api/prompt/preview', { method: 'POST' });
+    assert.equal(disabledPreview.body.pluginSource, 'running');
+    assert.ok(!disabledPreview.body.text.includes('Clock guidance from the active plugin.'));
   } finally { await manager.stop(); await runtime.stop(); await host.stop(); server.closeClients(); await new Promise<void>(resolve => server.close(() => resolve())); store.close(); }
 }));
 

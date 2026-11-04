@@ -5,7 +5,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '../src/store.js';
-import { systemInstructions } from '../src/prompts.js';
 import { estimatedContextTokens, textTokens, estimateTokens } from '../src/context.js';
 import { deferred, event, fixture } from './helpers.js';
 
@@ -21,7 +20,7 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   // Keep a fixed amount of conversation space above instructions and schemas.
   // Prompt edits must not turn the fixture's idle threshold into permanent pressure.
   f.cfg.limits.outputReserveTokens = 4096;
-  const fixed = textTokens(systemInstructions(f.cfg)) + estimateTokens(f.tools.current().map(toToolDeclaration));
+  const fixed = textTokens(f.brain.agent.state.systemPrompt) + estimateTokens(f.tools.current().map(toToolDeclaration));
   f.cfg.limits.contextTokens = f.cfg.limits.outputReserveTokens + f.cfg.limits.contextSafetyTokens + Math.ceil((fixed + 700) / 0.7);
   f.cfg.compaction.keepRecentTokens = 1500;
   f.cfg.compaction.summaryMaxTokens = 512;

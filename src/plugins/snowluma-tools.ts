@@ -49,19 +49,19 @@ function jpegImages(value: unknown): unknown {
 }
 const socialActions = new Set(['send_private_msg', 'send_group_msg', 'send_msg', 'send_custom_face', 'send_group_ai_record', 'set_group_reaction', 'set_msg_emoji_like', 'send_poke', 'friend_poke', 'group_poke']);
 const activities: OnlineActivity[] = [
-  { activity: "Browse friends' Qzone feeds", tools: ['get_qzone_feeds'] },
-  { activity: "Like or comment on someone's Qzone post", tools: ['like_qzone', 'comment_qzone'] },
-  { activity: 'Check comments on your own Qzone posts', tools: ['get_qzone_msg_list', 'get_qzone_msg_detail'] },
-  { activity: 'Post to your Qzone', tools: ['send_qzone_msg'] },
-  { activity: 'Browse and like recommended Qzone posts', tools: ['get_qzone_public_feeds', 'get_qzone_public_feed_detail', 'get_qzone_public_comments', 'get_qzone_public_replies', 'set_qzone_public_like', 'set_qzone_public_comment_like'] },
-  { activity: 'Browse, like, comment on, or add to group albums', tools: ['get_group_album_list', 'get_group_album_media_list', 'set_group_album_media_like', 'do_group_album_comment', 'upload_image_to_qun_album'] },
-  { activity: 'Check in to a group', tools: ['set_group_sign', 'get_group_signed_list'] },
-  { activity: "Like a friend's QQ profile", tools: ['send_like'] },
-  { activity: 'Start a private chat with or poke someone you know', tools: ['send_private_msg', 'friend_poke', 'send_poke'] },
-  { activity: 'Change your QQ signature', tools: ['set_self_longnick'], currentValue: { tool: 'set_self_longnick', read: args => args.longNick ?? args.long_nick } },
-  { activity: 'Set a custom online status', tools: ['set_diy_online_status'], currentValue: { tool: 'set_diy_online_status', read: args => args.wording } },
-  { activity: 'Change your avatar, nickname, Qzone name or description, or group card', tools: ['set_qq_avatar', 'set_qq_profile', 'set_qzone_profile', 'set_group_card'] },
-  { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'] },
+  { activity: "Browse friends' Qzone feeds", tools: ['get_qzone_feeds'], instructions: 'You can check what friends have shared recently. Qzone posts are not pushed to you; read the feed when you want to know.' },
+  { activity: "Like or comment on someone's Qzone post", tools: ['like_qzone', 'comment_qzone'], instructions: 'React to posts you actually read when you have something to express. Consider your relationship with the author and the audience of the post.' },
+  { activity: 'Check comments on your own Qzone posts', tools: ['get_qzone_msg_list', 'get_qzone_msg_detail'], instructions: 'Comments on your posts are not pushed to you. You can revisit a post later to read what people said; reading does not oblige you to respond.' },
+  { activity: 'Post to your Qzone', tools: ['send_qzone_msg'], instructions: 'You can post something you want to share or keep, choosing visibility to match its original social context and intended audience.' },
+  { activity: 'Browse and like recommended Qzone posts', tools: ['get_qzone_public_feeds', 'get_qzone_public_feed_detail', 'get_qzone_public_comments', 'get_qzone_public_replies', 'set_qzone_public_like', 'set_qzone_public_comment_like'], instructions: 'Recommended posts (空友爱看) often come from strangers. You can browse posts and discussions and like something you appreciate; seeing someone in recommendations does not make them an acquaintance.' },
+  { activity: 'Browse, like, comment on, or add to group albums', tools: ['get_group_album_list', 'get_group_album_media_list', 'set_group_album_media_like', 'do_group_album_comment', 'upload_image_to_qun_album'], instructions: 'Group albums can hold shared photos and your own pictures. Choose among the available operations, respecting the group and the pictures\' original sharing scope.' },
+  { activity: 'Check in to a group', tools: ['set_group_sign', 'get_group_signed_list'], instructions: 'Checking in can be a small habit in a group you spend time in. It is optional, not a daily obligation.' },
+  { activity: "Like a friend's QQ profile", tools: ['send_like'], instructions: 'A profile like can be a small greeting to someone you know; it does not need a follow-up message.' },
+  { activity: 'Start a private chat with or poke someone you know', tools: ['send_private_msg', 'friend_poke', 'send_poke'], instructions: 'You may initiate contact when you want to talk. Consider the relationship, timing, and whether the other person welcomes it; a poke can notify and interrupt them.' },
+  { activity: 'Change your QQ signature', tools: ['set_self_longnick'], instructions: 'Your signature can reflect an interest or mood and can stay for a long time; there is no need to change it at every wake.', currentValue: { tool: 'set_self_longnick', read: args => args.longNick ?? args.long_nick } },
+  { activity: 'Set a custom online status', tools: ['set_diy_online_status'], instructions: 'Your online status can describe your current mood or activity. Change it when you want it to reflect something different.', currentValue: { tool: 'set_diy_online_status', read: args => args.wording } },
+  { activity: 'Change your avatar, nickname, Qzone name or description, or group card', tools: ['set_qq_avatar', 'set_qq_profile', 'set_qzone_profile', 'set_group_card'], instructions: 'These profile fields represent you. You may personalize them while keeping the core identity defined in your persona.' },
+  { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'], instructions: 'You can keep pictures you like for later expression, or organize your collection. Base descriptions on images you actually saw, including their subject, expression, text, and possible conversational use.' },
 ];
 
 export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): LifePlugin {
@@ -95,7 +95,7 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
         get_qzone_msg_detail: 'Query using the actual post tid and its owner target_uin. Omitting target_uin refers to your own Qzone. Inline replies may be incomplete.',
         send_qzone_msg: 'When ugc_right is omitted, the default is visible to everyone; 4 means friends only, 64 means only yourself, and 16 or 128 also requires target_uins. For example, use ugc_right=64 for yourself only; choose a visibility matching the sharing scope.',
         like_qzone: 'Use tid and target_uin from an actual post; omitting target_uin refers to your own Qzone. abstime may be the actual posting time.',
-        send_group_ai_record: 'Sends the text as an AI voice message to the group directly; group chats only. Use a character_id from an actual get_ai_characters result unchanged. Keep the text short.',
+        send_group_ai_record: 'Sends the text as an AI voice message to the group directly; group chats only. This is synthesized speech, not singing. Use a character_id from an actual get_ai_characters result unchanged. Keep the text short.',
         comment_qzone: 'tid and target_uin identify the post and its author. To reply to a top-level comment, provide both its comment_id and comment_uin (for example, comment_id="0" is valid). For a nested reply, use the parent comment ID and author and provide both target reply_uin and reply_name. Replies do not support images.',
       };
       /** One external action: recorded before it is sent and deduplicated, with an unconfirmed outcome kept as unknown (ADR-0008). */
@@ -162,7 +162,6 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
       return [...discovery, ...snowlumaCatalog.map(toolFor)];
     },
     activities: activities.map(activity => ({ ...activity, insertBefore: 'Write or reread your diary' })),
-    activityInstructions: 'Use load_snowluma_tools for the parameters of unfamiliar tools.',
     experienceKinds: Object.fromEntries(snowlumaCatalog.map(action => [action.name, `adapter:${account.id}:${action.name}`])),
     chatActions: [...socialActions], staleActions: [...socialActions],
     chatTarget: (_tool, args) => snowlumaChat(args, account.accountId),

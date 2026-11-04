@@ -32,7 +32,7 @@ export function webSearchPlugin(config: Config, credential: CredentialReader = e
   return {
     id: 'web-search', enabled: () => webSearchEnabled(config),
     tools: runtime => [runtime.jsonTool('search_web', 'Search the web for public information.', Type.Object({ query: Type.String({ description: 'Search query, at most 128 Unicode characters', minLength: 1, maxLength: 128 }) }), async (args, signal) => runtime.record('search', await web.search(args.query, signal)))],
-    activities: [{ activity: 'Look things up online: news, weather, or whatever you are curious about', tools: ['search_web'] }],
+    activities: [{ activity: 'Look things up online: news, weather, or whatever you are curious about', tools: ['search_web'], instructions: 'You can follow your curiosity, check updates to something you follow, or find information for your own plans. Search results are excerpts; do not describe them as having read the full page.' }],
     experienceKinds: { search_web: 'search' },
   };
 }

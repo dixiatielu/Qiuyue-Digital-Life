@@ -18,7 +18,7 @@ export function webReaderPlugin(config: Config): LifePlugin {
   return {
     id: 'web-reader', enabled: () => config.web.enabled && config.plugins['web-reader'] !== false,
     tools: runtime => [runtime.jsonTool('read_webpage', 'Read a public webpage.', Type.Object({ url: Type.String({ description: 'Public webpage URL', minLength: 1, maxLength: 2000 }) }), async (args, signal) => runtime.record('reading', await web.read(args.url, signal)))],
-    activities: [{ activity: 'Read online: something you follow, news, or whatever you are curious about', tools: ['read_webpage'] }],
+    activities: [{ activity: 'Read online: something you follow, news, or whatever you are curious about', tools: ['read_webpage'], instructions: 'You can open public pages you want to read. Share a discovery with its original link when it matters to someone or a conversation; browsing does not require a report.' }],
     experienceKinds: { read_webpage: 'reading' },
   };
 }

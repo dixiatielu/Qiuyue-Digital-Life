@@ -6,7 +6,7 @@ import { discoverPlugins, loadUserPlugin, pluginSource, validPluginId } from './
 import { waitFor } from './async.js';
 import { inspectPluginManifests, readPluginManifest } from './plugin-manifest.js';
 import type { PluginDefinition } from './plugin-sdk.js';
-import { PluginHost, type LifePlugin } from './plugins.js';
+import { PluginHost, type ActivityPrompt, type LifePlugin } from './plugins.js';
 import { createBuiltinPlugin, activePluginIds, pluginIds, type BuiltinPluginId } from './plugins/index.js';
 import type { LifeRuntime } from './runtime.js';
 import { digest, type Store } from './store.js';
@@ -42,6 +42,7 @@ export class PluginManager {
   private definitions = new Map<string, Metadata>();
   private runtime?: LifeRuntime;
   private refresh?: () => boolean;
+  private prompts?: () => ActivityPrompt[];
   private operation?: Promise<void>;
   private controller?: AbortController;
   private stopped = false;
@@ -54,7 +55,7 @@ export class PluginManager {
   ) {
     for (const plugin of host.installed()) this.installed.set(plugin.id, { plugin, source: 'builtin', loadedAt: Date.now(), fingerprint: fingerprint(plugin.id, config) });
   }
-  connect(runtime: LifeRuntime, refresh: () => boolean) { this.runtime = runtime; this.refresh = refresh; }
+  connect(runtime: LifeRuntime, refresh: () => boolean, prompts?: () => ActivityPrompt[]) { this.runtime = runtime; this.refresh = refresh; this.prompts = prompts; }
   private disabled(id: string, config: Config): Installed {
     const previous = this.installed.get(id);
     return { ...previous, plugin: { id, enabled: () => false, tools: () => [] }, source: 'user', loadedAt: Date.now(), fingerprint: fingerprint(id, config) };
@@ -114,6 +115,10 @@ export class PluginManager {
   }
   request(args: string[]) {
     if (args.length === 0 || (args.length === 1 && ['list', 'status'].includes(args[0]!))) return this.status();
+    if (args.length === 1 && args[0] === 'prompts') {
+      if (!this.ready || this.stopped || !this.prompts) throw new Error('Plugin prompt preview is not ready.');
+      return this.prompts();
+    }
     if (args[0] === 'manage' && args.length === 4) {
       if (!this.ready || this.stopped || this.operation) throw new Error('Plugin management is unavailable while starting, stopping, or reloading.');
       const input = JSON.parse(args[3]!);

@@ -60,7 +60,7 @@ export function qzoneSharePlugin(config: Config, account: AdapterConfig): LifePl
       return { content: [{ type: 'text', text: JSON.stringify(outcome.result) }, { type: 'text', text: `Local execution information: ${JSON.stringify(metadata)}` }], details: metadata };
     })],
     enabled: () => config.plugins['qzone-share'] !== false && allowed('get_qzone_share_ark') && ['send_private_msg', 'send_group_msg'].some(allowed),
-    activities: [{ activity: 'Share a Qzone post with someone or a group', tools: ['share_qzone_feed'] }],
+    activities: [{ activity: 'Share a Qzone post with someone or a group', tools: ['share_qzone_feed'], instructions: 'You can share a post when it connects with a person or conversation. Choose the audience and timing; the card can reveal the post beyond its original audience, so check its sharing scope.' }],
     experienceKinds: { share_qzone_feed: 'qzone_share' },
     chatActions: ['share_qzone_feed'],
     chatTarget: (_tool, args) => snowlumaChat(args, account.accountId),

@@ -82,7 +82,12 @@ class PluginScope {
         this.tools.push({ ...tool, parameters: structuredClone(tool.parameters) });
       },
       observe: provider => { this.declare(); if (typeof provider !== 'function') throw new Error('observe needs a function.'); this.observations.push(provider); },
-      activity: activity => { this.declare(); if (!activity?.activity || !Array.isArray(activity.tools) || activity.tools.some(tool => typeof tool !== 'string')) throw new Error('An activity needs a description and tool names.'); this.activities.push(structuredClone(activity)); },
+      activity: activity => {
+        this.declare();
+        if (typeof activity?.activity !== 'string' || !activity.activity.trim() || !Array.isArray(activity.tools) || !activity.tools.length || activity.tools.some(tool => typeof tool !== 'string' || !tool.trim())) throw new Error('An activity needs a description and tool names.');
+        if (activity.instructions !== undefined && (typeof activity.instructions !== 'string' || !activity.instructions.trim())) throw new Error('Activity instructions must be a non-empty string.');
+        this.activities.push(structuredClone(activity));
+      },
       every: (ms, run) => { this.declare(); if (!Number.isSafeInteger(ms) || ms < 100 || ms > 2_147_483_647 || typeof run !== 'function') throw new Error('A timer needs a function and an interval from 100 to 2147483647 ms.'); this.timers.push({ ms, run, busy: false }); },
       background: run => { void this.background(run); },
       publish: event => {

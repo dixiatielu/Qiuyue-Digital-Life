@@ -98,7 +98,7 @@ async function main() {
     // Review runs beside the thoughts with tools of its own; the live view follows the thoughts, and review shows there through its trace (ADR-0012).
     reviewer = new PiBrain(config, store, forReview(createTools(config, store, () => reviewer.thought, recall, plugins)), undefined, undefined, recall, credentials.get, 'review');
     runtime = new LifeRuntime(config, store, brain, reviewer);
-    pluginManager.connect(runtime, () => { const changed = brain.refreshTools(); reviewer.refreshTools(); return changed; });
+    pluginManager.connect(runtime, () => { const changed = brain.refreshTools(); reviewer.refreshTools(); return changed; }, () => brain.activityPrompts());
     server = await serveControl(config.socket, request => handleControl(store, request, runtime, pluginManager), monitor);
     // Recovery must precede live collection; perception keeps running even if paused.
     store.recover(); await pluginManager.start();

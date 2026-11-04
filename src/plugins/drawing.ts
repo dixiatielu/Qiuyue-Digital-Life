@@ -116,7 +116,7 @@ export function drawingPlugin(drawings: Drawings, enabled: () => boolean = () =>
   return {
     id: 'drawing', enabled,
     tools: runtime => [runtime.jsonTool('imagen', "Generate an image from a text description, including photorealistic photos, illustrations, stickers, diagrams, or other images: something you want to create, or what someone asked for if you want to. Generation takes half a minute or more, so this returns at once and the generated image comes to you later as a drawing observation with its picture; carry on meanwhile. The image generator sees only this description, not your conversation or reference images, so describe the subject, composition, visual style, lighting, colors, and any text in full. Once you have seen it, send or use it by putting its returned drawing ID where an image file goes.", Type.Object({ prompt: Type.String({ description: 'A complete description of the image to generate, including its visual style (such as photorealistic or illustrated)', minLength: 1, maxLength: 4000 }) }), args => drawings.start(args.prompt, [...runtime.context().triggers]))],
-    activities: [{ activity: 'Generate an image', tools: ['imagen'] }],
+    activities: [{ activity: 'Generate an image', tools: ['imagen'], instructions: 'You can draw something of your own choosing, or accept a request if you want to. Generation runs in the background and the result arrives as an observation. See the finished picture before deciding whether to share it, post it, or keep it for yourself.' }],
     experienceKinds: { imagen: 'drawing' },
     images: event => {
       if (event.kind !== 'drawing') return [];

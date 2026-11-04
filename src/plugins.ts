@@ -3,13 +3,16 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
 import type { ThoughtContext, ToolRuntime } from './tool-runtime.js';
 import { waitFor } from './async.js';
+import type { UserActivity } from './plugin-sdk.js';
 
-export interface OnlineActivity {
-  activity: string;
-  tools: string[];
+export interface OnlineActivity extends UserActivity {
   memoryKind?: MemoryKind;
   insertBefore?: string;
   currentValue?: { tool: string; read(args: Record<string, unknown>): unknown };
+}
+export interface ActivityPrompt extends UserActivity { plugin: string; instructions: string }
+function availableActivities(activities: OnlineActivity[], available: ReadonlySet<string>) {
+  return activities.map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
 }
 export interface PluginTool extends AgentTool { insertBefore?: string; available?(): boolean }
 export interface PluginImage {
@@ -42,7 +45,6 @@ export interface LifePlugin {
   actionCaption?(action: Action): string | undefined;
   endsThought?(tool: string, details: unknown): boolean;
   activities?: OnlineActivity[];
-  activityInstructions?: string;
   experienceKinds?: Record<string, string>;
   chatActions?: string[];
   staleActions?: string[];
@@ -170,16 +172,21 @@ export class PluginHost {
     for (const plugin of this.plugins) if (this.enabled(plugin)) { const caption = plugin.actionCaption?.(action); if (caption !== undefined) return caption; }
   }
   endsThought(tool: string, details: unknown): boolean { return this.plugins.some(plugin => this.enabled(plugin) && plugin.endsThought?.(tool, details)); }
-  activities(builtins: OnlineActivity[] = []): OnlineActivity[] {
+  activities(builtins: OnlineActivity[] = [], available?: ReadonlySet<string>): OnlineActivity[] {
     const additions = this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.activities ?? []);
     const ordered = [...builtins, ...additions];
     for (const activity of additions) if (activity.insertBefore && ordered.some(item => item.activity === activity.insertBefore)) {
       ordered.splice(ordered.indexOf(activity), 1);
       ordered.splice(ordered.findIndex(item => item.activity === activity.insertBefore), 0, activity);
     }
-    return ordered;
+    return available ? availableActivities(ordered, available) : ordered;
   }
-  activityInstructions(): string { return this.plugins.filter(plugin => this.enabled(plugin)).map(plugin => plugin.activityInstructions).filter(Boolean).join(' '); }
+  /** The same availability rules as life wakes, reading registered guidance without observation providers. */
+  activityPrompts(available: ReadonlySet<string>): ActivityPrompt[] {
+    return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin =>
+      availableActivities(plugin.activities ?? [], available).flatMap(({ activity, tools, instructions }) =>
+        instructions?.trim() ? [{ plugin: plugin.id, activity, tools, instructions }] : []));
+  }
   experienceKind(tool: string): string { return this.plugins.find(plugin => plugin.experienceKinds?.[tool])?.experienceKinds?.[tool] ?? tool; }
   chatTarget(tool: string, args: unknown, staleOnly = false): string | undefined {
     for (const plugin of this.plugins) if (this.enabled(plugin) && (staleOnly ? plugin.staleActions : plugin.chatActions)?.includes(tool)) {

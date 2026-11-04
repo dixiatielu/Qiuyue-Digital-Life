@@ -12,6 +12,7 @@ import { errorText } from '../domain.js';
 import { configuredPluginIds, pluginIds } from '../plugins/index.js';
 import { discoverPlugins } from '../plugin-loader.js';
 import type { PluginManager } from '../plugin-manager.js';
+import type { ActivityPrompt } from '../plugins.js';
 import { systemInstructions } from '../prompts.js';
 import { getSnowLumaCatalog } from '../adapters/snowluma/catalog.js';
 import { ui } from '../ui-language.js';
@@ -171,12 +172,20 @@ export class WebUi {
     this.on('GET', '/api/prompt', () => this.files.prompt());
     this.on('PUT', '/api/prompt', ({ body }) => { this.files.savePrompt(String(body.text ?? ''), body.hash); return this.after(); });
     this.on('DELETE', '/api/prompt', () => { this.files.resetPrompt(); return this.after(); });
-    this.on('POST', '/api/prompt/preview', ({ body }) => {
+    this.on('POST', '/api/prompt/preview', async ({ body }) => {
       const { raw, config } = this.current();
       const persona = typeof body.persona === 'string' ? body.persona : config?.persona ?? this.files.persona().text;
       const template = typeof body.template === 'string' ? body.template : config?.systemPrompt;
-      const text = systemInstructions({ persona, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template });
-      return { text, chars: text.length };
+      let activities: ActivityPrompt[] = [], pluginSource: 'running' | 'builtin' | 'unavailable' = 'unavailable';
+      try {
+        activities = await callControl(this.paths.socket, { args: ['plugins', 'prompts'] }) as ActivityPrompt[];
+        pluginSource = 'running';
+      } catch {
+        // Never import user code in the management process just to render a preview.
+        if (config) { activities = inspectConfig(config, this.files.credentials().get).activityPrompts; pluginSource = 'builtin'; }
+      }
+      const text = systemInstructions({ persona, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template }, activities);
+      return { text, chars: text.length, activities, pluginSource };
     });
 
     this.on('GET', '/api/plugins', async () => {

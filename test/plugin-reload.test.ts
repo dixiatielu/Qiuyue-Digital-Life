@@ -24,7 +24,7 @@ function harness(readCredentials?: () => CredentialReader) {
   let saved = structuredClone(f.cfg);
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
   const manager = new PluginManager(f.cfg, f.plugins, f.store, () => structuredClone(saved), () => undefined, undefined, readCredentials);
-  manager.connect(runtime, () => { const changed = f.brain.refreshTools(); f.reviewer.refreshTools(); return changed; });
+  manager.connect(runtime, () => { const changed = f.brain.refreshTools(); f.reviewer.refreshTools(); return changed; }, () => f.brain.activityPrompts());
   const write = (id: string, text: string, file = 'index.mjs') => { mkdirSync(join(dir, 'plugins', id), { recursive: true }); writeFileSync(join(dir, 'plugins', id, file), text); };
   const execute = async (name: string, args = {}, review = false) => {
     const brain = review ? f.reviewer : f.brain;
@@ -55,6 +55,38 @@ async function waiting(manager: PluginManager) {
   while (manager.job?.state === 'preparing' && Date.now() < until) await turn();
   assert.equal(manager.job?.state, 'waiting');
 }
+
+test('SDK activity prompt edits renew both contexts, failed candidates retain guidance, and disable removes it', async () => {
+  const h = harness();
+  const source = (instructions: unknown) => definition().replace("tools: ['sample_read'] });", `tools: ['sample_read'], instructions: ${JSON.stringify(instructions)} });`);
+  try {
+    h.write('sample', 'export const value = 1;', 'helper.mjs');
+    h.write('sample', source('Choose a sample when curious.'));
+    await h.manager.start();
+    assert.ok(h.brain.agent.state.systemPrompt.includes('Choose a sample when curious.'));
+    assert.ok(h.reviewer.agent.state.systemPrompt.includes('Choose a sample when curious.'));
+    assert.ok(JSON.stringify(h.manager.request(['prompts'])).includes('Choose a sample when curious.'));
+    const identity = contextIdentity(h.cfg, h.tools);
+    h.write('sample', source('Read a sample at your own pace.'));
+    h.manager.request(['reload', 'sample']); await h.manager.settled();
+    assert.equal(h.manager.job?.contextReset, true);
+    assert.notEqual(contextIdentity(h.cfg, h.tools), identity);
+    for (const brain of [h.brain, h.reviewer]) {
+      assert.ok(brain.agent.state.systemPrompt.includes('Read a sample at your own pace.'));
+      assert.ok(!brain.agent.state.systemPrompt.includes('Choose a sample when curious.'));
+    }
+    h.write('sample', source(42));
+    h.manager.request(['reload', 'sample']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'failed');
+    assert.match(h.manager.job?.error ?? '', /Activity instructions/);
+    assert.ok(h.brain.agent.state.systemPrompt.includes('Read a sample at your own pace.'));
+    h.saved.plugins.sample = false;
+    h.manager.request(['reload', 'sample']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done');
+    assert.ok(!h.brain.agent.state.systemPrompt.includes('Read a sample at your own pace.'));
+    assert.ok(!h.reviewer.agent.state.systemPrompt.includes('Read a sample at your own pace.'));
+  } finally { await h.close(); }
+});
 
 test('manifest defaults disable arbitrary user code before import and broken metadata cannot prevent explicit disable', async () => {
   const h = harness();

@@ -69,7 +69,7 @@ Disabled user code is not imported. Disabling an existing plugin works even if i
 | `ctx.settings` | Plugin defaults merged with `extensions.settings[id]`; checked against `configSchema` |
 | `ctx.tool(definition)` | Registers a JSON-result tool; parameters are validated on execution |
 | `ctx.observe(events => string[])` | Adds observation material; failures are logged without failing the thought |
-| `ctx.activity({activity, tools})` | Offers an activity at life wakes when its tools are available |
+| `ctx.activity({activity, tools, instructions?})` | Offers an activity at life wakes; optional stable guidance also enters system instructions while a listed tool is available |
 | `ctx.storage.get(key, fallback?)`, `set(key, value)` | JSON state scoped to this plugin ID, retained across reload and disable; writes require activation |
 | `ctx.directory`, `ctx.dataDirectory` | Original source directory and persistent data directory; use the former for bundled data and the latter for files you write |
 | `ctx.credential(name)` | Reads a named credential; keep credential names, not secret values, in plugin settings |
@@ -102,7 +102,7 @@ The CLI waits for completion and exits unsuccessfully on failure. The control so
 
 Preparation loads a complete source snapshot, validates settings, interface versions and tool-name conflicts, and leaves the running version intact if it fails. Dispatch of new thoughts, steering and memory reviews then pauses, while QQ perception continues saving events. Both brains and background work drain before candidates are activated and bindings switch together. Old SDK tool references are revoked; timers and cleanup belong to the old instance. A drain timeout retains the old version and configuration and resumes its timers. Cleanup errors after a successful commit are reported separately. An ongoing image generation completes before its plugin is replaced, rather than being reported as interrupted by a program restart.
 
-Only an implementation or settings change preserves working context when tool declarations and the plugin's `contextVersion` are unchanged. Added/removed tools, modified descriptions/parameters, and a changed `contextVersion` renew working context; memory, events, activities and commitments persist. Bump `contextVersion` when observation or activity semantics change without a tool-declaration change. A plugin's release `version` alone does not reset context.
+An implementation or settings change preserves working context when tool declarations, effective activity instructions, and the plugin's `contextVersion` are unchanged. Added/removed tools, modified descriptions/parameters, changed activity guidance, and a changed `contextVersion` renew working context; memory, events, activities and commitments persist. Bump `contextVersion` for observation or activity semantic changes not already reflected in those declarations. A plugin's release `version` alone does not reset context.
 
 `reload ID` applies that plugin's saved switch and settings; `drawing` also applies its image endpoint settings, either web plugin applies shared `web` settings to both, while account permissions and named QQ plugins require a restart. `reload all` refreshes ordinary plugins and these configuration groups; it leaves connection plugins running unchanged. Replacement instances reread credential values from the same credential file; core model, embedding, connection and management-page credentials retain their own startup snapshots. Core configuration (persona, model, database, QQ connection, plugin directories and drawing storage directory) still requires a restart and is reported separately. Built-in **source** updates require a rebuild/restart; ordinary capability **configuration** changes can reload.
 
@@ -206,7 +206,23 @@ The sticker plugin owns its collection queries and vector table in `stickers-sto
 
 ## Life activities
 
-`activities` declares activities to offer at life wakes. They appear only while the plugin and corresponding tools are available. `experienceKinds` maps tool names to stored event kinds so the Agent sees when it last did each activity. An activity can provide `currentValue` with the setting tool and a function reading its last successful arguments, as QQ signatures and online status do. `insertBefore` can retain an activity's historical position relative to a built-in activity. `activityInstructions` adds tool-usage guidance only while the plugin is enabled.
+Register activities during setup, alongside their tools:
+
+```js
+ctx.activity({
+  activity: 'Browse the reading room',
+  tools: ['reading_browse', 'reading_read'],
+  instructions: 'Follow your interests. Previews are not full reading experiences. New items are seen by checking; they are not pushed to you.',
+});
+```
+
+`activity` and each tool name must be non-empty strings, with at least one tool name. `instructions` is optional for existing plugins; when supplied it must be a non-empty string. The host copies the declaration during setup. Tools are alternative ways to take part: an activity is available while its plugin is enabled and at least one listed tool is available. Both system guidance and life wakes show only that available subset. Split independent actions into separate activities when their instructions would otherwise promise a disabled capability. Instructions should describe the activity and its actual delivery model, not demand execution, specify a persona, or carry changing state. Tool parameters and execution details still belong in tool descriptions.
+
+Activity instructions are appended to the system prompt in a section naming the contributing plugin, including with a custom operator template; no new placeholder is required. They are available during ordinary thoughts as well as life wakes. Scoped platform plugins have tool references qualified for their account. Disabling a plugin or removing all of an activity's tools removes its guidance too. The exact effective instructions participate in working-context identity, so a prompt-only edit is detected on reload without a manual `contextVersion` bump. Reviews receive only contributions whose tools are available to the reviewer. Guidance does not turn autonomous life on when it is disabled.
+
+Life wakes add changing activity state rather than repeating these instructions. `experienceKind` on a public tool maps its recorded experience to the time it last happened. Internally, `experienceKinds` maps tool names to stored event kinds; an activity may also provide `currentValue` with the setting tool and a function reading its last successful arguments, as QQ signatures and online status do. `insertBefore` retains an activity's position relative to a built-in activity. The former internal `activityInstructions` hook has been removed. Activity guidance belongs in per-activity `instructions`; tool-parameter lookup guidance stays in the catalog tools' descriptions.
+
+The management prompt preview gets effective guidance from the running daemon (`plugins prompts` on the control socket). If it cannot, it renders only built-in contributions from saved configuration and labels that limitation; the web process never imports user plugins. Unsaved template/persona drafts can still be previewed with those contributions.
 
 `chatActions` and `chatTarget(tool, args)` identify the chat engaged by a tool call, allowing new addressed messages there to influence the ongoing thought. `staleActions` selects calls that should be skipped if a newer addressed message arrived in their target chat before execution. `endsThought` identifies successful social actions that need no follow-up call. The QQ plugin supplies these rules for its native sends, reactions, and pokes; the brain performs the generic steering and interruption logic. These declarations do not create another Agent or an independent focus of attention.
 

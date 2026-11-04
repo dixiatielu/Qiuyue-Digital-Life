@@ -8,7 +8,6 @@ import { loadConfig } from '../src/config.js';
 import { modelReadiness, modelUse, type ModelConfig } from '../src/model.js';
 import { PiBrain, contextIdentity } from '../src/brain.js';
 import { estimateTokens, estimatedContextTokens, textTokens } from '../src/context.js';
-import { systemInstructions } from '../src/prompts.js';
 import { Store } from '../src/store.js';
 import { forReview } from '../src/tools.js';
 import { LifeReader } from '../src/webui/reader.js';
@@ -95,7 +94,7 @@ function brains(independentSummary = true, sameSummaryId = false) {
   main = new PiBrain(cfg, store, tools, backend('main', model), undefined, undefined, keys, 'main', summaries);
   review = new PiBrain(cfg, store, reviewTools, backend('review', reviewModel), undefined, undefined, keys, 'review', summaries);
   cfg.limits.outputReserveTokens = 4096;
-  const fixed = textTokens(systemInstructions(cfg)) + estimateTokens(tools.current().map(toToolDeclaration));
+  const fixed = textTokens(main.agent.state.systemPrompt) + estimateTokens(tools.current().map(toToolDeclaration));
   cfg.limits.contextTokens = cfg.limits.outputReserveTokens + cfg.limits.contextSafetyTokens + Math.ceil((fixed + 700) / 0.7);
   const observation = () => ({ batchId: 'review-test', events: [store.receive({ key: crypto.randomUUID(), kind: 'memory_maintenance', at: Date.now(), text: 'Review what happened.', payload: {} }, true)!] });
   return { cfg, store, scripts, requests, main, review, tools, reviewTools, observation };
@@ -144,7 +143,7 @@ test('review compaction inherits the review backend with no explicit reasoning, 
   for (const independent of [false, true]) {
     const f = brains(independent);
     try {
-      const fixed = textTokens(systemInstructions(f.cfg)) + estimateTokens(f.reviewTools.current().map(toToolDeclaration));
+      const fixed = textTokens(f.review.agent.state.systemPrompt) + estimateTokens(f.reviewTools.current().map(toToolDeclaration));
       f.cfg.review!.limits!.contextTokens = 2048 + f.cfg.limits.contextSafetyTokens + Math.ceil((fixed + 700) / 0.7);
       let turns = 0;
       const respond = (context: any) => summaryRequest(context.messages) ? answer('Review summary with sources and unsettled matters.') : ++turns < 6 ? answer([{ type: 'text', text: 'review evidence '.repeat(250) }, call('inspect_actions', {})]) : answer('Done');
