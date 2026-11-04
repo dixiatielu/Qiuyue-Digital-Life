@@ -25,9 +25,10 @@ function describe(id, value, allowed) {
   })[id] ?? { name: id, text: '', needs: [] };
 }
 
-function Tri({ value, onChange }) {
-  const options = [[undefined, t('Default', '默认')], [true, t('On', '开')], [false, t('Off', '关')]];
-  return html`<div class="segmented">${options.map(([option, label]) => html`<button class=${value === option ? 'active' : ''} onClick=${() => onChange(option)}>${label}</button>`)}</div>`;
+function PluginSwitch({ value, defaultEnabled, label, onChange }) {
+  const enabled = value ?? defaultEnabled;
+  const options = [[true, t('On', '开')], [false, t('Off', '关')]];
+  return html`<div class="segmented" role="group" aria-label=${label}>${options.map(([option, text]) => html`<button type="button" class=${enabled === option ? 'active' : ''} aria-pressed=${enabled === option} onClick=${() => onChange(option)}>${text}${option === defaultEnabled ? t(' (default)', '（默认）') : ''}</button>`)}</div>`;
 }
 
 function Permissions({ form, account }) {
@@ -110,17 +111,18 @@ export function PluginsPage() {
     <div hidden=${tab !== 'installed'} class="plugin-grid">${info.data.ids.map(id => {
       const live = running?.plugins.find(plugin => plugin.id === id);
       const schema = live?.configSchema ? live : info.data.metadata?.[id];
+      const defaultEnabled = schema?.defaultEnabled ?? live?.defaultEnabled ?? true;
       const account = accounts.find(account => id.startsWith(`${account.id.replaceAll('_', '-')}-`));
       const capability = account ? id.slice(account.id.replaceAll('_', '-').length + 1) : id;
       const user = !account && !(info.data.builtinIds ?? []).includes(id);
       const meta = user ? { name: schema?.name ?? live?.name ?? id, text: schema?.description ?? live?.description ?? '', needs: [] } : describe(capability, value, permitted({ allow: '*', deny: [], ...account?.tools }));
       const active = inspected?.plugins.includes(id);
       const pluginForm = { ...form, effective: { ...form.effective, extensions: { ...form.effective.extensions, settings: { ...form.effective.extensions?.settings, [id]: { ...schema?.defaults, ...form.effective.extensions?.settings?.[id] } } } } };
-      return html`<${Card} key=${id} title=${html`<span class="plugin-name"><${Icon} name="plugins" /><span>${meta.name}<small class="muted mono">${id}</small></span></span>`} actions=${html`<${Tri} value=${form.get(`plugins.${id}`)} onChange=${next => form.set(`plugins.${id}`, next)} />`}>
+      return html`<${Card} key=${id} title=${html`<span class="plugin-name"><${Icon} name="plugins" /><span>${meta.name}<small class="muted mono">${id}</small></span></span>`} actions=${html`<${PluginSwitch} label=${meta.name} value=${form.get(`plugins.${id}`)} defaultEnabled=${defaultEnabled} onChange=${next => form.set(`plugins.${id}`, next)} />`}>
         <p>${meta.text}</p>
         ${meta.warn && form.get(`plugins.${id}`) === false ? html`<p class="note error">${meta.warn}</p>` : null}
         <ul class="needs">${meta.needs.map(([ok, text]) => html`<li class=${ok === null ? '' : ok ? 'ok' : 'bad'}>${ok === null ? '·' : ok ? '✓' : '✗'} ${text}</li>`)}</ul>
-        <p class="small">${user ? t('User plugin', '用户插件') : t('Built-in', '内置插件')} ${live?.version ?? schema?.version ?? ''}${schema?.defaultEnabled === false ? t(' · Off by default', ' · 默认关闭') : ''}
+        <p class="small">${user ? t('User plugin', '用户插件') : t('Built-in', '内置插件')} ${live?.version ?? schema?.version ?? ''}
           ${live ? html` · <${Badge} kind=${live.state === 'running' ? 'ok' : ''}>${stateName(live.state)}<//>` : null}
           ${live?.pending ? html` · <${Badge}>${live.restartRequired ? t('restart required', '需重启应用') : t('pending changes', '有待应用修改')}<//>` : null}
         </p>
