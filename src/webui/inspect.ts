@@ -6,6 +6,7 @@ import { contextIdentity } from '../brain.js';
 import { EmbeddingClient, SemanticRecall } from '../recall.js';
 import { createPlugins, pluginCredentials } from '../plugins/index.js';
 import type { PluginHost } from '../plugins.js';
+import { modelReadiness } from '../model.js';
 
 const offline = () => { throw new Error('Offline inspection takes no action.'); };
 
@@ -20,6 +21,7 @@ export function inspectConfig(config: Config, credential: CredentialReader = env
     return {
       identities: [contextIdentity(config, tools)],
       plugins: plugins.enabledIds(), tools: tools.current().map(tool => tool.name), credentials: pluginCredentials(config, credential),
+      models: modelReadiness(config, credential),
     };
   } finally { store.close(); }
 }

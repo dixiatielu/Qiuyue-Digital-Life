@@ -1,4 +1,4 @@
-import { ago, api, Badge, Card, ContextNote, duration, failed, html, Modal, number, PageHeader, Tabs, t, time, toast, useState } from '../lib.js';
+import { ago, api, Badge, Card, ContextNote, duration, failed, html, Loading, Modal, number, PageHeader, Tabs, t, time, toast, useAsync, useState } from '../lib.js';
 
 const reasonLabel = reason => ({ thinking: t('a thought is under way', '正在思考'), reviewing: t('a memory review is under way', '正在整理记忆（review）'), calling: t('a model call is starting', '正在发起模型调用') })[reason] ?? reason;
 const fileLabel = name => ({ config: 'config.json', persona: t('persona file', '人格文件'), prompt: t('system prompt file', '系统提示词文件'), credentials: t('credentials', '凭据文件') })[name] ?? name;
@@ -73,6 +73,26 @@ function Logs() {
   <//>`;
 }
 
+function ModelUsage() {
+  const state = useAsync(() => api('/api/model-usage'));
+  if (!state.data) return html`<${Loading} state=${state} />`;
+  const data = state.data;
+  const purpose = row => row.purpose === 'compaction' ? row.owner === 'main' ? t('Primary compaction', '主思考压缩') : t('Review compaction', '复盘压缩') : row.owner === 'main' ? t('Primary thinking', '主思考') : t('Memory review', '记忆复盘');
+  const tokens = (row, key) => row.measuredCalls ? number(row[key]) : '—';
+  return html`<${Card} title=${t('Model usage · last 24 hours', '模型用量 · 最近 24 小时')} actions=${html`<button class="ghost" disabled=${state.loading} onClick=${state.reload}>${t('Refresh', '刷新')}</button>`}>
+    <p class="muted small">${t(`${number(data.total)} attempts; ${number(data.unclassified)} older attempts have no purpose recorded. Costs are unknown; token totals include only requests with reported usage.`, `${number(data.total)} 次尝试；其中 ${number(data.unclassified)} 次旧记录没有用途信息。费用未知；token 总量仅包含返回了用量的请求。`)}</p>
+    ${data.groups.length ? html`<div class="table-wrap"><table class="table small"><thead><tr>
+      <th>${t('Purpose / model', '用途 / 模型')}</th><th>${t('Attempts', '尝试')}</th><th>${t('Input (uncached)', '输入（未缓存）')}</th><th>${t('Cache read / write', '缓存读 / 写')}</th><th>${t('Output', '输出')}</th><th>${t('Cache hit', '缓存命中')}</th><th>${t('Unknown usage', '用量未知')}</th>
+    </tr></thead><tbody>${data.groups.map(row => {
+      const input = row.input + row.cacheRead + row.cacheWrite;
+      return html`<tr><td><strong>${purpose(row)}</strong><div class="mono">${row.provider}/${row.model}</div></td>
+        <td>${number(row.calls)}<div class="muted">${t(`${row.errors} failed · ${row.aborted} aborted · ${row.unfinished} unfinished`, `${row.errors} 失败 · ${row.aborted} 中止 · ${row.unfinished} 未结束`)}</div></td>
+        <td>${tokens(row, 'input')}</td><td>${tokens(row, 'cacheRead')} / ${tokens(row, 'cacheWrite')}</td><td>${tokens(row, 'output')}${row.reasoning === null ? null : html`<div class="muted">${t('Reported reasoning', '报告的推理量')}: ${number(row.reasoning)}</div>`}</td>
+        <td>${input ? `${(row.cacheRead / input * 100).toFixed(1)}%` : '—'}</td><td>${number(row.unknownUsage)}</td></tr>`;
+    })}</tbody></table></div>` : html`<p class="muted">${t('No requests with purpose information yet.', '尚无按用途记录的请求。')}</p>`}
+  <//>`;
+}
+
 export function Overview({ overview, live, refresh }) {
   const [tab, setTab] = useState('now');
   const status = overview.status ?? {};
@@ -96,7 +116,8 @@ export function Overview({ overview, live, refresh }) {
     ${!overview.config.valid ? html`<p class="note error">${t('The configuration does not load: ', '配置无法加载：')}${overview.config.error} — <a href="#/config">${t('fix it', '去修复')}</a></p>` : null}
     ${daemon.running && daemon.changed.length ? html`<div class="note warn"><div>${t('Changed since the daemon started: ', '常驻进程启动后修改过：')}${daemon.changed.map(fileLabel).join('、')}${t('. A restart puts them to use.', '。重启后生效。')}</div><${ContextNote} context=${overview.context} /></div>` : null}
     <${JobNote} job=${overview.job} />
-    <${Tabs} value=${tab} onChange=${setTab} tabs=${[['now', t('Now', '此刻')], ['timeline', t('Live', '实时动态')], ['logs', t('Logs', '运行日志')]]} />
+    <${Tabs} value=${tab} onChange=${setTab} tabs=${[['now', t('Now', '此刻')], ['timeline', t('Live', '实时动态')], ['usage', t('Model usage', '模型用量')], ['logs', t('Logs', '运行日志')]]} />
+    ${tab === 'usage' ? html`<${ModelUsage} />` : null}
     <div hidden=${tab !== 'now'} class="stack">
       <section class="activity-hero"><div class="hero-copy">
         <${Badge} kind=${!daemon.running ? 'bad' : !live.connected ? 'warn' : paused ? 'warn' : 'info'}>${!daemon.running ? t('Service stopped', '服务未运行') : !live.connected ? t('Reconnecting', '正在重新连接') : paused ? t('Thinking paused', '思考已暂停') : display.phase ?? t('Running', '运行中')}<//>

@@ -2,7 +2,7 @@ import { credentialPaths } from './credentials.js';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { ToolPermissions } from './platform.js';
-import { validateModelConfig, type ModelConfig } from './model.js';
+import { atModelPath, independentModelUses, modelReadiness, validateModelConfig, type ModelConfig, type ModelPath } from './model.js';
 import { checkSystemPrompt } from './prompts.js';
 
 export interface AdapterConfig {
@@ -25,10 +25,12 @@ export interface Config {
   plugins: Record<string, boolean>;
   extensions: { directory: string; dataDirectory: string; settings: Record<string, Record<string, unknown>>; reloadTimeoutMs: number };
   model: ModelConfig;
+  /** Omitted fields follow the main model and its context policy; model overrides are complete configurations. */
+  review?: { model?: ModelConfig; limits?: { contextTokens?: number; outputReserveTokens?: number } };
   /** freeTime: a quiet stretch, drawn between quietMinMs and quietMaxMs each time, offers a life wake at least gapMs from any other, at most perDay a day (ADR-0015). */
   life: { enabled: boolean; allowFiction: boolean; minWakeMs: number; freeTime: { enabled: boolean; quietMinMs: number; quietMaxMs: number; gapMs: number; perDay: number } };
   limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; maxPreemptions: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
-  compaction: { keepRecentTokens: number; summaryMaxTokens: number; retries: number; idleRatio: number; idleAfterMs: number };
+  compaction: { model?: ModelConfig; contextTokens?: number; keepRecentTokens: number; summaryMaxTokens: number; retries: number; idleRatio: number; idleAfterMs: number };
   memory: { retentionDays: number; recallLimit: number; recentEvents: number; reflectionEveryEvents: number };
   development: { scopeChars: number; personChars: number; people: number; recordLines: number };
   web: { enabled: boolean; searchUrl: string; searchKeyEnv: string; timeoutMs: number; maxBytes: number };
@@ -44,6 +46,21 @@ export function loadConfig(path: string): Config {
   const base = dirname(resolve(path));
   if (typeof raw.personaFile !== 'string' || !raw.personaFile.trim()) throw new Error('The personaFile configuration must be a non-empty file path.');
   const persona = readFileSync(resolve(base, raw.personaFile), 'utf8');
+  for (const field of ['review', 'compaction'] as const) if (raw[field] !== undefined && (!raw[field] || typeof raw[field] !== 'object' || Array.isArray(raw[field]))) throw new Error(`${field} must be an object.`);
+  const readModel = (value: any, path: ModelPath) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path} must be a model configuration object.`);
+    const model = { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...value } as ModelConfig;
+    atModelPath(path, () => validateModelConfig(model));
+    return model;
+  };
+  const review = raw.review;
+  if (review?.limits !== undefined) {
+    if (!review.limits || typeof review.limits !== 'object' || Array.isArray(review.limits)) throw new Error('review.limits must be an object.');
+    for (const [key, value] of Object.entries(review.limits)) {
+      if (!['contextTokens', 'outputReserveTokens'].includes(key)) throw new Error(`Unknown review.limits.${key}.`);
+      if (!Number.isSafeInteger(value) || (value as number) <= 0) throw new Error(`review.limits.${key} must be a positive integer.`);
+    }
+  }
   if (raw.systemPromptFile !== undefined && (typeof raw.systemPromptFile !== 'string' || !raw.systemPromptFile.trim())) throw new Error('systemPromptFile must be a non-empty file path when set.');
   const config: Config = {
     adapters: readAdapters(raw.adapters),
@@ -61,9 +78,10 @@ export function loadConfig(path: string): Config {
       settings: raw.extensions?.settings ?? {}, reloadTimeoutMs: raw.extensions?.reloadTimeoutMs ?? 120_000,
     },
     model: { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...raw.model },
+    ...(review === undefined ? {} : { review: { ...(review.model === undefined ? {} : { model: readModel(review.model, 'review.model') }), ...(review.limits === undefined ? {} : { limits: review.limits }) } }),
     life: { enabled: false, allowFiction: false, minWakeMs: 60_000, ...raw.life, freeTime: { enabled: true, quietMinMs: 600_000, quietMaxMs: 1_200_000, gapMs: 3_600_000, perDay: 8, ...raw.life?.freeTime } },
     limits: { batchSize: 20, debounceMs: 1200, maxDelayMs: 4000, ambientDelayMs: 120_000, maxPreemptions: 2, tickMs: 500, modelCallsPerDay: null, actionsPerHour: null, runTimeoutMs: null, maxTurnsPerRun: null, maxImages: 4, contextTokens: 262144, outputReserveTokens: 32768, contextSafetyTokens: 2048, ...raw.limits },
-    compaction: { keepRecentTokens: 12000, summaryMaxTokens: 2048, retries: 1, idleRatio: 0.85, idleAfterMs: 30_000, ...raw.compaction },
+    compaction: { keepRecentTokens: 12000, summaryMaxTokens: 2048, retries: 1, idleRatio: 0.85, idleAfterMs: 30_000, ...raw.compaction, ...(raw.compaction?.model === undefined ? {} : { model: readModel(raw.compaction.model, 'compaction.model') }) },
     memory: { retentionDays: 90, recallLimit: 8, recentEvents: 30, reflectionEveryEvents: 100, ...raw.memory },
     development: { scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
     web: { enabled: true, searchUrl: 'https://api.deepseek.com/v1/tools/search', searchKeyEnv: 'DEEPSEEK_API_KEY', timeoutMs: 15_000, maxBytes: 2_000_000, ...raw.web },
@@ -101,7 +119,12 @@ export function loadConfig(path: string): Config {
   for (const key of ['keepRecentTokens', 'summaryMaxTokens', 'idleAfterMs'] as const) if (!Number.isSafeInteger(config.compaction[key]) || config.compaction[key] <= 0) throw new Error(`compaction.${key} must be a positive integer.`);
   if (!Number.isSafeInteger(config.compaction.retries) || config.compaction.retries < 0 || config.compaction.retries > 3) throw new Error('compaction.retries must be between 0 and 3.');
   if (typeof config.compaction.idleRatio !== 'number' || !(config.compaction.idleRatio > 0 && config.compaction.idleRatio <= 1)) throw new Error('compaction.idleRatio must be greater than 0 and at most 1.');
-  if (config.compaction.summaryMaxTokens > config.limits.outputReserveTokens) throw new Error('summaryMaxTokens cannot exceed outputReserveTokens.');
+  if (config.compaction.contextTokens !== undefined && (!Number.isSafeInteger(config.compaction.contextTokens) || config.compaction.contextTokens <= 0)) throw new Error('compaction.contextTokens must be a positive integer.');
+  if (!independentModelUses(config) && config.compaction.summaryMaxTokens > config.limits.outputReserveTokens) throw new Error('summaryMaxTokens cannot exceed outputReserveTokens without an independent compaction budget.');
+  if (independentModelUses(config)) {
+    const { problems } = modelReadiness(config);
+    if (problems.length) throw new Error(problems.join('\n'));
+  }
   for (const value of [config.life.enabled, config.life.allowFiction, config.life.freeTime.enabled, config.web.enabled, config.embedding.enabled, config.drawing.enabled]) if (typeof value !== 'boolean') throw new Error('Switches must be boolean values.');
   if (freeTime.quietMinMs > freeTime.quietMaxMs) throw new Error('life.freeTime.quietMinMs cannot exceed quietMaxMs.');
   const embedding = config.embedding;

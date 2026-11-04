@@ -1,7 +1,7 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
-import { createModelBackend } from './model.js';
-import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
+import { createModelBackend, modelBudget, modelRoute, modelUse, type ModelOwner } from './model.js';
+import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
@@ -10,7 +10,7 @@ import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, pruneToolResults, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
+import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import type { SemanticRecall } from './recall.js';
@@ -82,15 +82,20 @@ export class PiBrain implements Brain {
   /** Preemptions since a decision was last carried out as made. */
   private preemptions = 0;
   private callStartedAt = 0;
-  constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential) {
-    const { model, stream } = backend ?? createModelBackend(config.model, credential);
+  private activeRequest?: { callId: string; runId: string; owner: ModelOwner; purpose: 'thought' | 'review' | 'compaction'; provider: string; model: string; api: string; startedAt: number; attempt?: number };
+  private lastCallId?: string;
+  private readonly summaryBackend?: { model: Model<any>; stream: StreamFn };
+  constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential, private owner: ModelOwner = 'main', compactionBackend?: { model: Model<any>; stream: StreamFn }) {
+    const use = modelUse(config, owner);
+    const { model, stream } = backend ?? createModelBackend(use.thinking, credential);
     this.stream = stream;
+    this.summaryBackend = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential) : undefined);
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
     this.agent = new Agent({
-      initialState: { model: config.model.baseUrl ? { ...model, baseUrl: config.model.baseUrl } : model, systemPrompt: this.instructions(), tools: tools.current(), thinkingLevel: config.model.thinkingLevel ?? 'off' },
-      streamFn: (target, context, options) => stream(target, context, { ...options, maxTokens: Math.min(config.limits.outputReserveTokens, target.maxTokens) }),
-      getApiKey: () => credential(config.model.apiKeyEnv), toolExecution: 'sequential', steeringMode: 'all',
+      initialState: { model, systemPrompt: this.instructions(), tools: tools.current(), thinkingLevel: use.thinking.thinkingLevel ?? 'off' },
+      streamFn: (target, context, options) => stream(target, context, { ...options, maxTokens: Math.min(modelUse(config, owner).limits.outputReserveTokens, target.maxTokens) }),
+      getApiKey: () => credential(use.thinking.apiKeyEnv), toolExecution: 'sequential', steeringMode: 'all',
       convertToLlm: toModelMessages,
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
       beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
@@ -108,17 +113,17 @@ export class PiBrain implements Brain {
         const update = runtimeUpdate(view, shown);
         if (update) messages.push(this.runtimeMessage(update));
         this.runtimeSnapshot = view;
-        const { window, budget } = this.budget(currentModel);
+        const { budget } = this.budget(currentModel);
         const route = this.route(currentModel);
         let measured: TokenMeasurement;
         // The first request leaves room for the observations steered in after it; later ones may fill the budget.
         const limit = first ? Math.floor(budget * config.compaction.idleRatio) : budget;
-        ({ messages, measured } = await this.shrink(messages, limit, budget, window, currentModel, runtime, signal));
+        ({ messages, measured } = await this.shrink(messages, limit, budget, currentModel, runtime, signal));
         if (measured.tokens > budget) throw new Error('Required state or the latest observation exceeds the context budget; reduce the batch size or organize pending items.');
-        store.log('context_budget', { runId: this.runId, ...measured, inputBudget: budget, outputReserveTokens: config.limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
+        store.log('context_budget', { runId: this.runId, owner, ...measured, inputBudget: budget, outputReserveTokens: modelUse(config, owner).limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
         ensureCurrent(store, this.thought, signal);
         // A preemption that came during preparation ends the thought before its call; what preparation did is kept.
-        if (this.preempted) this.agent.abort(); else this.chargeCall();
+        if (this.preempted) this.agent.abort(); else this.startRequest(currentModel, owner === 'main' ? 'thought' : 'review');
         // Pi keeps its event transcript separately from the prepared request context.
         this.pendingRequest = messages.slice(); this.pendingRoute = route;
         this.agent.state.messages = messages.slice();
@@ -137,7 +142,7 @@ export class PiBrain implements Brain {
         this.thought.lifeOnly &&= event.message.lifeOnly;
         store.log('observation_entered', { runId: this.runId, batchId: event.message.batchId });
       }
-      if (event.type === 'message_end' && event.message.role === 'assistant') this.phase = 'acting';
+      if (event.type === 'message_end' && event.message.role === 'assistant') { this.finishRequest(event.message); this.phase = 'acting'; }
       if (event.type === 'tool_execution_start') {
         const chat = this.tools.plugins.chatTarget(event.toolName, event.args); if (chat) this.engaged.add(chat);
       }
@@ -146,7 +151,7 @@ export class PiBrain implements Brain {
         ensureCurrent(store, this.thought);
         this.meter.observe(this.pendingRequest, event.message, this.pendingRoute);
         store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
-        store.log('thought_turn_completed', { runId: this.runId, toolCalls: event.toolResults.length, usage: event.message.usage });
+        store.log('thought_turn_completed', { runId: this.runId, callId: this.lastCallId, owner, toolCalls: event.toolResults.length, usage: event.message.usage });
       }
     });
   }
@@ -174,17 +179,31 @@ export class PiBrain implements Brain {
   private chargeCall() {
     this.turns++;
     if (this.config.limits.maxTurnsPerRun !== null && this.turns > this.config.limits.maxTurnsPerRun) throw new Error('The turn limit for this reasoning run has been reached.');
-    this.store.chargeCall(this.runId, this.config.limits.modelCallsPerDay);
+    return this.store.chargeCall(this.runId, this.config.limits.modelCallsPerDay);
   }
-  private route(model: Model<any>) { return JSON.stringify([model.provider, model.id, model.api, model.baseUrl]); }
+  private startRequest(model: Model<any>, purpose: 'thought' | 'review' | 'compaction', attempt?: number) {
+    this.activeRequest = { callId: this.chargeCall(), runId: this.runId, owner: this.owner, purpose, provider: model.provider, model: model.id, api: model.api, startedAt: Date.now(), ...(attempt === undefined ? {} : { attempt }) };
+    this.store.log('model_request_started', this.activeRequest);
+  }
+  private finishRequest(response?: AssistantMessage, aborted = this.controller.signal.aborted) {
+    const request = this.activeRequest;
+    if (!request) return;
+    this.activeRequest = undefined; this.lastCallId = request.callId;
+    const status = response ? response.stopReason === 'aborted' ? 'aborted' : response.stopReason === 'error' ? 'error' : 'success' : aborted ? 'aborted' : 'error';
+    const usage = response?.usage;
+    const known = usage && (status === 'success' || [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].some(value => value > 0));
+    this.store.log('model_request_finished', { ...request, finishedAt: Date.now(), status, stopReason: response?.stopReason, usage: known ? usage : null });
+  }
+  private route(model: Model<any>) { return modelRoute(model); }
   private budget(model: Model<any>) {
-    const window = Math.min(this.config.limits.contextTokens, model.contextWindow);
-    const budget = window - this.config.limits.outputReserveTokens - this.config.limits.contextSafetyTokens;
+    const { limits } = modelUse(this.config, this.owner);
+    const { window, budget } = modelBudget(model, limits.contextTokens, limits.outputReserveTokens, limits.contextSafetyTokens);
     if (budget <= 0) throw new Error('The model window is too small for the output reserve and safety margin.');
     return { window, budget };
   }
+  private get contextTokens() { return this.budget(this.agent.state.model).window; }
   /** Bring the context under limit: prune old tool results first, and summarize older exchanges only if that is not enough. */
-  private async shrink(messages: AgentMessage[], limit: number, budget: number, window: number, model: Model<any>, runtime: RuntimeSnapshot, signal?: AbortSignal) {
+  private async shrink(messages: AgentMessage[], limit: number, budget: number, model: Model<any>, runtime: RuntimeSnapshot, signal?: AbortSignal) {
     const route = this.route(model);
     let measured = this.meter.measure(messages, route);
     const before = measured.tokens;
@@ -200,7 +219,7 @@ export class PiBrain implements Brain {
       const latest = messages.at(-1);
       if (!(latest?.role === 'user' && latest.content === snapshot.content)) messages.push(snapshot);
       this.runtimeSnapshot = runtime;
-      try { messages = await this.compact(messages, budget, window, model, this.stream, signal); }
+      try { messages = await this.compact(messages, budget, model, signal); }
       catch (error) {
         // Below the full budget, compaction only makes room ahead of time; the request can go on without it.
         if (measured.tokens > budget || signal?.aborted) throw error;
@@ -211,28 +230,30 @@ export class PiBrain implements Brain {
     }
     return { messages, measured };
   }
-  private async compact(messages: AgentMessage[], budget: number, window: number, model: Model<any>, stream: StreamFn, signal?: AbortSignal): Promise<AgentMessage[]> {
+  private async compact(messages: AgentMessage[], budget: number, ownerModel: Model<any>, signal?: AbortSignal): Promise<AgentMessage[]> {
+    const use = modelUse(this.config, this.owner);
+    const { model, stream } = this.summaryBackend ?? { model: ownerModel, stream: this.stream };
+    const { window } = modelBudget(model, use.compactionContextTokens, this.config.compaction.summaryMaxTokens, this.config.limits.contextSafetyTokens);
     const summaryLimit = this.config.compaction.summaryMaxTokens;
-    const { system, removed, kept } = compactionSplit(messages, Math.min(this.config.compaction.keepRecentTokens, budget), budget, summaryLimit + 100);
+    const { system, pinned, removed, kept } = compactionSplit(messages, Math.min(this.config.compaction.keepRecentTokens, budget), budget, summaryLimit + 100, this.owner === 'review');
     if (!removed.length) throw new Error('No older exchanges can be safely compacted; reduce the latest input or increase the context budget.');
     const ids = this.store.archiveContext(removed, [...this.thought.sources]);
-    const framing = `${SUMMARY_PREFIX} (historical material; use read_context to retrieve originals):\n`;
-    const references = `\nOriginal record IDs: ${ids.slice(-8).join(', ')}`;
-    const outputLimit = summaryLimit - textTokens(framing + references) - 16;
+    const { framing, references, reserve } = summaryEnvelope(ids);
+    const outputLimit = summaryLimit - reserve;
     if (outputLimit < 64) throw new Error('The summary token limit is too small to retain the required source references.');
     // Models cannot count their own tokens; aiming well below the cut-off leaves room to finish.
     const target = Math.floor(outputLimit * 0.6);
-    const instructions = `Internal working context consolidation: Produce a brief continuity summary for the same digital life, aiming for about ${target} tokens (Chinese runs about one token per character); output stops at ${outputLimit}. Summarize only the first ${removed.length} older messages after the system message. An existing summary among them is material to condense, not a prefix to keep: the limit covers it too, so merge it in and shorten it, dropping what is settled, superseded, or already saved with remember. Put the most important first; if output stops early, only the end is lost. If recent exchanges follow, use them only to correct outdated judgments; their originals are retained separately. Do not call tools or take external action. Preserve people, times, group or private settings, changes in relationship impressions and their evidence, current topics, unfinished matters, and actual action outcomes. Distinguish reported claims, inferences, fiction, success, failure, and unknown outcomes. Old state may be outdated; follow later runtime_data. Update outdated judgments in existing summaries. Use read_context to retrieve originals when needed; older records include ${ids.slice(-12).join(', ')}. Retain relevant source IDs and necessary ctx: record IDs in the summary.`;
+    const instructions = `Internal working context consolidation: Produce a brief continuity summary for the same digital life, aiming for about ${target} tokens (Chinese runs about one token per character); output stops at ${outputLimit}. Summarize only the first ${removed.length} older messages after the system message${pinned.length ? ' and the retained review prompt' : ''}. An existing summary among them is material to condense, not a prefix to keep: the limit covers it too, so merge it in and shorten it, dropping what is settled, superseded, or already saved with remember. Put the most important first; if output stops early, only the end is lost. If recent exchanges follow, use them only to correct outdated judgments; their originals are retained separately. Do not call tools or take external action. Preserve people, times, group or private settings, changes in relationship impressions and their evidence, current topics, unfinished matters, and actual action outcomes. Distinguish reported claims, inferences, fiction, success, failure, and unknown outcomes. Old state may be outdated; follow later runtime_data. Update outdated judgments in existing summaries. Use read_context to retrieve originals when needed; older records include ${ids.slice(-12).join(', ')}. Retain relevant source IDs and necessary ctx: record IDs in the summary.`;
     const directive: Message = { role: 'user', content: instructions, timestamp: Date.now() };
     // Reuse the complete warm prefix when it fits; the old prefix remains a fallback for oversized new input.
-    let request: AgentMessage[] = [system, ...removed, ...kept, directive];
+    let request: AgentMessage[] = [system, ...pinned, ...removed, ...kept, directive];
     const fits = (candidate: AgentMessage[]) => this.meter.measure(candidate, this.route(model)).tokens + summaryLimit + this.config.limits.contextSafetyTokens <= window;
     const includedRecentContext = fits(request);
-    if (!includedRecentContext) request = [system, ...removed, directive];
+    if (!includedRecentContext) request = [system, ...pinned, ...removed, directive];
     const sized = includedRecentContext || fits(request);
     const replacement = (text: string) => {
       const summary: Message = { role: 'user', content: framing + text + references, timestamp: Date.now() };
-      const compacted = [system, summary, ...kept];
+      const compacted = [system, ...pinned, summary, ...kept];
       const before = estimatedContextTokens(messages); const after = estimatedContextTokens(compacted);
       return after < before && after <= budget ? { summary, compacted, before, after } : undefined;
     };
@@ -240,11 +261,16 @@ export class PiBrain implements Brain {
     let failure = 'The history to consolidate exceeds the context budget; a continuity summary cannot be generated safely.';
     for (let attempt = 0; sized && !result && attempt <= this.config.compaction.retries; attempt++) {
       ensureCurrent(this.store, this.thought, signal);
-      this.chargeCall();
+      this.startRequest(model, 'compaction', attempt);
       this.display(monitor => monitor.requestStarted('compacting'));
-      const response = await (await stream(model, normalizeContext({ messages: toModelMessages(request) }), { apiKey: this.credential(this.config.model.apiKeyEnv), signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result();
+      let response: AssistantMessage;
+      try {
+        const portable = this.route(model) === this.route(ownerModel) ? request : portableSummaryMessages(request);
+        response = await (await stream(model, normalizeContext({ messages: toModelMessages(portable) }), { apiKey: this.credential(use.compaction.apiKeyEnv), reasoning: use.compactionThinkingLevel === 'off' ? undefined : use.compactionThinkingLevel, signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result();
+        this.finishRequest(response);
+      } catch (error) { this.finishRequest(undefined, signal?.aborted); throw error; }
       ensureCurrent(this.store, this.thought, signal);
-      this.store.log('context_summary_completed', { runId: this.runId, attempt, usage: response.usage, stopReason: response.stopReason });
+      this.store.log('context_summary_completed', { runId: this.runId, callId: this.lastCallId, owner: this.owner, attempt, usage: response.usage, stopReason: response.stopReason });
       transient = response.stopReason === 'error' || response.stopReason === 'aborted';
       const written = transient || response.content.some(item => item.type === 'toolCall') ? '' : response.content.filter((item): item is TextContent => item.type === 'text').map(item => item.text).join('\n').trim();
       // A summary cut off at the limit keeps its complete lines, which come in order of importance.
@@ -259,7 +285,7 @@ export class PiBrain implements Brain {
     if (!result) throw new Error(failure);
     this.store.archiveContext([result.summary], [...this.thought.sources]);
     this.meter.reset();
-    this.compactions.push({ runId: this.runId, beforeTokens: result.before, afterTokens: result.after, removedMessages: removed.length, includedRecentContext, ...(truncated ? { truncated } : {}), ...(failure ? { setAside: failure } : {}), firstKeptRecordId: kept[0] ? contextRecordId(kept[0]) : undefined, summaryRecordId: contextRecordId(result.summary) });
+    this.compactions.push({ runId: this.runId, owner: this.owner, provider: model.provider, model: model.id, beforeTokens: result.before, afterTokens: result.after, removedMessages: removed.length, includedRecentContext, ...(truncated ? { truncated } : {}), ...(failure ? { setAside: failure } : {}), firstKeptRecordId: kept[0] ? contextRecordId(kept[0]) : undefined, summaryRecordId: contextRecordId(result.summary) });
     return result.compacted;
   }
   /** Without a summary, older messages leave under a note; their originals stay archived and their events recallable. */
@@ -318,12 +344,12 @@ export class PiBrain implements Brain {
     const entries = (kind: MemoryKind) => development.filter(memory => memory.kind === kind).map((memory: Memory) => ({ id: memory.id, scope: memory.scope, title: memory.title, content: memory.content, createdAt: new Date(memory.createdAt).toISOString() }));
     const runtime = { platformAccounts: this.store.setting('platformAccounts', {}), now: new Date().toISOString(), timeZone: 'Asia/Shanghai', adapters: this.config.adapters.map(({ id, driver, accountId, tools }) => ({ id, driver, accountId, tools })), settings: this.store.settings(), allowFiction: this.config.life.allowFiction, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, ...(event.source ? { source: event.source } : {}), text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
     // Commitments, current activity, pursuits, and development are never selected by probabilistic recall.
-    while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
-    while (estimateTokens(runtime) > this.config.limits.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
+    while (estimateTokens(runtime) > this.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
+    while (estimateTokens(runtime) > this.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
     return runtime;
   }
   private async message(observation: Observation): Promise<ObservationMessage> {
-    const preview = Math.max(80, Math.min(2000, Math.floor(this.config.limits.contextTokens / (observation.events.length * 8))));
+    const preview = Math.max(80, Math.min(2000, Math.floor(this.contextTokens / (observation.events.length * 8))));
     const rests = observation.events.filter(event => event.kind === 'rest_backlog');
     const faces = await this.tools.plugins.emojiNames(observation.events, this.controller.signal);
     // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
@@ -332,7 +358,7 @@ export class PiBrain implements Brain {
     for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
     for (const text of this.tools.plugins.observation(observation.events, this.thought)) content.push({ type: 'text', text });
     let count = 0;
-    const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.config.limits.contextTokens * 0.4;
+    const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.contextTokens * 0.4;
     // Plugin-produced pictures are seen before incoming chat images, within the same context budget.
     for (const event of observation.events) for (const image of this.tools.plugins.images(event).filter(image => image.autoView)) {
       if (!fits()) { content.push({ type: 'text', text: image.deferred }); continue; }
@@ -375,7 +401,7 @@ export class PiBrain implements Brain {
     const { until, chats } = payload as { until: number; chats: { conversation: string; from: number; messages: number; notices: number }[] };
     const items = chats.reduce((sum, chat) => sum + chat.messages + chat.notices, 0) || 1;
     return chats.map(chat => {
-      const share = Math.floor(this.config.limits.contextTokens / 4 * (chat.messages + chat.notices) / items);
+      const share = Math.floor(this.contextTokens / 4 * (chat.messages + chat.notices) / items);
       const { text, omitted } = new ChatRecord(this.store, chat.conversation, faces, undefined, action => this.tools.plugins.actionCaption(action)).span(chat.from, until, share);
       return omitted ? `${text}\n[The earliest ${omitted} lines did not fit; read them with read_chat_record from="${recordTime(chat.from)}".]` : text;
     }).join('\n\n');
@@ -456,7 +482,7 @@ export class PiBrain implements Brain {
       this.seen.clear();
     }
     catch (error) { outcome = this.controller.signal.aborted ? 'interrupted' : 'error'; this.revert(rollback, generation); throw error; }
-    finally { this.display(monitor => monitor.endRun(this.preempted ? 'interrupted' : outcome)); this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; }
+    finally { this.finishRequest(undefined, this.preempted || this.controller.signal.aborted); this.display(monitor => monitor.endRun(this.preempted ? 'interrupted' : outcome)); this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; }
   }
   /** A memory review runs apart from the conversations, in a working context of its own that starts from runtime state and ends with it; nothing steers into it (ADR-0012). */
   async review(observation: Observation) {
@@ -476,6 +502,7 @@ export class PiBrain implements Brain {
       this.store.log('review_finished', { runId: this.runId, calls: this.turns });
     }
     finally {
+      this.finishRequest();
       // Its exchanges were archived turn by turn; only the context itself is let go.
       for (const compacted of this.compactions) this.store.log('context_compacted', compacted);
       this.agent.clearAllQueues(); this.phase = 'idle'; this.resetContext();
@@ -520,7 +547,7 @@ export class PiBrain implements Brain {
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const model = this.agent.state.model;
-    const { window, budget } = this.budget(model);
+    const { budget } = this.budget(model);
     const limit = Math.floor(budget * this.config.compaction.idleRatio);
     if (this.meter.measure(this.agent.state.messages, this.route(model)).tokens <= limit) return;
     const rollback = this.checkpoint(); this.compactions = [];
@@ -528,7 +555,7 @@ export class PiBrain implements Brain {
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: false };
     try {
-      const { messages } = await this.shrink(this.agent.state.messages.slice(), limit, budget, window, model, this.runtimeContext(), this.controller.signal);
+      const { messages } = await this.shrink(this.agent.state.messages.slice(), limit, budget, model, this.runtimeContext(), this.controller.signal);
       this.agent.state.messages = messages;
       this.store.saveContext(this.checkpoint(), [], this.compactions);
     } catch (error) { this.revert(rollback, generation); throw error; }

@@ -57,6 +57,16 @@ Replace `openai` with your provider when listing its models. Then edit:
 
 > **Before starting:** The example allows all SnowLuma APIs and sets no limits on model calls or actions. Adjust `adapters[0].tools` and `limits` for your setup. Autonomous life is disabled by default; it can be enabled separately.
 
+### Models for thinking, review, and compaction
+
+`model` runs everyday thinking and actions. Optional `review.model` and `compaction.model` accept the same complete model configuration, including custom endpoint capabilities, credential name, and thinking level. For example, keep a less expensive model in `model` and copy the stronger model's full configuration into both `review.model` and `compaction.model`. All three must understand images. They share one persona, long-term memory, and continuing state.
+
+With no `review.model`, review follows `model`. With no `compaction.model`, each context uses its own model for summaries: primary summaries follow the primary model, review summaries follow the review model. An explicit compaction model handles both. Omit an override to inherit; an empty model object or `null` is invalid. Overrides never merge fields with another model and failed requests never silently switch models. Inherited summaries do not explicitly enable extra reasoning; an independent summary uses its own `thinkingLevel` (off by default).
+
+Review can separately set `review.limits.contextTokens` and `review.limits.outputReserveTokens`; omitted fields follow `limits`. `compaction.contextTokens` caps the summary request's window and defaults to the owner's configured window, bounded by the summary model. `compaction.summaryMaxTokens` bounds the saved summary including references. A summary must fit back into the owner's context even when the summarizer has a larger window. Validation reports model assignments, missing credentials, and insufficient budgets. Output reserves include reasoning; budget-based Anthropic reasoning requires more than 1,024 output tokens.
+
+The management page's Models section offers all three assignments, inheritance controls, budgets, and connection tests. Changes take effect after restart. Changing only review/compaction settings retains the primary working context; changing `model` starts a fresh working context while retaining memory and continuing state. The Overview's Model usage tab separates primary thinking, review, and each owner's compaction over the last 24 hours. Attempts share the daily call budget; retries count once each. Missing usage and historical purpose information remain unknown, and zero SDK cost is not treated as free service.
+
 ### 3. Start and inspect
 
 ```bash
@@ -107,7 +117,7 @@ A web page for the same work: live status and timeline, pause and life switches,
 - **System prompt:** saving it writes `system-prompt.md` beside `config.json` (outside git) and sets `systemPromptFile`; without that setting the built-in prompt is used. The page warns when the built-in prompt has changed since your file was saved.
 - **Restarts:** set `webui.service` to the daemon's systemd user unit, such as `qiuyue-digital-life.service`, to start, stop, and restart it from the page. A restart can wait until no thought or memory review is under way.
 - **Credentials:** the page shows masked values and their sources, refuses edits to externally injected values, and saves new values only to `credentialsFile`. Connection tests read the latest files with the same precedence as the daemon. Reload the affected plugins to apply their credentials; core consumers still require a daemon restart, and changing the login token requires a management-page restart.
-- **Providers:** the page keeps provider endpoints in `data/webui/providers.json`; choosing one copies its address, API, and key variable into `model`, `embedding`, or `drawing`. The daemon reads only `config.json`.
+- **Providers:** the page keeps provider endpoints in `data/webui/providers.json`; choosing one copies its address, API, and key variable into the selected thinking/review/compaction model, `embedding`, or `drawing`. The daemon reads only `config.json`.
 
 ## How it works
 

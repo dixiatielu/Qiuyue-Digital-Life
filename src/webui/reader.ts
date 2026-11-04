@@ -13,7 +13,13 @@ const memoryRow = (db: DatabaseSync, row: Row): Memory => ({
   supersedes: row.supersedes ?? undefined, ...(row.scope ? { scope: row.scope } : {}), active: Boolean(row.active), createdAt: row.created_at,
 });
 /** Trace rows written while a model call is about to start or under way, before the live view shows the thought as busy. */
-const inFlight = (kind: string) => kind === 'context_budget' || kind.startsWith('observation_');
+const inFlight = (kind: string) => kind === 'context_budget' || kind === 'model_request_started' || kind.startsWith('observation_');
+
+interface UsageGroup {
+  owner: string; purpose: string; provider: string; model: string; api: string;
+  calls: number; success: number; errors: number; aborted: number; unfinished: number; unknownUsage: number;
+  measuredCalls: number; input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number | null;
+}
 
 /**
  * Reads the life database without the daemon lease and never writes to it, so the page can look while the daemon runs or after it stops.
@@ -108,6 +114,41 @@ export class LifeReader {
   }
   counts(): Record<string, number> {
     return this.read(db => Object.fromEntries(db.prepare('SELECT kind, count(*) AS n FROM memories WHERE active=1 GROUP BY kind').all().map(row => [String(row.kind), Number(row.n)])), {});
+  }
+  /** Each calls row is one charged attempt; turn/summary traces are deliberately not counted again. */
+  modelUsage(now = Date.now()) {
+    const since = now - 86_400_000;
+    return this.read(db => {
+      const requests = new Map<string, Row>();
+      for (const row of db.prepare("SELECT data FROM trace WHERE at>=? AND kind IN ('model_request_started','model_request_finished') ORDER BY id").all(since)) {
+        const item = parse(row.data);
+        if (typeof item.callId === 'string') requests.set(item.callId, item);
+      }
+      const groups = new Map<string, UsageGroup>();
+      let total = 0; let unclassified = 0;
+      for (const row of db.prepare('SELECT id FROM calls WHERE at>=? AND at<=?').all(since, now)) {
+        total++;
+        const item = requests.get(String(row.id));
+        if (!item) { unclassified++; continue; }
+        const key = JSON.stringify([item.owner, item.purpose, item.provider, item.model, item.api]);
+        let group = groups.get(key);
+        if (!group) {
+          group = { owner: item.owner, purpose: item.purpose, provider: item.provider, model: item.model, api: item.api, calls: 0, success: 0, errors: 0, aborted: 0, unfinished: 0, unknownUsage: 0, measuredCalls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: null };
+          groups.set(key, group);
+        }
+        group.calls++;
+        if (item.status === 'success') group.success++;
+        else if (item.status === 'error') group.errors++;
+        else if (item.status === 'aborted') group.aborted++;
+        else group.unfinished++;
+        const usage = item.usage;
+        if (!usage || !['input', 'output', 'cacheRead', 'cacheWrite'].every(field => Number.isFinite(usage[field]) && usage[field] >= 0)) { group.unknownUsage++; continue; }
+        group.measuredCalls++;
+        group.input += usage.input; group.output += usage.output; group.cacheRead += usage.cacheRead; group.cacheWrite += usage.cacheWrite;
+        if (Number.isFinite(usage.reasoning) && usage.reasoning >= 0) group.reasoning = (group.reasoning ?? 0) + usage.reasoning;
+      }
+      return { since, until: now, total, unclassified, cost: null, groups: [...groups.values()] };
+    }, { since, until: now, total: 0, unclassified: 0, cost: null, groups: [] as UsageGroup[] });
   }
   trace(limit: number) {
     return this.read(db => db.prepare('SELECT id, at, kind, data FROM trace ORDER BY id DESC LIMIT ?').all(limit).map(row => ({ id: Number(row.id), at: Number(row.at), kind: String(row.kind), data: String(row.data).slice(0, 2000) })), []);

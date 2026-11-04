@@ -263,6 +263,7 @@ export function SaveBar({ form, onSaved, savedMessage }) {
     ${review ? html`<${Modal} wide title=${t('Save config.json', '保存 config.json')} onClose=${() => setReview(null)}
       footer=${html`<button class="ghost" onClick=${() => setReview(null)}>${t('Cancel', '取消')}</button><button class="primary" disabled=${busy || !review.valid} onClick=${save}>${t('Save', '保存')}</button>`}>
       ${review.valid ? html`<${ContextNote} context=${review.context} />` : html`<p class="note error">${review.error}</p>`}
+      ${review.valid && review.context?.models?.problems.length ? html`<div class="note warn"><p>${t('Models are not ready to start yet:', '模型尚未就绪，启动前需要修复：')}</p>${review.context.models.problems.map(problem => html`<div>${problem}</div>`)}</div>` : null}
       <${DiffView} before=${JSON.stringify(form.raw, null, 2)} after=${JSON.stringify(form.draft, null, 2)} />
     <//>` : null}`;
 }

@@ -660,6 +660,6 @@ export class Store {
   }
   hourlyActions(now = Date.now()) { return Number(this.db.prepare('SELECT count(*) AS n FROM actions WHERE created_at>?').get(now - 3_600_000)!.n); }
   dailyCalls(now = Date.now()) { return Number(this.db.prepare("SELECT count(*) AS n FROM calls WHERE at>=?").get(Math.floor((now + 8 * 3_600_000) / 86_400_000) * 86_400_000 - 8 * 3_600_000)!.n); }
-  chargeCall(runId: string, limit: number | null) { this.transaction(() => { if (limit !== null && this.dailyCalls() >= limit) throw new Error('The daily model call budget has been exhausted.'); this.db.prepare('INSERT INTO calls VALUES (?,?,?)').run(id('call'), Date.now(), runId); }); }
+  chargeCall(runId: string, limit: number | null) { return this.transaction(() => { if (limit !== null && this.dailyCalls() >= limit) throw new Error('The daily model call budget has been exhausted.'); const callId = id('call'); this.db.prepare('INSERT INTO calls VALUES (?,?,?)').run(callId, Date.now(), runId); return callId; }); }
   status() { return { ...this.settings(), pendingEvents: this.pending(), modelCallsToday: this.dailyCalls(), actionsThisHour: this.hourlyActions(), memories: this.db.prepare('SELECT count(*) AS n FROM memories').get()!.n, wakes: this.wakes(), pursuits: this.pursuits(), actions: this.actions() }; }
 }

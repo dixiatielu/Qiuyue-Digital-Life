@@ -9,6 +9,7 @@
     "id": "REPLACE_WITH_A_VISION_MODEL_FROM_MODELS_COMMAND",
     "apiKeyEnv": "MODEL_API_KEY"
   },
+  "review": {},
   "life": {
     "enabled": false,
     "allowFiction": false,

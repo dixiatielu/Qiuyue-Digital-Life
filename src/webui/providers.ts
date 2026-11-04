@@ -34,14 +34,15 @@ export class ProviderProfiles {
     const seen = new Map<string, ProviderProfile>();
     const add = (name: string, api: ProviderProfile['api'], baseUrl: unknown, apiKeyEnv: unknown, compat?: Record<string, unknown>) => {
       if (typeof baseUrl !== 'string' || !baseUrl || typeof apiKeyEnv !== 'string') return;
-      const key = `${new URL(baseUrl).origin}|${apiKeyEnv}`;
+      const key = `${new URL(baseUrl).href.replace(/\/+$/, '')}|${api}|${apiKeyEnv}`;
       // Stable until saved, so an edit made from one listing still finds its entry.
       if (!seen.has(key)) seen.set(key, { id: `seed-${hash(key).slice(0, 12)}`, name, api, baseUrl, apiKeyEnv, ...(compat ? { compat } : {}) });
     };
-    try {
-      if (raw.model?.api) add(raw.model.provider ?? 'model', raw.model.api, raw.model.baseUrl, raw.model.apiKeyEnv, raw.model.compat);
-      add(`${new URL(raw.embedding?.baseUrl).host}`, 'openai-completions', raw.embedding?.baseUrl, raw.embedding?.apiKeyEnv);
-    } catch { /* an endpoint that is not a URL is not offered */ }
+    for (const [name, model] of [['model', raw.model], ['review.model', raw.review?.model], ['compaction.model', raw.compaction?.model]] as const) {
+      try { if (model?.api) add(model.provider ?? name, model.api, model.baseUrl, model.apiKeyEnv ?? 'MODEL_API_KEY', model.compat); }
+      catch { /* an invalid endpoint does not hide the others */ }
+    }
+    try { add(`${new URL(raw.embedding?.baseUrl).host}`, 'openai-completions', raw.embedding?.baseUrl, raw.embedding?.apiKeyEnv); } catch { /* likewise */ }
     try { add(`${new URL(raw.drawing?.baseUrl).host}`, 'openai-completions', raw.drawing?.baseUrl, raw.drawing?.apiKeyEnv); } catch { /* likewise */ }
     return [...seen.values()];
   }
@@ -82,7 +83,8 @@ export async function testModel(config: ModelConfig, timeoutMs = 60_000, credent
   const { model, stream } = createModelBackend(config, credential);
   const started = Date.now();
   const context = normalizeContext({ systemPrompt: 'This is a connection test. Reply with OK.', messages: [{ role: 'user', content: 'ping', timestamp: started }] });
-  const reply = await stream(model, context, { maxTokens: Math.min(1024, model.maxTokens), signal: AbortSignal.timeout(timeoutMs) }).result();
+  const reasoning = config.thinkingLevel === 'off' ? undefined : config.thinkingLevel;
+  const reply = await stream(model, context, { maxTokens: Math.min(reasoning ? 4096 : 1024, model.maxTokens), reasoning, signal: AbortSignal.timeout(timeoutMs) }).result();
   if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `The model stopped: ${reply.stopReason}.`);
   const text = reply.content.filter(block => block.type === 'text').map(block => block.text).join('').trim();
   return { ms: Date.now() - started, text: text.slice(0, 500), stopReason: reply.stopReason, usage: reply.usage };

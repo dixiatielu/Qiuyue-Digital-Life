@@ -6,6 +6,8 @@ import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.l
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
 import { OpenAICompletionsCompatSchema, OpenAIResponsesCompatSchema, AnthropicMessagesCompatSchema } from '@earendil-works/pi-ai/providers/compat-schema';
 import { Check } from 'typebox/value';
+import type { Config } from './config.js';
+import { summaryEnvelope } from './context.js';
 
 const apis = {
   'openai-completions': { create: openAICompletionsApi, compat: OpenAICompletionsCompatSchema },
@@ -30,7 +32,78 @@ export interface ModelConfig {
   thinkingLevel?: ModelThinkingLevel;
 }
 
+export type ModelOwner = 'main' | 'review';
+export type ModelPath = 'model' | 'review.model' | 'compaction.model';
+
+/** Whole-model inheritance and context policies, shared by the brains and management interfaces. */
+export function modelUse(config: Config, owner: ModelOwner) {
+  const thinkingSource: ModelPath = owner === 'review' && config.review?.model ? 'review.model' : 'model';
+  const thinking = thinkingSource === 'review.model' ? config.review!.model! : config.model;
+  const limits = { ...config.limits, ...(owner === 'review' ? config.review?.limits : {}) };
+  const compactionSource: ModelPath = config.compaction.model ? 'compaction.model' : thinkingSource;
+  return {
+    owner, thinking, thinkingSource, limits,
+    compaction: config.compaction.model ?? thinking, compactionSource,
+    compactionContextTokens: config.compaction.contextTokens ?? limits.contextTokens,
+    compactionThinkingLevel: config.compaction.model?.thinkingLevel ?? 'off',
+  };
+}
+
+export function modelBudget(model: Model<Api>, contextTokens: number, reserve: number, safety: number) {
+  const window = Math.min(contextTokens, model.contextWindow);
+  return { window, budget: window - reserve - safety };
+}
+
+export function modelRoute(model: Model<Api>) { return JSON.stringify([model.provider, model.id, model.api, model.baseUrl]); }
+
+/** Preserve field paths when the same model validator serves several independent configurations. */
+export function atModelPath<T>(path: ModelPath, work: () => T): T {
+  try { return work(); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${path}: ${message.replace(/\bmodel\./g, `${path}.`)}`);
+  }
+}
+
+export function independentModelUses(config: Config) {
+  return Boolean(config.review?.model || Object.keys(config.review?.limits ?? {}).length || config.compaction.model || config.compaction.contextTokens !== undefined);
+}
+
+/** Offline model/capability/budget checks; an optional reader adds credential readiness without disclosing values. */
+export function modelReadiness(config: Config, credential?: CredentialReader) {
+  const problems: string[] = [];
+  const uses: { owner: ModelOwner; purpose: 'thought' | 'review' | 'compaction'; source: ModelPath; provider: string; id: string; api: string; apiKeyEnv: string; contextWindow: number; inputBudget: number; thinkingLevel: string }[] = [];
+  for (const owner of ['main', 'review'] as const) {
+    const use = modelUse(config, owner);
+    let ownerBudget: number | undefined;
+    for (const purpose of ['thinking', 'compaction'] as const) {
+      const selected = use[purpose];
+      const source = purpose === 'thinking' ? use.thinkingSource : use.compactionSource;
+      try {
+        const model = atModelPath(source, () => resolveModel(selected));
+        const contextTokens = purpose === 'thinking' ? use.limits.contextTokens : use.compactionContextTokens;
+        const reserve = purpose === 'thinking' ? use.limits.outputReserveTokens : config.compaction.summaryMaxTokens;
+        const outputCap = Math.min(model.maxTokens, purpose === 'thinking' ? reserve : reserve - summaryEnvelope(Array(8).fill(`ctx:${'0'.repeat(64)}`)).reserve);
+        const thinkingLevel = purpose === 'thinking' ? selected.thinkingLevel ?? 'off' : use.compactionThinkingLevel;
+        const { window, budget } = modelBudget(model, contextTokens, reserve, config.limits.contextSafetyTokens);
+        if (budget <= 0) throw new Error(`window ${window} is too small for output reserve ${reserve} and safety margin ${config.limits.contextSafetyTokens}.`);
+        if (purpose === 'thinking') ownerBudget = budget;
+        else if (independentModelUses(config)) {
+          if (outputCap < 64) throw new Error('summaryMaxTokens must leave at least 64 tokens of content after framing and source references.');
+          if (ownerBudget !== undefined && budget < ownerBudget) throw new Error(`summary input budget ${budget} cannot cover the ${owner} input budget ${ownerBudget}; increase compaction.contextTokens or reduce the owner's context window.`);
+        }
+        if (model.api === 'anthropic-messages' && thinkingLevel !== 'off' && (model.compat as AnthropicMessagesCompat | undefined)?.forceAdaptiveThinking !== true && outputCap <= 1024) throw new Error('Anthropic budget-based reasoning needs more than 1024 output tokens after any summary framing; increase the reserve or turn reasoning off.');
+        uses.push({ owner, purpose: purpose === 'compaction' ? 'compaction' : owner === 'main' ? 'thought' : 'review', source, provider: model.provider, id: model.id, api: model.api, apiKeyEnv: selected.apiKeyEnv, contextWindow: window, inputBudget: budget, thinkingLevel });
+      } catch (error) { problems.push(`${owner} ${purpose}: ${error instanceof Error ? error.message : String(error)}`); }
+      if (credential && !credential(selected.apiKeyEnv)) problems.push(`${owner} ${purpose}: missing credential ${selected.apiKeyEnv}.`);
+    }
+  }
+  return { uses, problems: [...new Set(problems)] };
+}
+
 export function validateModelConfig(config: ModelConfig) {
+  for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config[field] !== 'string' || !config[field].trim()) throw new Error(`model.${field} must not be empty.`);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.apiKeyEnv)) throw new Error('model.apiKeyEnv must be a credential name.');
   if (config.baseUrl !== undefined) {
     if (typeof config.baseUrl !== 'string' || !config.baseUrl.trim()) throw new Error('model.baseUrl must be a valid HTTP/HTTPS URL.');
     let url: URL;
@@ -84,7 +157,10 @@ export function createModelBackend(config: ModelConfig, credential: CredentialRe
   const stream: typeof models.streamSimple = (target, context, options) => {
     const apiKey = options?.apiKey ?? credential(config.apiKeyEnv);
     if (!apiKey) throw new Error(`Missing credential ${config.apiKeyEnv}.`);
-    return models.streamSimple(target, context, { ...options, apiKey });
+    // Some adapters add a reasoning budget to maxTokens. Keep reasoning inside the caller's total reserve.
+    const capped = options?.maxTokens === undefined ? target : { ...target, maxTokens: Math.min(options.maxTokens, target.maxTokens) };
+    if (capped.api === 'anthropic-messages' && options?.reasoning && (capped.compat as AnthropicMessagesCompat | undefined)?.forceAdaptiveThinking !== true && capped.maxTokens <= 1024) throw new Error('Anthropic budget-based reasoning needs more than 1024 output tokens; increase the output reserve or summary limit, or turn reasoning off.');
+    return models.streamSimple(capped, context, { ...options, apiKey });
   };
   return { model, stream };
 }

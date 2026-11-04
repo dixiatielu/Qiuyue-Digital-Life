@@ -46,7 +46,7 @@ export function fixture(social?: SocialAdapter, existingStore?: Store, recall?: 
     tools = createTools(cfg, store, adapter, () => brain.thought, recall, plugins);
     brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) }, undefined, recall);
     reviewTools = forReview(createTools(cfg, store, adapter, () => reviewer.thought, recall, plugins));
-    reviewer = new PiBrain(cfg, store, reviewTools, { model: reviewFaux.getModel(), stream: reviewModels.streamSimple.bind(reviewModels) }, undefined, recall);
+    reviewer = new PiBrain(cfg, store, reviewTools, { model: reviewFaux.getModel(), stream: reviewModels.streamSimple.bind(reviewModels) }, undefined, recall, undefined, 'review');
     return brain;
   };
   restart();

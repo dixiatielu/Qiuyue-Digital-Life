@@ -410,3 +410,45 @@ test('gallery APIs browse offline, authenticate images, and send versioned edits
     assert.equal((await call('/api/gallery')).body.total, 1, 'operator can still browse disabled gallery');
   } finally { await manager.stop(); await runtime.stop(); await host.stop(); server?.closeClients(); if (server) await new Promise<void>(resolve => server!.close(() => resolve())); store.close(); }
 }));
+
+test('model assignments round-trip through the page with readiness, inheritance and primary continuity', () => page(async (call, dir) => {
+  const current = (await call('/api/config')).body;
+  const main = { provider: 'shared', id: 'daily', apiKeyEnv: 'MODEL_API_KEY', api: 'openai-completions', baseUrl: 'https://models.example/daily/v1', input: ['text', 'image'], contextWindow: 131072, maxTokens: 8192 };
+  const raw = { ...current.raw, model: main };
+  const saved = await call('/api/config', { method: 'PUT', body: { raw, hash: current.hash } });
+  assert.equal(saved.status, 200);
+  const config = loadConfig(join(dir, 'config.json'));
+  const store = new Store(config.database);
+  try {
+    store.saveContext({ identity: inspectConfig(config).identities[0]!, generation: store.settings().generation, messages: [], sources: [] });
+  } finally { store.close(); }
+  const review = { ...main, id: 'review', apiKeyEnv: 'REVIEW_FILE_KEY', baseUrl: 'https://models.example/review/v1' };
+  const summary = { ...main, id: 'summary', apiKeyEnv: 'SUMMARY_FILE_KEY', baseUrl: 'https://models.example/summary/v1' };
+  const next = { ...raw, review: { model: review }, compaction: { ...raw.compaction, model: summary } };
+  const check = (await call('/api/config/check', { method: 'POST', body: { raw: next } })).body;
+  assert.equal(check.valid, true);
+  assert.equal(check.context.continues, true);
+  assert.ok(check.context.models.problems.some((problem: string) => problem.includes('REVIEW_FILE_KEY')));
+  assert.equal((await call('/api/config', { method: 'PUT', body: { raw: next, hash: saved.body.hash } })).status, 200);
+  const read = (await call('/api/config')).body;
+  assert.deepEqual(read.raw.review.model, review);
+  assert.deepEqual(read.raw.compaction.model, summary);
+  const resolved = (await call('/api/models/resolve', { method: 'POST', body: { raw: next } })).body;
+  assert.equal(resolved.main.thinking.id, 'daily'); assert.equal(resolved.review.thinking.id, 'review');
+  assert.equal(resolved.main.compaction.id, 'summary'); assert.equal(resolved.review.compaction.id, 'summary');
+  const inherited = { ...next, compaction: { ...raw.compaction } };
+  const following = (await call('/api/models/resolve', { method: 'POST', body: { raw: inherited } })).body;
+  assert.equal(following.main.compaction.id, 'daily'); assert.equal(following.review.compaction.id, 'review');
+  const secrets = (await call('/api/secrets')).body.entries;
+  assert.ok(secrets.find((secret: any) => secret.name === 'REVIEW_FILE_KEY').usedBy.includes('review.model'));
+  assert.deepEqual(secrets.find((secret: any) => secret.name === 'SUMMARY_FILE_KEY').usedBy.filter((use: string) => use.startsWith('compaction:')), ['compaction:main', 'compaction:review']);
+  const providers = (await call('/api/providers')).body.providers;
+  assert.ok([main, review, summary].every(model => providers.some((provider: any) => provider.baseUrl === model.baseUrl)));
+  const invalid = (await call('/api/config/check', { method: 'POST', body: { raw: { ...next, review: { model: {} } } } })).body;
+  assert.equal(invalid.valid, false); assert.match(invalid.error, /review.model/);
+  const changedMain = (await call('/api/config/check', { method: 'POST', body: { raw: { ...next, model: { ...main, id: 'another-daily' } } } })).body;
+  assert.equal(changedMain.context.continues, false);
+  assert.equal((await call('/api/config', { method: 'PUT', body: { raw: next, hash: current.hash } })).status, 409);
+  const usage = (await call('/api/model-usage')).body;
+  assert.equal(usage.total, 0); assert.equal(usage.cost, null);
+}));

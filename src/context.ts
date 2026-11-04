@@ -5,6 +5,13 @@ import { getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type 
 export const SUMMARY_PREFIX = 'Earlier exchanges have been consolidated into a continuity summary';
 export const IMAGE_TOKENS = 2000;
 
+/** Framing and references are part of the saved summary's limit, not extra generation space. */
+export function summaryEnvelope(ids: string[]) {
+  const framing = `${SUMMARY_PREFIX} (historical material; use read_context to retrieve originals):\n`;
+  const references = `\nOriginal record IDs: ${ids.slice(-8).join(', ')}`;
+  return { framing, references, reserve: textTokens(framing + references) + 16 };
+}
+
 /** Provider-independent estimate: CJK needs more tokens than the same number of ASCII characters. */
 export function textTokens(text: string): number {
   let tokens = 0;
@@ -73,6 +80,19 @@ export class TokenMeter {
   reset() { this.anchor = undefined; }
 }
 
+/** A summary sent elsewhere cannot replay model/endpoint-specific reasoning or signatures. Originals stay intact. */
+export function portableSummaryMessages(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map(message => message.role !== 'assistant' ? message : {
+    ...message,
+    content: message.content.flatMap<AssistantMessage['content'][number]>(block => {
+      if (block.type === 'thinking') return [];
+      if (block.type === 'text') return [{ type: 'text' as const, text: block.text }];
+      const { thoughtSignature: _signature, ...portable } = block;
+      return [portable];
+    }),
+  });
+}
+
 /** Only persist visible messages; thinking blocks and tool-private details are never archived. */
 export function persistableMessage(message: AgentMessage): AgentMessage {
   if (message.role === 'assistant') return { ...message, content: message.content.filter(block => block.type !== 'thinking') };
@@ -127,9 +147,12 @@ export function exchangeBlocks(messages: AgentMessage[]): AgentMessage[][] {
   }
   return blocks;
 }
-export function compactionSplit(messages: AgentMessage[], recentTokens: number, inputBudget: number, summaryTokens: number): { system: AgentMessage; removed: AgentMessage[]; kept: AgentMessage[] } {
+export function compactionSplit(messages: AgentMessage[], recentTokens: number, inputBudget: number, summaryTokens: number, reviewing = false): { system: AgentMessage; pinned: AgentMessage[]; removed: AgentMessage[]; kept: AgentMessage[] } {
   const system = getCurrentSystemMessage(toModelMessages(messages))!;
-  const blocks = exchangeBlocks(messages);
+  // A review has one permanent prompt, rather than new observations that advance the protected tail.
+  // Keep that prompt verbatim while allowing its completed intermediate exchanges to be summarized.
+  const pinned = reviewing ? messages.filter(message => message.role === 'observation') : [];
+  const blocks = exchangeBlocks(reviewing ? messages.filter(message => message.role !== 'observation') : messages);
   const latestObservation = blocks.findLastIndex(block => block[0]?.role === 'observation');
   let start = blocks.length;
   let tokens = 0;
@@ -137,12 +160,12 @@ export function compactionSplit(messages: AgentMessage[], recentTokens: number, 
   while (start > 0 && (tokens < recentTokens || start > latestObservation && latestObservation >= 0 || start > blocks.length - 2)) {
     tokens += blocks[--start]!.reduce((sum, message) => sum + messageTokens(message), 0);
   }
-  const fixed = estimatedContextTokens([system]) + summaryTokens;
-  while (start < blocks.length - 2 && fixed + tokens > inputBudget && start < latestObservation) {
+  const fixed = estimatedContextTokens([system, ...pinned]) + summaryTokens;
+  while (start < blocks.length - 2 && fixed + tokens > inputBudget && (reviewing || start < latestObservation)) {
     tokens -= blocks[start++]!.reduce((sum, message) => sum + messageTokens(message), 0);
   }
   if (fixed + tokens > inputBudget) throw new Error('Required state, the latest observation, or complete tool exchanges exceed the context budget; reduce the batch size or organize pending items.');
-  return { system, removed: blocks.slice(0, start).flat(), kept: blocks.slice(start).flat() };
+  return { system, pinned, removed: blocks.slice(0, start).flat(), kept: blocks.slice(start).flat() };
 }
 
 /** Prune only old, large results when called under pressure; retain IDs, outcome metadata and paired calls. */

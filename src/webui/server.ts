@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, webuiSettings, type Config } from '../config.js';
+import { modelReadiness, modelUse } from '../model.js';
 import { callControl, requestControl } from '../control.js';
 import { errorText } from '../domain.js';
 import { configuredPluginIds, pluginIds } from '../plugins/index.js';
@@ -102,7 +103,7 @@ export class WebUi {
     if (this.inspected?.key !== key) this.inspected = { key, result: inspectConfig(config, credentials.get) };
     const result = this.inspected.result;
     const userPlugins = discoverPlugins(config.extensions.directory).some(id => !(pluginIds as readonly string[]).includes(id) && config.plugins[id] !== false);
-    return { continues: userPlugins ? null : Boolean(saved?.current && result.identities.includes(saved.identity)), unknown: userPlugins, saved: saved ? { at: saved.updatedAt, current: saved.current } : null, plugins: result.plugins, tools: result.tools.length, credentials: result.credentials };
+    return { continues: userPlugins ? null : Boolean(saved?.current && result.identities.includes(saved.identity)), unknown: userPlugins, saved: saved ? { at: saved.updatedAt, current: saved.current } : null, plugins: result.plugins, tools: result.tools.length, credentials: result.credentials, models: result.models };
   }
   private on(method: string, path: string, handler: Handler) {
     this.routes.push({ method, pattern: new RegExp(`^${path.replace(/:\w+/g, '([^/]+)')}$`), handler });
@@ -140,6 +141,11 @@ export class WebUi {
     });
     this.on('DELETE', '/api/service/job', () => this.jobs.cancel() ?? null);
     this.on('GET', '/api/logs', ({ url }) => ({ text: tail(this.paths.log, Math.min(Number(url.searchParams.get('lines')) || 200, 2000)), trace: this.reader.trace(Math.min(Number(url.searchParams.get('trace')) || 50, 500)) }));
+    this.on('GET', '/api/model-usage', () => this.reader.modelUsage());
+    this.on('POST', '/api/models/resolve', ({ body }) => {
+      const config = this.files.check(body.raw);
+      return { main: modelUse(config, 'main'), review: modelUse(config, 'review'), readiness: modelReadiness(config, this.files.credentials().get) };
+    });
 
     this.on('GET', '/api/config', () => {
       const text = this.files.configText();
@@ -268,10 +274,20 @@ export class WebUi {
     const use = (name: unknown, by: string) => { if (typeof name === 'string' && name) usedBy.set(name, [...usedBy.get(name) ?? [], by]); };
     for (const adapter of config?.adapters ?? []) use(adapter.tokenEnv, `adapter:${adapter.id}`);
     for (const [section, field] of credentialFields) use((config as any)?.[section]?.[field] ?? raw[section]?.[field], section);
+    if (config) {
+      for (const owner of ['main', 'review'] as const) {
+        const assigned = modelUse(config, owner);
+        use(assigned.thinking.apiKeyEnv, owner === 'main' ? 'model' : 'review.model');
+        use(assigned.compaction.apiKeyEnv, `compaction:${owner}`);
+      }
+    } else {
+      use(raw.review?.model?.apiKeyEnv, 'review.model');
+      use(raw.compaction?.model?.apiKeyEnv, 'compaction.model');
+    }
     for (const { name, plugin } of pluginCredentialReferences(config?.extensions)) use(name, plugin);
     try { for (const profile of this.providers.list(raw)) use(profile.apiKeyEnv, `provider:${profile.name}`); } catch { /* unreadable providers add no names */ }
     const credentials = this.files.credentials();
-    return { file: credentials.paths.file, revision: credentials.revision, entries: credentials.list([...usedBy.keys()]).map(item => ({ ...item, usedBy: usedBy.get(item.name) ?? [] })) };
+    return { file: credentials.paths.file, revision: credentials.revision, entries: credentials.list([...usedBy.keys()]).map(item => ({ ...item, usedBy: [...new Set(usedBy.get(item.name) ?? [])] })) };
   }
   private authorized(request: IncomingMessage) {
     const expected = Buffer.from(this.token);
