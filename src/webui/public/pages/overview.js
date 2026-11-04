@@ -1,17 +1,17 @@
 import { ago, api, Badge, Card, ContextNote, duration, failed, html, Loading, Modal, number, PageHeader, Tabs, t, time, toast, useAsync, useState } from '../lib.js';
 
+import { ActivityFeed } from '../activity-feed.js';
+
 const reasonLabel = reason => ({ thinking: t('a thought is under way', '正在思考'), reviewing: t('a memory review is under way', '正在整理记忆（review）'), calling: t('a model call is starting', '正在发起模型调用') })[reason] ?? reason;
 const fileLabel = name => ({ config: 'config.json', persona: t('persona file', '人格文件'), prompt: t('system prompt file', '系统提示词文件'), credentials: t('credentials', '凭据文件') })[name] ?? name;
-const typeLabel = type => ({ environment: t('event', '事件'), observation: t('observation', '观察'), assistant: t('her text', '她的文字'), tool: t('tool', '工具'), action: t('action', '行动'), system: t('system', '系统'), run: t('thought', '思考') })[type] ?? type;
-const stateKind = state => ({ success: 'ok', done: 'ok', running: 'info', pending: 'info', error: 'bad', failed: 'bad', unknown: 'warn' })[state] ?? '';
 
-function summary(args) {
-  const message = args?.message;
-  const text = Array.isArray(message) ? message.map(part => part?.data?.text ?? (part?.type ? `[${part.type}]` : '')).join('') : typeof message === 'string' ? message : '';
-  const target = args?.group_id ? `group:${args.group_id}` : args?.user_id ? `user:${args.user_id}` : '';
-  return [target, text || JSON.stringify(args ?? {}).slice(0, 140)].filter(Boolean).join(' · ');
+function recentActions(actions, liveItems) {
+  const live = new Map(liveItems.map(item => [item.id, item]));
+  return (actions ?? []).slice(0, 15).map(action => live.get(action.id) ?? ({
+    id: action.id, at: action.createdAt, type: 'action', actionKind: action.kind, title: action.kind,
+    text: JSON.stringify(action.args), state: action.status, source: action.conversation,
+  }));
 }
-
 function Stat({ label, value, sub, kind = '' }) {
   return html`<div class=${`stat ${kind}`}><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? html`<div class="stat-sub">${sub}</div>` : null}</div>`;
 }
@@ -47,21 +47,6 @@ function JobNote({ job }) {
   if (job.state === 'failed') return html`<p class="note error">${action} ${t('did not happen: ', '未执行：')}${job.message}</p>`;
   if (job.state === 'done') return html`<p class="note ok">${action} ${t('done', '完成')} · ${ago(job.startedAt)}</p>`;
   return null;
-}
-
-function Timeline({ items, compact = false, onExpand }) {
-  const [open, setOpen] = useState(null);
-  const [quiet, setQuiet] = useState(false);
-  const shown = items.filter(item => quiet || !item.quiet).slice(compact ? -4 : -120).reverse();
-  return html`<${Card} title=${compact ? t('Recent events', '最近发生') : t('Live', '实时动态')} actions=${compact ? html`<button class="link" onClick=${onExpand}>${t('View all →', '查看全部 →')}</button>` : html`<label class="check small"><input type="checkbox" checked=${quiet} onChange=${event => setQuiet(event.currentTarget.checked)} />${t('show quiet items', '显示次要条目')}</label>`}>
-    ${shown.length ? html`<ol class="timeline">${shown.map(item => html`<li key=${item.id} class=${`tl tl-${item.type}`}>
-      <div class="tl-head"><span class="muted mono small">${time(item.at)}</span><${Badge}>${typeLabel(item.type)}<//><button class="timeline-toggle" aria-expanded=${open === item.id} onClick=${() => setOpen(open === item.id ? null : item.id)}>${item.title}</button>
-        ${item.state ? html`<${Badge} kind=${stateKind(item.state)}>${item.state}<//>` : null}${item.summary ? html`<span class="muted small">${item.summary}</span>` : null}
-        ${item.durationMs != null ? html`<span class="muted small">${duration(item.durationMs)}</span>` : null}</div>
-      ${item.text ? html`<div class=${open === item.id ? 'tl-text' : 'tl-text clamp'}>${item.text}</div>` : null}
-      ${open === item.id && item.details ? html`<pre class="tl-details">${item.details}</pre>` : null}
-    </li>`)}</ol>` : html`<p class="muted">${t('Nothing yet. The live view fills while the daemon runs.', '暂无内容。常驻进程运行时会实时更新。')}</p>`}
-  <//>`;
 }
 
 function Logs() {
@@ -134,7 +119,7 @@ export function Overview({ overview, live, refresh }) {
         <${Stat} label=${t('Pending events', '待处理事件')} value=${number(display.pendingEvents ?? status.pendingEvents)} />
         <${Stat} label=${t('Working context', '工作上下文')} value=${context} sub=${html`<div class="meter"><span style=${`width:${Math.round(ratio * 100)}%`}></span></div>`} />
       </div>
-      <div class="grid2 overview-grid"><${Timeline} compact items=${live.items} onExpand=${() => setTab('timeline')} />
+      <div class="grid2 overview-grid">${tab === 'now' ? html`<${ActivityFeed} compact items=${live.items} connected=${live.connected} onExpand=${() => setTab('timeline')} />` : null}
       <${Card} title=${t('Current activity and plans', '当前活动与计划')}>
         <p class=${display.activity || status.activity ? '' : 'muted'}>${display.activity || status.activity || t('No activity set.', '没有记录当前活动。')}</p>
         ${status.wakes?.length ? html`<table class="table"><tbody>${status.wakes.map(wake => html`<tr><td class="nowrap mono small">${time(wake.dueAt, false)}</td><td><${Badge} kind=${wake.kind === 'commitment' ? 'info' : ''}>${wake.kind === 'commitment' ? t('commitment', '承诺') : t('life', '生活')}<//>${wake.rest ? html` <${Badge} kind="warn">${t('rest', '休息')}<//>` : null}</td><td>${wake.title}</td></tr>`)}</tbody></table>` : html`<p class="muted small">${t('No scheduled wakes.', '没有安排的唤醒。')}</p>`}
@@ -147,10 +132,8 @@ export function Overview({ overview, live, refresh }) {
         <${Stat} label=${t('Memory review', '记忆整理')} value=${overview.activity.reviewing ? t('Reviewing', '整理中') : t('Idle', '空闲')} sub=${overview.activity.reviewing ? duration(Date.now() - overview.activity.reviewing) : null} />
         <${Stat} label=${t('Development records', '发展记录')} value=${number(Object.values(overview.counts).reduce((a, b) => a + b, 0))} sub=${['habit', 'practice', 'impression'].map(kind => `${({ habit: t('habits', '习惯'), practice: t('practices', '惯例'), impression: t('impressions', '印象') })[kind]} ${overview.counts[kind] ?? 0}`).join(' · ')} />
       </div>
-      <${Card} title=${t('Recent actions', '最近行动')}>
-        ${status.actions?.length ? html`<table class="table small"><tbody>${status.actions.slice(0, 15).map(action => html`<tr><td class="nowrap mono">${time(action.createdAt)}</td><td class="mono">${action.kind}</td><td><${Badge} kind=${stateKind(action.status)}>${action.status}<//></td><td class="clip">${summary(action.args)}</td></tr>`)}</tbody></table>` : html`<p class="muted">${daemon.running ? t('No actions yet.', '暂无行动。') : t('Shown while the daemon runs.', '常驻进程运行时显示。')}</p>`}
-      <//>
+      ${tab === 'now' ? html`<${ActivityFeed} compact title=${t('Recent actions', '最近行动')} limit=${15} items=${recentActions(status.actions, live.items)} />` : null}
     </div>
-    <div hidden=${tab !== 'timeline'}><${Timeline} items=${live.items} /></div>
+    ${tab === 'timeline' ? html`<${ActivityFeed} items=${live.items} connected=${live.connected} />` : null}
     <div hidden=${tab !== 'logs'}><${Logs} /></div>`;
 }

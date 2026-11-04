@@ -6,6 +6,7 @@ import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
 import { ambientEvent, type Action, type EnvironmentEvent, type Observation } from './domain.js';
 import { Store, type StoreNotice } from './store.js';
+import { displayMessageParts, outgoingMessage, type DisplayMessage } from './display-message.js';
 
 export interface DisplayItem {
   id: string; at: number;
@@ -15,6 +16,8 @@ export interface DisplayItem {
   quiet?: boolean; runId?: string;
   eventKind?: string; eventIds?: string[]; observationId?: string; receivedAt?: number;
   startedAt?: number; durationMs?: number; summary?: string;
+  sourceName?: string; message?: DisplayMessage;
+  eventData?: Record<string, unknown>;
 }
 export interface DisplayStatus {
   model: string; connection: string; phase: string; paused: boolean; lifeEnabled: boolean;
@@ -161,11 +164,22 @@ export class Monitor {
     const previous = this.items.get(event.id);
     const sender = (event.payload.sender as { card?: string; nickname?: string } | undefined);
     const source = event.source?.conversation ?? ui('Environment', '环境');
-    this.put({ id: event.id, at: event.at, type: 'environment', source, sender: event.source?.actorName || event.source?.actor || sender?.card || sender?.nickname || (event.source?.actor === undefined ? undefined : String(event.source?.actor)),
+    const payload = event.payload as Record<string, any>;
+    const nativeMessage = payload.message ?? payload.edited_message ?? payload.channel_post ?? payload.edited_channel_post ?? payload.business_message ?? payload.edited_business_message;
+    const parts = event.kind === 'message' ? displayMessageParts(nativeMessage, event.text) : undefined;
+    if (parts && nativeMessage && !Array.isArray(nativeMessage) && typeof nativeMessage === 'object') {
+      if (nativeMessage.photo || nativeMessage.sticker) parts.push({ kind: 'image', text: nativeMessage.sticker?.emoji ?? '' });
+      else for (const kind of ['video', 'voice', 'audio', 'document']) if (nativeMessage[kind]) parts.push({ kind: 'attachment', text: nativeMessage[kind].file_name ?? kind });
+    }
+    const eventData = Object.fromEntries(['since', 'until', 'chats', 'revisions', 'withdrawn', 'cites', 'wakeKind', 'freeTime', 'dueAt', 'backlog'].filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
+    this.put({ id: event.id, at: event.at, type: 'environment', source, sender: event.source?.actorName || sender?.card || sender?.nickname || event.source?.actor,
       title: `${event.status === 'processed' ? ui('Recorded', '已记录') : ui('Received', '收到')} · ${source}${sender?.card || sender?.nickname ? ` · ${sender.card || sender.nickname}` : event.source?.actor ? ` · ${event.source?.actor}` : ''}`,
       text: event.text, state: event.status === 'processing' && previous?.state === 'accepted' ? 'accepted' : event.status,
       runId: event.status === 'pending' ? undefined : previous?.runId,
       eventKind: event.kind, receivedAt: event.receivedAt ?? event.at,
+      sourceName: payload.group_name || nativeMessage?.chat?.title || (event.source?.conversationType === 'group' ? this.store.groupName(source) : undefined),
+      message: parts ? { direction: event.source?.own ? 'outgoing' : 'incoming', parts } : undefined,
+      eventData: Object.keys(eventData).length ? eventData : undefined,
       quiet: event.kind.includes('heartbeat'), details: this.describe({ id: event.id, kind: event.kind, status: event.status }),
     }, live);
   }
@@ -174,8 +188,10 @@ export class Monitor {
     if (runId && runId === this.runId) this.runActions.set(action.id, action.status);
     this.put({ id: action.id, at: action.createdAt, type: 'action', title: ui(`Action · ${action.kind}`, `行动 · ${action.kind}`), state: action.status,
       runId, actionKind: action.kind,
+      message: outgoingMessage(action.kind, action.args),
+      sourceName: action.conversation ? this.store.groupName(action.conversation) : undefined,
       text: this.describe(action.args), details: this.describe({ id: action.id, status: action.status, result: action.result }),
-      source: action.args.group_id ? ui(`Group ${action.args.group_id}`, `群 ${action.args.group_id}`) : action.args.user_id ? ui(`Private chat ${action.args.user_id}`, `私聊 ${action.args.user_id}`) : undefined,
+      source: action.args.group_id ? ui(`Group ${action.args.group_id}`, `群 ${action.args.group_id}`) : action.args.user_id ? ui(`Private chat ${action.args.user_id}`, `私聊 ${action.args.user_id}`) : action.conversation ?? (action.args.chat_id ? String(action.args.chat_id) : undefined),
     }, live);
   }
   private trace(id: number, at: number, name: string, data: unknown, live = true) {

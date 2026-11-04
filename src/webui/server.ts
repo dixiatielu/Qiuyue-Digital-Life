@@ -409,7 +409,7 @@ export class WebUi {
     const html = readFileSync(resolve(publicDir, 'index.html'), 'utf8');
     const map = /<script type="importmap">([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '';
     const digest = createHash('sha256').update(map).digest('base64');
-    return { html, csp: `default-src 'self'; script-src 'self' 'sha256-${digest}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'` };
+    return { html, csp: `default-src 'self'; script-src 'self' 'sha256-${digest}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'` };
   }
   listen(host: string, port: number): Promise<Server> {
     const server = createServer((request, response) => { void this.handle(request, response, host).catch(error => { if (!response.headersSent) send(response, 500, JSON.stringify({ error: errorText(error) })); else response.destroy(); }); });
