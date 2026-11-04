@@ -28,6 +28,7 @@ export const actionFingerprint = (kind: string, args: Record<string, unknown>) =
 
 /** What a revision reaches; see Store.revisionReach. */
 export interface RevisionReach { withdrawn: { id: string; kind: string; title: string }[]; cites: { id: string; kind: string; title: string }[] }
+export interface MemoryInput { kind: MemoryKind; title: string; content: string; importance: number; subjects?: string[]; sources: string[]; supersedes?: string; scope?: string; fictional?: boolean }
 /** Local receive times of claimable events: the earliest waking one, the latest of any kind, and the earliest ambient one. */
 export interface PendingTiming { first?: number; last?: number; ambient?: number }
 export type StoreNotice =
@@ -265,8 +266,33 @@ export class Store {
     return { id: row.id, kind: row.kind, title: row.title, content: row.content, importance: row.importance, subjects: parse(row.subjects), conversations: parse(row.conversations_json), fictional: Boolean(row.fictional), sources: this.db.prepare('SELECT source_id FROM sources WHERE owner_id=?').all(row.id).map(x => String(x.source_id)), supersedes: row.supersedes ?? undefined, ...(row.scope ? { scope: row.scope } : {}), active: Boolean(row.active), createdAt: row.created_at };
   }
   memory(memoryId: string): Memory | undefined { const row = this.db.prepare('SELECT * FROM memories WHERE id=?').get(memoryId); return row ? this.memoryRow(row) : undefined; }
+  /** Check independent source and size errors together, even when a tool call is missing another required field. Never writes. */
+  inspectMemoryWrite(input: Partial<MemoryInput>, limits?: { scopeChars: number; personChars: number }) {
+    const sources = new Set<string>(); const problems: string[] = [];
+    if (Array.isArray(input.sources)) for (const ref of new Set(input.sources)) {
+      if (typeof ref !== 'string' || !ref.length || ref.length > 100) { problems.push('Each source must be a non-empty event or memory ID of at most 100 characters.'); continue; }
+      try {
+        const source = this.resolve(ref); const event = this.event(source); const memory = this.memory(source);
+        if (!event && !memory) problems.push(`Source does not exist or has been deleted: ${ref}`);
+        else if (memory && !memory.active) {
+          const current = this.currentVersion(source);
+          problems.push(`Source has been revised; read its current version first: ${ref}${current ? `. ${current}` : ''}`);
+        } else sources.add(source);
+      } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); }
+    }
+    if (limits && input.kind && isDevelopment(input.kind) && typeof input.content === 'string') {
+      const scope = input.scope ?? (input.kind === 'impression' ? undefined : 'global');
+      if (typeof scope === 'string') {
+        const cap = scope.startsWith('person:') ? limits.personChars : limits.scopeChars;
+        // Habits and practices have separate budgets; replacing an entry frees its old content.
+        const used = Number(this.db.prepare('SELECT coalesce(sum(length(content)),0) AS n FROM memories WHERE active=1 AND scope=? AND kind=? AND id IS NOT ?').get(scope, input.kind, typeof input.supersedes === 'string' ? input.supersedes : null)!.n);
+        if (used + input.content.length > cap) problems.push(`Your ${input.kind}s in ${scope} would reach ${used + input.content.length} characters, above the limit of ${cap}; merge entries with supersedes or retire some with retire_memory first. This write has room for ${Math.max(0, cap - used)} characters; its content has ${input.content.length}. Shorten it before retrying.`);
+      }
+    }
+    return { sources: [...sources], problems };
+  }
   /** Limits bound the digital life's own development writes; operator corrections pass none. */
-  writeMemory(input: { kind: MemoryKind; title: string; content: string; importance: number; subjects?: string[]; sources: string[]; supersedes?: string; scope?: string; fictional?: boolean }, allowFiction: boolean, limits?: { scopeChars: number; personChars: number }): Memory {
+  writeMemory(input: MemoryInput, allowFiction: boolean, limits?: { scopeChars: number; personChars: number }): Memory {
     if (!input.content.trim() || input.content.length > 12_000 || input.title.length > 200) throw new Error('Memory content is empty or too long.');
     if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
     if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
@@ -276,7 +302,8 @@ export class Store {
       const current = previous && this.currentVersion(previous.id);
       throw new Error(current ? `The memory to revise has already been revised. ${current} Revise that version instead, keeping what it added.` : 'The memory to revise does not exist or has already been revised.');
     }
-    const sources = [...new Set(input.sources.map(source => this.resolve(source)))];
+    const { sources, problems } = this.inspectMemoryWrite(input, limits);
+    if (problems.length) throw new Error(problems.join('\n'));
     const scope = isDevelopment(input.kind) ? input.scope ?? (input.kind === 'impression' ? undefined : 'global') : undefined;
     let subjects = input.subjects ?? [];
     if (isDevelopment(input.kind)) {
@@ -288,12 +315,6 @@ export class Store {
       }
       // Self-description drawn only from its own output would feed back into every later thought.
       if (input.kind !== 'practice' && !this.restsOnOthers(sources)) throw new Error('A habit or impression cannot rest only on your own messages, notes, or judgments; cite how others acted or responded.');
-      if (limits) {
-        const cap = scope.startsWith('person:') ? limits.personChars : limits.scopeChars;
-        // Habits and practices are bounded apart, so what it observes cannot crowd out what it keeps.
-        const used = Number(this.db.prepare('SELECT coalesce(sum(length(content)),0) AS n FROM memories WHERE active=1 AND scope=? AND kind=? AND id IS NOT ?').get(scope, input.kind, input.supersedes ?? null)!.n);
-        if (used + input.content.length > cap) throw new Error(`Your ${input.kind}s in ${scope} would reach ${used + input.content.length} characters, above the limit of ${cap}; merge entries with supersedes or retire some with retire_memory first.`);
-      }
     }
     // A diary entry about a fictional day is fiction too, whatever its kind.
     let fictional = input.kind === 'fiction' || input.fictional === true;
@@ -301,8 +322,6 @@ export class Store {
     const conversations = new Set<string>();
     for (const source of sources) {
       const event = this.event(source); const memory = this.memory(source);
-      if (!event && !memory) throw new Error(`Source does not exist or has been deleted: ${source}`);
-      if (memory && !memory.active) { const current = this.currentVersion(source); throw new Error(`Source has been revised; read its current version first: ${source}${current ? `. ${current}` : ''}`); }
       if (event?.source?.conversation) conversations.add(event.source.conversation);
       for (const chat of memory?.conversations ?? []) conversations.add(chat);
       fictional ||= memory?.fictional ?? false;
