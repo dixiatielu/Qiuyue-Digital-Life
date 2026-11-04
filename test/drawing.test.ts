@@ -50,13 +50,13 @@ test('the image client asks for one picture and explains a refusal', async () =>
   assert.equal(imageType(Buffer.from('<html>')), undefined);
 });
 
-test('a drawing is painted apart from the thought and comes back as an observation with its picture', async () => {
+test('imagen generates an image apart from the thought and returns an observation with its picture', async () => {
   const { f, paint, run, done, close } = setup();
   try {
     f.brain.thought.triggers = new Set(['e:asked']);
-    const started = text(await run('draw', { prompt: 'An orange cat asleep on a sunny windowsill, watercolor' }));
+    const started = text(await run('imagen', { prompt: 'An orange cat asleep on a sunny windowsill, photorealistic photo with natural lighting' }));
     assert.match(started.drawingId, /^drawing:[0-9a-f-]{36}$/); assert.equal(started.status, 'drawing');
-    assert.deepEqual(paint.calls, ['An orange cat asleep on a sunny windowsill, watercolor']);
+    assert.deepEqual(paint.calls, ['An orange cat asleep on a sunny windowsill, photorealistic photo with natural lighting']);
     // Nothing comes back until the picture does.
     assert.equal(f.store.pending(), 0);
     const finished = done(); paint.finish(png); await finished;
@@ -67,7 +67,7 @@ test('a drawing is painted apart from the thought and comes back as an observati
     assert.deepEqual(f.store.setting('drawingsUnderWay'), {});
     f.faux.setResponses([context => {
       const content = JSON.stringify(context.messages);
-      assert.ok(content.includes(`The following is your drawing ${started.drawingId} from ${eventRef(event.id)}`));
+      assert.ok(content.includes(`The following is your generated image ${started.drawingId} from ${eventRef(event.id)}`));
       assert.ok(content.includes(png.toString('base64')));
       return answer('I like how it came out.');
     }]);
@@ -81,12 +81,12 @@ test('a drawing is painted apart from the thought and comes back as an observati
 test('a drawing that fails comes back with the reason and no picture', async () => {
   const { f, paint, run, done, close } = setup();
   try {
-    const started = text(await run('draw', { prompt: 'Something the endpoint refuses' }));
+    const started = text(await run('imagen', { prompt: 'Something the endpoint refuses' }));
     const finished = done(); paint.finish(new Error('The image request failed: HTTP 400: rejected by the safety system')); await finished;
     const event = f.store.claim(20)!.events[0]!;
     assert.equal(event.payload.drawingId, started.drawingId);
     assert.match(String(event.payload.error), /rejected by the safety system/);
-    assert.match(event.text, /could not be finished/);
+    assert.match(event.text, /could not be generated/);
     await assert.rejects(run('view_event_image', { id: event.id, index: 0 }), /no picture/);
     assert.deepEqual(f.store.setting('drawingsUnderWay'), {});
   } finally { close(); }
@@ -96,7 +96,7 @@ test('a drawing is sent by its ID: what is sent carries the picture, and the act
   const sent: { action: string; args: Record<string, unknown> }[] = [];
   const { f, paint, run, done, close } = setup({ execute: async (action, args) => { sent.push({ action, args }); return { message_id: -9 }; } });
   try {
-    const { drawingId } = text(await run('draw', { prompt: 'A mug of cocoa by a snowy window' }));
+    const { drawingId } = text(await run('imagen', { prompt: 'A mug of cocoa by a snowy window, watercolor' }));
     const finished = done(); paint.finish(png); await finished;
     const message = [{ type: 'image', data: { file: drawingId } }, { type: 'text', data: { text: '画好啦' } }];
     await run('send_group_msg', { group_id: 100, message });
@@ -139,11 +139,16 @@ test('a drawing a restart cut short is reported at the next start, and old works
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('the draw tool is offered only when drawing is on', () => {
+test('the imagen tool replaces draw and is offered only when drawing is on', () => {
   const f = fixture();
-  try { assert.equal(f.tools.current().some(tool => tool.name === 'draw'), false); } finally { f.store.close(); }
+  try { assert.equal(f.tools.current().some(tool => tool.name === 'imagen'), false); } finally { f.store.close(); }
   const { f: on, close } = setup();
-  try { assert.equal(on.tools.current().some(tool => tool.name === 'draw'), true); } finally { close(); }
+  try {
+    assert.equal(on.tools.current().some(tool => tool.name === 'imagen'), true);
+    assert.equal(on.tools.current().some(tool => tool.name === 'draw'), false);
+    assert.ok(on.plugins.activities().some(item => item.tools.includes('imagen')));
+    assert.equal(on.plugins.experienceKind('imagen'), 'drawing');
+  } finally { close(); }
 });
 
 test('drawing is off by default and, when on, needs an endpoint and a model; its files sit beside the configuration', () => {

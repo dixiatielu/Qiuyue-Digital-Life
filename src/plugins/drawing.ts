@@ -7,7 +7,7 @@ import type { LifePlugin } from '../plugins.js';
 import { ui } from '../ui-language.js';
 import { DrawingLibrary, type DrawingSource } from './gallery-store.js';
 
-/** Paints one picture from a description. */
+/** Generates one image from a description. */
 export interface Painter { readonly model: string; paint(prompt: string, signal?: AbortSignal): Promise<Buffer> }
 
 /** An OpenAI-compatible /images/generations endpoint. A gateway may ignore size, quality, and format, so the endpoint's defaults are taken as they come. */
@@ -45,8 +45,8 @@ const drawingId = /^drawing:([0-9a-f-]{36})$/;
 type UnderWay = Record<string, { prompt: string; startedAt: number; model?: string; sources?: string[]; context?: DrawingSource[] }>;
 
 /**
- * Drawings (ADR-0018): each is painted apart from the thought that started it, since painting takes half a minute or more, and comes back
- * as a drawing event with the picture. Its file is kept, and its ID, drawing:<uuid>, stands for it wherever an image file goes.
+ * Generated images (ADR-0018): each is generated apart from the thought that started it, since generation takes half a minute or more,
+ * and comes back as a drawing event with the picture. Its file is kept, and its ID, drawing:<uuid>, stands for it wherever an image file goes.
  */
 export class Drawings {
   private running = new Map<string, AbortController>();
@@ -55,7 +55,7 @@ export class Drawings {
   private library: DrawingLibrary;
   constructor(private store: Store, private painter: Painter, dir: string) { this.library = new DrawingLibrary(store.db, dir); }
   start(prompt: string, sources: string[]) {
-    if (this.stopping) throw new Error('The program is shutting down; drawing is unavailable.');
+    if (this.stopping) throw new Error('The program is shutting down; image generation is unavailable.');
     const id = `drawing:${crypto.randomUUID()}`; const startedAt = Date.now();
     const context = this.library.sources(sources);
     // Kept until it finishes, so a drawing a restart cut short is reported rather than awaited forever.
@@ -85,8 +85,8 @@ export class Drawings {
   }
   private finish(id: string, prompt: string, startedAt: number, sources: string[], failure?: string) {
     const text = failure === undefined
-      ? `Your drawing ${id} is finished; it follows as an image. Its description was: ${prompt}\nTo send or use it, put ${id} where an image file goes: the file of an image segment in send_group_msg or send_private_msg, an entry of images in send_qzone_msg, or the file of add_custom_face.`
-      : `Your drawing ${id} could not be finished: ${failure}\nIts description was: ${prompt}`;
+      ? `Your generated image ${id} is ready; it follows as an image. Its description was: ${prompt}\nTo send or use it, put ${id} where an image file goes: the file of an image segment in send_group_msg or send_private_msg, an entry of images in send_qzone_msg, or the file of add_custom_face.`
+      : `Your image ${id} could not be generated: ${failure}\nIts description was: ${prompt}`;
     this.store.receive({ key: id, kind: 'drawing', at: Date.now(), text, payload: { origin: 'self', drawingId: id, prompt, model: this.library.get(id)?.model, startedAt, sources, ...(failure !== undefined ? { error: failure } : {}) } });
   }
   /** Keep completed images across event retention, and reconcile interrupted work with durable files. */
@@ -100,7 +100,7 @@ export class Drawings {
       });
     }
     this.store.transaction(() => {
-      for (const [id, { prompt, startedAt, sources }] of Object.entries(underWay)) this.finish(id, prompt, startedAt, sources ?? [], this.library.image(id) ? undefined : 'The program restarted while it was being painted.');
+      for (const [id, { prompt, startedAt, sources }] of Object.entries(underWay)) this.finish(id, prompt, startedAt, sources ?? [], this.library.image(id) ? undefined : 'The program restarted while the image was being generated.');
       this.store.setSetting('drawingsUnderWay', {});
     });
   }
@@ -113,23 +113,23 @@ export class Drawings {
 export function drawingEnabled(config: Config) { return config.drawing.enabled && config.plugins.drawing !== false; }
 export function drawingCredentialProblems(config: Config, credential: CredentialReader = environmentCredential): string[] {
   return drawingEnabled(config) && !credential(config.drawing.apiKeyEnv)
-    ? [ui(`Missing ${config.drawing.apiKeyEnv} for drawing.`, `缺少画图所需的 ${config.drawing.apiKeyEnv}。`)] : [];
+    ? [ui(`Missing ${config.drawing.apiKeyEnv} for image generation.`, `缺少图像生成所需的 ${config.drawing.apiKeyEnv}。`)] : [];
 }
 export function drawingPlugin(drawings: Drawings, enabled: () => boolean = () => true): LifePlugin {
   return {
     id: 'drawing', enabled,
-    tools: runtime => [runtime.jsonTool('draw', "Draw a picture from a description: something you feel like drawing, or what someone asked for if you want to. Painting takes half a minute or more, so this returns at once and the finished drawing comes to you later as a drawing observation with its picture; carry on meanwhile. The description is all the painter sees, so say what you mean in full: subject, composition, style, colors, and any words in the picture, without referring to messages or images. Once you have seen it, send or use it by putting its drawing ID where an image file goes.", Type.Object({ prompt: Type.String({ description: 'What to draw', minLength: 1, maxLength: 4000 }) }), args => drawings.start(args.prompt, [...runtime.context().triggers]))],
-    activities: [{ activity: 'Draw something', tools: ['draw'] }],
-    experienceKinds: { draw: 'drawing' },
+    tools: runtime => [runtime.jsonTool('imagen', "Generate an image from a text description, including photorealistic photos, illustrations, stickers, diagrams, or other images: something you want to create, or what someone asked for if you want to. Generation takes half a minute or more, so this returns at once and the generated image comes to you later as a drawing observation with its picture; carry on meanwhile. The image generator sees only this description, not your conversation or reference images, so describe the subject, composition, visual style, lighting, colors, and any text in full. Once you have seen it, send or use it by putting its returned drawing ID where an image file goes.", Type.Object({ prompt: Type.String({ description: 'A complete description of the image to generate, including its visual style (such as photorealistic or illustrated)', minLength: 1, maxLength: 4000 }) }), args => drawings.start(args.prompt, [...runtime.context().triggers]))],
+    activities: [{ activity: 'Generate an image', tools: ['imagen'] }],
+    experienceKinds: { imagen: 'drawing' },
     images: event => {
       if (event.kind !== 'drawing') return [];
       const id = String(event.payload.drawingId); const ref = eventRef(event.id);
-      return [{ label: `The following is your drawing ${id} from ${ref}`, unavailable: `The drawing has no picture, or its file has been removed: ${id}.`, deferred: `Your drawing ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.`, autoView: event.payload.error === undefined, load: () => drawings.image(id), onShown: () => drawings.markSeen(id) }];
+      return [{ label: `The following is your generated image ${id} from ${ref}`, unavailable: `There is no picture, or its file has been removed: ${id}.`, deferred: `Your generated image ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.`, autoView: event.payload.error === undefined, load: () => drawings.image(id), onShown: () => drawings.markSeen(id) }];
     },
     resolveMedia: value => {
       if (!drawingId.test(value)) return;
       const picture = drawings.image(value);
-      if (!picture) throw new Error(`Drawing ${value} does not exist or has been removed.`);
+      if (!picture) throw new Error(`Image ${value} does not exist or has been removed.`);
       return `base64://${picture.data.toString('base64')}`;
     },
     start: () => drawings.recover(), stop: () => drawings.stop(), idle: () => drawings.idle(),

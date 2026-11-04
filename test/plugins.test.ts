@@ -33,7 +33,7 @@ test('plugin switches are independent, honor legacy switches, and block an alrea
     f.cfg.drawing.enabled = true; f.cfg.plugins.drawing = false;
     const plugins = createPlugins(f.cfg, f.store, { execute: async () => ({}) });
     const runtime = new ToolRuntime(f.cfg, f.store, { execute: async () => ({}) }, () => f.brain.thought);
-    assert.ok(!plugins.bind(runtime)([]).some(tool => tool.name === 'draw'));
+    assert.ok(!plugins.bind(runtime)([]).some(tool => tool.name === 'imagen'));
     assert.deepEqual(pluginCredentials(f.cfg), { problems: [], warnings: [] });
   } finally { f.store.close(); }
 });

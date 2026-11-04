@@ -1,4 +1,3 @@
-import { DrawingLibrary } from '../src/plugins/gallery-store.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -21,6 +20,7 @@ import { contextIdentity } from '../src/brain.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { Store } from '../src/store.js';
 import { handleControl, serveControl } from '../src/control.js';
+import { DrawingLibrary } from '../src/plugins/gallery-store.js';
 
 import { installPackagedPlugin } from './packaged-plugins.js';
 

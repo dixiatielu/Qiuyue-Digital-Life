@@ -35,7 +35,7 @@ test('a generated image is searchable and reusable after restart and original ev
     await f.plugins.start(); f.brain.thought.lifeOnly = false;
     const source = event(h.store, '画一张雨夜街景', 100); f.brain.thought.triggers = new Set([source.id]);
     const run = (name: string, args: any) => f.tools.current().find(tool => tool.name === name)!.execute('test', args);
-    const result = json(await run('draw', { prompt: '雨夜街景，蓝色灯光，水彩' }));
+    const result = json(await run('imagen', { prompt: '雨夜街景，蓝色灯光，水彩' }));
     await f.plugins.installed().find(plugin => plugin.id === 'drawing')!.idle!();
     const item = h.library.get(result.drawingId)!;
     assert.equal(item.model, 'actual-model'); assert.equal(item.sources[0]?.conversation, 'group:100');

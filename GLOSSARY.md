@@ -144,8 +144,8 @@ _Avoid_: a fixed-frequency timer, a reminder to do a particular activity
 A period the digital life marks for itself, until an activity it has scheduled, during which no free-time wake comes and group chat not addressed to it waits. Whenever something wakes its thinking, or the rest ends, the group chat still waiting comes together as a chat record.
 _Avoid_: quiet hours fixed by the operator, Agent pause
 
-**Drawing**:
-A picture the digital life paints from its own description, as it likes or because someone asked and it chose to. It is painted apart from the thought that started it and comes back as an environment event with the picture, which the digital life sees before deciding whether to send, post, or keep it.
+**Generated Image**:
+An image the digital life creates from its own description, including a photorealistic photo, illustration, sticker, or diagram, as it likes or because someone asked and it chose to. It sees the result before deciding whether to send, post, or keep it.
 _Avoid_: an image-generation service for group members, an automatic reply
 
 **Gallery**:

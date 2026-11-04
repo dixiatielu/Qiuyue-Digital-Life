@@ -130,8 +130,8 @@ The existing endpoint configuration is retained:
 
 | Plugin | Additional requirements |
 | --- | --- |
-| `gallery` | Defaults on; independent of generation. Embedding is optional for meaning-based search |
 | `drawing` | `drawing.enabled`, an image endpoint and model |
+| `gallery` | Defaults on; independent of generation. Embedding is optional for meaning-based search |
 | `web-search` | `web.enabled`, a search endpoint and its credential |
 | `web-reader` | `web.enabled`; no search credential required |
 | `qzone-share` | Allowed `get_qzone_share_ark` and at least one message send interface; each call also checks its actual target's send permission |
@@ -188,7 +188,7 @@ The Qzone plugin demonstrates this: the model supplies a post reference, the plu
 
 `start` runs once per instance, after store recovery at boot or after old work drains on reload. Use it to recover interrupted work. `quiesce` suspends new background work and returns a resume function for a failed reload; `idle` waits for existing work. `stop` cancels and settles outstanding work on shutdown and releases resources. Hooks must tolerate disposal before startup completed, including rejected candidates. Do not start work from constructors or tool binding.
 
-The drawing plugin persists unfinished work and its existing `drawing:<uuid>` references. Painting returns an ID immediately. Completion or failure enters the normal environment-event queue, so the same Agent decides what to do next. A plugin's own output must set `payload.origin` to `self`: it cannot alone support a personal habit or impression. Legacy drawing events retain that treatment too.
+The `drawing` plugin exposes `imagen` for image generation, including photorealistic photos, illustrations, stickers, and diagrams. It persists unfinished work and its existing `drawing:<uuid>` references. `imagen` returns an ID immediately. Completion or failure enters the normal environment-event queue as a `drawing` event, so the same Agent decides what to do next. A plugin's own output must set `payload.origin` to `self`: it cannot alone support a personal habit or impression. Legacy drawing events retain that treatment too.
 
 `images(event)` supplies image descriptions with a lazy loader. `autoView` requests viewing when the observation arrives; the brain applies its shared image and context limits. `deferred` tells the Agent how to view the picture later, and `unavailable` explains a missing picture. `view_event_image` uses the same loaders for indexed images.
 

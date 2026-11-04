@@ -1,5 +1,3 @@
-import { DrawingLibrary } from '../src/plugins/gallery-store.js';
-import type { CredentialReader } from '../src/credentials.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -13,7 +11,9 @@ import { PluginManager } from '../src/plugin-manager.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { contextIdentity } from '../src/brain.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
+import type { CredentialReader } from '../src/credentials.js';
 import { Drawings, drawingPlugin } from '../src/plugins/drawing.js';
+import { DrawingLibrary } from '../src/plugins/gallery-store.js';
 import { installPackagedPlugin } from './packaged-plugins.js';
 import { deferred, event, fixture } from './helpers.js';
 
@@ -292,10 +292,10 @@ test('image generation finishes before disabling its plugin, without being repor
   manager.connect(runtime, () => { const changed = f.brain.refreshTools(); f.reviewer.refreshTools(); return changed; });
   try {
     await manager.start(); f.brain.thought.lifeOnly = false;
-    await f.tools.current().find(tool => tool.name === 'draw')!.execute('draw', { prompt: 'A flower' });
+    await f.tools.current().find(tool => tool.name === 'imagen')!.execute('draw', { prompt: 'A flower' });
     manager.request(['reload', 'drawing']); await waiting(manager);
     painting.resolve(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])); await manager.settled();
-    assert.equal(manager.job?.state, 'done'); assert.ok(!f.tools.current().some(tool => tool.name === 'draw'));
+    assert.equal(manager.job?.state, 'done'); assert.ok(!f.tools.current().some(tool => tool.name === 'imagen'));
     const drawn = f.store.claim(20)?.events.find(item => item.kind === 'drawing'); assert.ok(drawn); assert.equal(drawn.payload.error, undefined);
     assert.deepEqual(f.store.setting('drawingsUnderWay'), {});
   } finally { painting.resolve(Buffer.alloc(0)); await manager.stop(); await runtime.stop(); await f.plugins.stop(); f.store.close(); rmSync(dir, { recursive: true, force: true }); }
