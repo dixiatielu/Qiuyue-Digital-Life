@@ -162,6 +162,20 @@ Omitted switches preserve existing behavior. The `drawing` plugin also requires 
 
 For the domain vocabulary and design decisions, see the [glossary](GLOSSARY.md) and [architecture decision records](docs/adr/).
 
+## Acknowledgments and inspiration
+
+Thanks to the following projects and their contributors for the ideas and design references explored in our [research notes](docs/research/):
+
+- [Letta / MemGPT](https://github.com/letta-ai/letta) and [Letta Code](https://github.com/letta-ai/letta-code): external memory, memory consolidation, and context compaction.
+- [Koishi](https://github.com/koishijs/koishi): plugin composition and lifecycle, configuration schemas, platform adapters, and testing tools.
+- [Pi](https://github.com/earendil-works/pi): the embedded Agent runtime used by this project, tool interfaces, and on-demand skill loading.
+- [OpenClaw](https://github.com/openclaw/openclaw): layered memory, saving memories before compaction, and skill organization.
+- [Generative Agents](https://arxiv.org/abs/2304.03442): experience-based reflection, memory importance, and continuing plans.
+- [Mem0](https://github.com/mem0ai/mem0), [Graphiti](https://github.com/getzep/graphiti), and [Hindsight](https://github.com/vectorize-io/hindsight): memory organization, hybrid retrieval, and associations between experiences.
+- [MaiBot](https://github.com/MaiM-with-u/MaiBot) and [AstrBot](https://docs.astrbot.app/use/skills.html): sticker resources, social tool use, and the separation of skills and plugins.
+- [Aurabot](https://github.com/aureth-labs/dsh-aurabot-qq) and [qq-bridge](https://github.com/Derpyu520/qq-bridge): conversational expression, proactive participation, online activities, and plugin design.
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): token budgeting, tool-result pruning, and context compaction.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for Issue and PR guidelines, local checks, and review expectations. Contributions are welcome in Chinese or English.
