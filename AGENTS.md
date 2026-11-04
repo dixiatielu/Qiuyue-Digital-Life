@@ -12,6 +12,10 @@ Use the five canonical triage labels. Read `docs/agents/triage-labels.md` before
 
 Single-context layout: root `GLOSSARY.md` and `docs/adr/`. Read `docs/agents/domain.md` before exploring the codebase.
 
+## Documentation language
+
+Write all documentation under `docs/research/` in English.
+
 ## Code Review Rules
 
 For Issue triage and PR review, read `CONTRIBUTING.md` and the relevant ADRs. Report actionable problems with evidence, their impact, and the affected file and line when applicable.

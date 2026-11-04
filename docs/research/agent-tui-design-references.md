@@ -1,110 +1,110 @@
-# Agent TUI 设计参考与秋月界面改进方向
+# Agent TUI design references and directions for Qiuyue's interface
 
-调研日期：2026-11-04。核对官方文档和公开源码；没有安装或实际运行参考产品。以下将已确认的产品行为与本项目的设计建议分开。在线文档会继续变化，源码链接固定到本次取得的提交。
+Reviewed: 2026-11-04. This investigation checked official documentation and public source code; it did not install or run the reference products. Confirmed product behavior and design recommendations for this project are distinguished below. Online documentation will continue to change; source links are pinned to the commits obtained during this investigation.
 
-## 结论
+## Conclusion
 
-建议保留秋月现在的「顶部身份、中央时间线、底部管理命令」骨架，重点完善信息层级和阅读节奏：让人第一眼看到**秋月当前状态、最近发生的事、已确认的外部行动、需要处理的异常**。工具参数、原始记录和运行统计按需展开。
+Keep Qiuyue's current structure of identity at the top, a central timeline, and administrative commands at the bottom. Focus on information hierarchy and reading rhythm: make **Qiuyue's current state, recent events, confirmed external actions, and exceptions requiring attention** visible at a glance. Expand tool arguments, raw records, and runtime statistics on demand.
 
-Claude Code 值得参考的是安静的主阅读区和渐进展开；OpenClaw 值得参考的是连接状态、运行状态与工具执行过程的明确表达；OpenCode 值得参考的是命令发现、语义化主题和适应窗口宽度的布局。以下是设计取舍，不代表三个产品共享同一种布局。
+Claude Code offers references for a quiet main reading area and progressive disclosure; OpenClaw for clearly expressing connection state, runtime state, and tool execution; OpenCode for command discovery, semantic themes, and layouts that adapt to window width. These are design choices, not a claim that the three products share one layout.
 
-## 官方资料确认的行为
+## Behavior confirmed by official sources
 
-### Claude Code：主阅读区与详细记录分层
+### Claude Code: separate the main reading area from detailed records
 
-- 普通视图会合并部分重复工具调用；`Ctrl+O` 打开 transcript viewer，查看详细执行信息。输入 `/` 可列出并过滤命令，空输入时 `?` 显示快捷键。这里关注的是细节的层级，而非照搬每个键位。[Interactive mode](https://code.claude.com/docs/en/interactive-mode)
-- 当前官方同时提供 classic 与 fullscreen 两条渲染路径；fullscreen 仍标为 research preview，不能笼统说 Claude Code 只有终端原生滚动布局。fullscreen 固定底部输入，只渲染可见消息；滚离底部后停止自动跟随，并显示新增消息数量和返回底部入口。折叠工具结果可点击展开。[Fullscreen rendering](https://code.claude.com/docs/en/fullscreen)
-- 自定义 status line 有自己的位置，可持续显示模型、上下文、成本等信息；官方说明它位于内置 footer badges 上方，配置后还会影响默认快捷键提示。因此「加状态栏」也需要考虑垂直空间和提示优先级。[Status line](https://code.claude.com/docs/en/statusline)
+- The normal view consolidates some repeated tool calls; `Ctrl+O` opens the transcript viewer for detailed execution information. Typing `/` lists and filters commands, and `?` shows shortcuts when the input is empty. The relevant idea is the hierarchy of detail, rather than copying every key binding. [Interactive mode](https://code.claude.com/docs/en/interactive-mode)
+- Officially, both classic and fullscreen rendering paths are available. Fullscreen remains a research preview, so Claude Code cannot be described simply as using only native terminal scrolling. Fullscreen fixes the input at the bottom and renders only visible messages; scrolling away from the bottom stops automatic following and shows a new-message count and a way to return to the bottom. Collapsed tool results can be expanded by clicking. [Fullscreen rendering](https://code.claude.com/docs/en/fullscreen)
+- A custom status line has its own position and can continuously show the model, context, cost, and other information. The documentation places it above the built-in footer badges and notes that configuring it also affects default shortcut hints. Adding a status bar therefore requires considering vertical space and hint priorities. [Status line](https://code.claude.com/docs/en/statusline)
 
-**对秋月的启发：**主视图保留人能读懂的结果；详细记录是同一数据的另一层展示。固定输入、滚动回看不抢焦点和新增提示都是阅读体验的一部分。秋月已有这些基础，不必因参考产品而重做。
+**Implications for Qiuyue:** Keep readable results in the main view; detailed records are another presentation layer over the same data. Fixed input, scrolling back without losing focus, and new-message hints all contribute to reading comfort. Qiuyue already has these foundations and need not rebuild them because a reference product does.
 
-### OpenClaw：持续状态、工具过程与正文各有位置
+### OpenClaw: give persistent state, tool progress, and body text their own places
 
-- 官方界面结构区分 header、chat log、运行/连接状态、footer 和自动补全编辑器。工具调用在同一卡片内持续更新参数与结果，`Ctrl+O` 切换展开；重连与事件缺口会明确显示。正文使用终端默认前景色，并支持浅色/深色覆盖。[TUI](https://docs.openclaw.ai/web/tui)
-- 固定源码的主题将文字、弱文字、强调、边界、用户背景、工具进行中/成功/失败背景分别命名；深色强调色是暖金色。assistant 正文不强制染色，用户消息和工具反馈有独立的视觉处理。[theme.ts](https://github.com/openclaw/openclaw/blob/45c571ed441ba4548f0fa3a7f625302e13ed3c87/src/tui/theme/theme.ts)
-- 工具组件默认折叠，并按可用宽度限制预览；进行中、完成和错误改变同一组件的状态及背景，而不是把每个更新追加成新日志。[tool-execution.ts](https://github.com/openclaw/openclaw/blob/45c571ed441ba4548f0fa3a7f625302e13ed3c87/src/tui/components/tool-execution.ts)
+- The documented interface distinguishes the header, chat log, runtime/connection status, footer, and autocomplete editor. Tool calls update their arguments and results within one card, with `Ctrl+O` toggling expansion; reconnections and event gaps are explicit. Body text uses the terminal's default foreground color, with light/dark overrides available. [TUI](https://docs.openclaw.ai/web/tui)
+- The pinned theme source names text, muted text, accents, borders, user backgrounds, and backgrounds for tools in progress, successful tools, and failed tools separately. The dark theme uses a warm gold accent. Assistant body text has no forced tint; user messages and tool feedback have their own visual treatment. [theme.ts](https://github.com/openclaw/openclaw/blob/45c571ed441ba4548f0fa3a7f625302e13ed3c87/src/tui/theme/theme.ts)
+- Tool components start collapsed and limit previews to the available width. Progress, completion, and errors change the state and background of the same component instead of appending a new log entry for each update. [tool-execution.ts](https://github.com/openclaw/openclaw/blob/45c571ed441ba4548f0fa3a7f625302e13ed3c87/src/tui/components/tool-execution.ts)
 
-**对秋月的启发：**连接正常、Agent 正在思考、Agent 休息、Agent Pause 是不同事实；显示时也应彼此区分。借鉴同一条目原地更新和明确回执，不照搬 OpenClaw 的多个 Agent / session 选择器。
+**Implications for Qiuyue:** A healthy connection, an Agent thinking, an Agent resting, and Agent Pause are distinct facts and should appear distinctly. Adopt in-place updates and explicit receipts without copying OpenClaw's multiple-Agent/session selectors.
 
-### OpenCode：命令发现、语义主题和宽度适配
+### OpenCode: command discovery, semantic themes, and width adaptation
 
-本次查到的默认开发分支已经是 v2，下面以 v2 为准。旧版 `/docs/tui/` 中的命令和配置格式不应直接视为 v2 的现状。
+The default development branch found during this investigation was already v2, which is the basis below. Commands and configuration formats in the older `/docs/tui/` should not be treated as the current v2 behavior.
 
-- v2 支持输入 `/` 过滤命令；`Ctrl+P` 打开当前视图的命令面板；编辑器、模型、Agent、会话等常用操作都有可发现入口。[v2 TUI](https://opencode.ai/v2/docs/cli/tui/)
-- v2 主题采用语义 token；主题名称 `system` 从终端调色板派生颜色，模式 `system` 跟随终端明暗，两者有不同含义。正文、弱文字、反馈、交互状态和面板深度各自有 token。[v2 Theme](https://opencode.ai/v2/docs/cli/theme/)
-- 固定源码里，用户消息采用左侧标识和背景层级；输入区同样以左侧边界、内边距、正文与元数据组织，不要求每个区域都围四边框。窄于 44 列时减少左右边距。[session/index.tsx](https://github.com/anomalyco/opencode/blob/8b038f672b0ee520d3ab6bc1014fc3eddba5961c/packages/tui/src/routes/session/index.tsx), [prompt/index.tsx](https://github.com/anomalyco/opencode/blob/8b038f672b0ee520d3ab6bc1014fc3eddba5961c/packages/tui/src/component/prompt/index.tsx)
-- 面板布局保留主内容最小宽度；空间不足时面板占据屏幕，而不是继续挤窄两列。[layout.ts](https://github.com/anomalyco/opencode/blob/8b038f672b0ee520d3ab6bc1014fc3eddba5961c/packages/tui/src/ui/layout.ts)
+- In v2, typing `/` filters commands, and `Ctrl+P` opens the current view's command palette. Common operations involving the editor, model, Agent, and sessions have discoverable entry points. [v2 TUI](https://opencode.ai/v2/docs/cli/tui/)
+- v2 themes use semantic tokens. The theme name `system` derives colors from the terminal palette, while the mode `system` follows the terminal's light/dark setting; these have different meanings. Body text, muted text, feedback, interaction states, and panel depth each have their own tokens. [v2 Theme](https://opencode.ai/v2/docs/cli/theme/)
+- In the pinned source, user messages use a left-side marker and background hierarchy. The input area likewise uses a left border, padding, body text, and metadata rather than requiring a four-sided box around every region. Horizontal margins shrink below 44 columns. [session/index.tsx](https://github.com/anomalyco/opencode/blob/8b038f672b0ee520d3ab6bc1014fc3eddba5961c/packages/tui/src/routes/session/index.tsx), [prompt/index.tsx](https://github.com/anomalyco/opencode/blob/8b038f672b0ee520d3ab6bc1014fc3eddba5961c/packages/tui/src/component/prompt/index.tsx)
+- Panel layouts preserve a minimum width for the main content. When space runs out, the panel takes over the screen instead of squeezing two columns further. [layout.ts](https://github.com/anomalyco/opencode/blob/8b038f672b0ee520d3ab6bc1014fc3eddba5961c/packages/tui/src/ui/layout.ts)
 
-**对秋月的启发：**建立小而明确的主题语义，输入 `/` 就能发现管理命令。默认保持单列；附加信息只有在需要且空间允许时出现。thinking 显示开关的独立性也值得参考，v2 键位文档将它明确列为可见性操作。[v2 Keybinds](https://opencode.ai/v2/docs/cli/keybinds/)
+**Implications for Qiuyue:** Establish a small, explicit set of theme semantics and make administrative commands discoverable by typing `/`. Keep one column by default; show additional information only when needed and space permits. A separate thinking-visibility toggle is also useful; the v2 key-binding documentation explicitly lists it as a visibility operation. [v2 Keybinds](https://opencode.ai/v2/docs/cli/keybinds/)
 
-## 本项目已经具备的基础
+## Existing foundations in this project
 
-检查时的 [src/tui.ts](../../src/tui.ts) 已有 alternate screen、固定底部输入、滚动跟随与新增提示、运行分组、逐项折叠、紧凑/详细切换、筛选、Markdown、忙碌动画、流式进度与断连提示。每个事件由 ID 更新，渲染有缓存；[src/display-client.ts](../../src/display-client.ts) 负责观察端重连，不启动 daemon 或打开生活数据库。
+At the time of inspection, [src/tui.ts](../../src/tui.ts) already provided an alternate screen, fixed bottom input, scroll following and new-entry hints, run grouping, per-item collapse, compact/detailed modes, filtering, Markdown, busy animations, streaming progress, and disconnection hints. Each event updates by ID, and rendering is cached. [src/display-client.ts](../../src/display-client.ts) reconnects the observer without starting the daemon or opening the life database.
 
-因此不应把现状描述成「只有滚动日志」，也不应把换用 Ink、OpenTUI 或另一个框架当作变好看的前置条件。先在现有 pi-tui 组件上验证视觉调整。
+The current interface should therefore not be described as merely a scrolling log, nor should switching to Ink, OpenTUI, or another framework be a prerequisite for improving its appearance. Validate visual changes on the existing pi-tui components first.
 
-## 建议的设计方向（尚未实现）
+## Proposed design directions (not implemented)
 
-### 1. 一屏只保留一处主要强调
+### 1. Keep one primary emphasis per screen
 
-保留「☾ 秋月」作为轻量身份标识，用低饱和月紫强调当前焦点、选中项和正在进行的阶段。普通正文使用终端默认前景；时间、工具原名、辅助计数用弱文字。绿色只表达已确认成功，黄色表达待确认/结果未知，红色表达失败。不能仅靠颜色传达状态。
+Keep "☾ Qiuyue" as a lightweight identity marker, with a muted moon-purple accent for the current focus, selection, and active phase. Use the terminal's default foreground for ordinary body text and muted text for times, native tool names, and auxiliary counts. Green means confirmed success, yellow means pending confirmation or an unknown outcome, and red means failure. Color must not be the only way to convey state.
 
-建立 `text`、`muted`、`accent`、`border`、`success`、`warning`、`error` 七个基础语义；浅色、深色和终端默认主题共用组件。先减少不必要的亮色、标签和重复图标，再考虑主题数量。
+Define seven basic semantics: `text`, `muted`, `accent`, `border`, `success`, `warning`, and `error`. Light, dark, and terminal-default themes should share components. Reduce unnecessary bright colors, labels, and repeated icons before considering more themes.
 
-### 2. 时间线按「发生了什么」组织
+### 2. Organize the timeline around what happened
 
-默认运行摘要从「本轮结束 · 统计」提升为可扫描的事件结果，例如「音乐群 · 收到 3 条消息 · 已发送 1 条回复」。展开后呈现观察、工具过程、外部行动及其结果。摘要必须来自已记录的事实，不凭模型文本推断消息已经发出。
+Replace the default run summary's emphasis on "Run finished · statistics" with a scannable event result, such as "Music group · 3 messages received · 1 reply sent". Expansion shows observations, tool execution, external actions, and their outcomes. Summaries must come from recorded facts, not from inferring delivery from model text.
 
-每次运行之间留一行空白，运行内采用稳定缩进。来源与参与者比重复时间戳更突出；同一组内只在必要处显示精确时间。普通工具压成一行「动作名称 · 对象 · 状态/耗时」，展开才显示原始名称、参数与结果。完整详情模式保留精确时间和字段。
+Leave one blank line between runs and use consistent indentation within a run. Emphasize sources and participants over repeated timestamps; show precise times within a group only where necessary. Compress ordinary tools to one line: "Action name · target · status/duration", with native names, arguments, and results available on expansion. Full-detail mode retains precise timestamps and fields.
 
-当前代码默认隐藏正常的 action 子条目；可以在运行摘要或可读的行动行里呈现已确认的发言内容，让界面具有数字生命的活动感。必须保留 pending、success、failed、unknown 的区别；`Unknown Action Outcome` 不能画成失败或成功。
+The current code hides normal action child entries by default. Confirmed outgoing message content could appear in the run summary or a readable action line, giving a sense of the digital life's activity. Preserve the distinction among pending, success, failed, and unknown; an `Unknown Action Outcome` must not appear as failure or success.
 
-### 3. 状态从一长串统计改成两个层级
+### 3. Replace the long statistics line with two levels of status
 
-常驻层显示身份、是否整体暂停、主要运行阶段、daemon/QQ 连接；上下文容量在空间允许时显示。今日调用、本小时行动等统计放入 `/status` 或详情，不与当前状况争夺注意力。
+The persistent level shows identity, whether the Agent is paused, the main runtime phase, and daemon/QQ connectivity; context capacity appears when space permits. Put statistics such as today's calls and this hour's actions in `/status` or details, where they do not compete with the current situation.
 
-正在进行时，输入区上方用一行「正在检索记忆 · 3s」或「等待模型响应 · 8s」。流式片段数和上次输出时间仍可查看；等待较久时再提升为可见提示。未拿到输出不等于已卡死。
+During execution, show one line above the input, such as "Searching memory · 3s" or "Waiting for model response · 8s". Streaming chunk counts and the time of the last output remain available; promote them to a visible hint when a wait becomes long. No output yet does not mean the process is stuck.
 
-`Rest` 与 `Agent Pause` 必须使用不同文案；后者仍然接收和保存环境事件。未取得该状态时显示未知，不从无输出推断正在休息。
+`Rest` and `Agent Pause` require different wording; the latter still receives and saves environment events. Show unknown when the state is unavailable, rather than inferring rest from a lack of output.
 
-### 4. 让管理命令可发现
+### 4. Make administrative commands discoverable
 
-输入区继续明确标为「管理命令」，使用轻分隔线或局部背景即可。输入 `/` 时出现可筛选的命令列表，包含命令、简短说明和当前是否可用；例如 `/resume` 的说明是「恢复思考与自主行动」。Esc 关闭列表并保留输入。
+Keep the input explicitly labeled "Administrative commands"; a light separator or local background is sufficient. Typing `/` opens a filterable list containing each command, a short description, and its current availability. For example, `/resume` means "Resume thinking and autonomous actions". Esc closes the list while preserving the input.
 
-底部帮助只展示与当前情境相关的三四个快捷键；完整帮助放进可关闭的面板，避免一段长说明长期挤占时间线。已有 `Tab` 展开、`Alt+↑/↓` 选择等键位应保留或明确迁移。
+The footer shows only three or four shortcuts relevant to the current context. Put full help in a dismissible panel so a long explanation does not permanently crowd the timeline. Preserve existing bindings such as `Tab` to expand and `Alt+↑/↓` to select, or provide an explicit migration.
 
-### 5. 把异常做成稳定、清楚的条目
+### 5. Make exceptions stable, clear entries
 
-失败展示「哪个动作、影响什么、当前已知结果」，原始堆栈展开查看。`结果未知` 用独立文字与符号，不自动建议重试。感知缺口、断连及恢复应在时间线留下简洁记录，同时在状态区域表达当前连接情况；不能只靠会消失的短暂提示。
+For failures, show which action was involved, what it affects, and the currently known outcome; expand to see the raw stack trace. Give "Outcome unknown" its own text and symbol without automatically recommending a retry. Perception gaps, disconnections, and recoveries should leave concise timeline entries, while the status area shows current connectivity; transient hints alone are insufficient.
 
-选择筛选或回看历史时，保持滚动位置。新增条数与「返回实时」入口应一直可找到，但不强制拉回底部。
+Preserve the scroll position when filtering or reviewing history. Keep the new-entry count and "Return to live" control discoverable without forcing a jump to the bottom.
 
-## 领域边界
+## Domain boundaries
 
-- 本项目只有一个持续的 Agent；群聊是 Group Environment，不是各自独立的 Agent。群筛选只能改变视图，不能隐含切换人格或长期记忆。[GLOSSARY](../../GLOSSARY.md), [ADR-0001](../adr/0001-one-agent-across-group-environments.md)
-- 本 TUI 是 Operator 管理界面。把输入提示改成普通聊天式「Ask anything」会模糊管理命令和 Social Request 的边界，不在这次视觉建议内。[ADR-0003](../adr/0003-separate-runtime-control-from-social-requests.md)
-- 继续沿用现有控制/订阅能力，复杂配置编辑留给管理页面。视觉升级不需要把 daemon、数据库写入和凭据管理搬进 TUI。[ADR-0009](../adr/0009-embedded-pi-with-local-state-and-cli.md), [ADR-0020](../adr/0020-a-management-page-apart-from-the-daemon.md)
+- This project has one continuing Agent. Group chats are Group Environments, not independent Agents. Group filtering may change only the view; it must not imply switching persona or long-term memory. [GLOSSARY](../../GLOSSARY.md), [ADR-0001](../adr/0001-one-agent-across-group-environments.md)
+- This TUI is an Operator management interface. Changing its input hint to a conversational "Ask anything" would blur the boundary between administrative commands and Social Requests and is outside these visual recommendations. [ADR-0003](../adr/0003-separate-runtime-control-from-social-requests.md)
+- Continue using the existing control and subscription capabilities, leaving complex configuration editing to the management page. A visual upgrade does not require moving the daemon, database writes, or credential management into the TUI. [ADR-0009](../adr/0009-embedded-pi-with-local-state-and-cli.md), [ADR-0020](../adr/0020-a-management-page-apart-from-the-daemon.md)
 
-上述建议与现有 ADR 不冲突。若未来要增加「直接与秋月聊天」或「群内发送」输入模式，需要单独设计其目的地和权限语义。
+These recommendations do not conflict with existing ADRs. Future input modes for chatting directly with Qiuyue or sending into a group would need a separate design for destinations and permission semantics.
 
-## 建议推进顺序与验收场景
+## Proposed sequence and acceptance scenarios
 
-1. **先改外观与层级：**主题语义、时间线间距、运行摘要、状态字段取舍、轻量输入区。
-2. **再补交互：**命令补全、清楚的选中状态、帮助面板、显示详细程度的可发现入口。
-3. **最后验证长时间使用：**中文/emoji 混排，窄屏和长工具名，流式更新不抖动，回看时不跳到底，断连后状态不误导，浅色终端可读。
+1. **Appearance and hierarchy first:** theme semantics, timeline spacing, run summaries, status-field selection, and a lightweight input area.
+2. **Interaction next:** command completion, clear selection states, a help panel, and discoverable detail-level controls.
+3. **Extended-use validation last:** mixed Chinese/emoji text, narrow screens and long tool names, stable streaming updates, no jumps to the bottom while reviewing history, accurate state after disconnection, and readability in light terminals.
 
-至少用 80×24 和 120×32 两种终端尺寸检查：待机、正在思考、工具运行、消息待回执、外部行动成功、结果未知、整体暂停、断连重连。重点是同样的数据更容易读，而不是让装饰占用更多行。
+Check at least 80×24 and 120×32 terminals in these states: idle, thinking, tool execution, awaiting a message receipt, successful external action, unknown outcome, Agent Pause, and disconnection/reconnection. The aim is to make the same data easier to read without letting decoration consume more rows.
 
-## 本地渲染复核与设计预览
+## Local rendering check and design previews
 
-使用当前 `DisplayModel`、`Timeline` 和人工构造的中文示例事件，在 80 列宽度下直接运行渲染函数，未连接真实 QQ 或调用模型。完成轮次的默认输出只有：
+The current `DisplayModel` and `Timeline` rendering functions were run directly at 80 columns with synthetic Chinese example events, without connecting to real QQ or calling a model. The default output for a completed run contained only the following, translated into English here:
 
 ```text
-✓ 20:41:00 本轮结束 · 8s · 1 次行动成功 · 2 次模型请求 · 2 次工具 ▸
+✓ 20:41:00 Run finished · 8s · 1 action succeeded · 2 model requests · 2 tools ▸
 ```
 
-展开后才能看到触发消息和发送工具的内容摘要；正常的 action 条目仍被省略，而 `模型输出 · 未发送到 QQ` 使用完整正文显示。这说明优先事项应是保留真实对外行动的可读结果，并收起技术过程；单纯调整配色无法解决主次问题。[Timeline 实现](../../src/tui.ts), [行动状态与轮次摘要来源](../../src/monitor.ts)
+The triggering message and the sending tool's content summary appeared only after expansion. Normal action entries were still omitted, while "Model output · Not sent to QQ" appeared with its full body. This indicates that the priority should be retaining readable results of actual external actions and collapsing technical execution details; changing colors alone cannot fix the hierarchy. [Timeline implementation](../../src/tui.ts), [Sources for action states and run summaries](../../src/monitor.ts)
 
-会话中的设计预览提供「交流优先」和「紧凑观测」两版，内容均为示例数据，尚未应用到实际 TUI。预览可展开工具详情、筛选管理命令，并通过设计控件切换主题和运行状态。网页示意表达的是信息层级与终端字符布局，实际终端仍应遵循字符网格、CJK 宽度与终端调色板；浏览器布局检查不能替代终端验收。
+The design previews in the conversation offered "Conversation first" and "Compact observation" variants. Both used example data and had not been applied to the actual TUI. The previews supported expanding tool details, filtering administrative commands, and switching themes and runtime states through design controls. The web mockups expressed information hierarchy and terminal character layout; the actual terminal must still respect the character grid, CJK width, and terminal palette. Browser layout checks cannot replace terminal acceptance checks.
 
-落地时先改 `src/tui.ts` 的渲染与主题：保留已发送内容、弱化重复时间/工具原名、缩减常驻统计、清楚区分正文和模型输出。`src/monitor.ts` 目前已有 action 的参数、状态和来源，可作为结果展示依据；如果要把工具和行动合成一个可展开条目，应增加明确的关联标识，不靠消息内容或相邻位置猜测。群名、休息状态等字段未明确提供时继续用现有来源标识和已知状态，不在界面中推断。
+For implementation, start with rendering and theming in `src/tui.ts`: retain sent content, de-emphasize repeated times and native tool names, reduce persistent statistics, and clearly distinguish body text from model output. `src/monitor.ts` already provides action arguments, states, and sources as a basis for displaying results. Combining a tool and an action into one expandable entry would require an explicit correlation identifier, not guesses from message content or adjacency. Where fields such as group names or rest state are not explicitly available, continue using existing source identifiers and known states rather than inferring them in the interface.

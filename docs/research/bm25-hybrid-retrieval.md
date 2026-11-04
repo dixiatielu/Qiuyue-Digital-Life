@@ -49,9 +49,9 @@ An inference from the query format is that BM25 was less central because queries
 - `bm25()` returns a real number, and **smaller values mean greater relevance**. The standard ordering is `ORDER BY bm25(ft)`; scores depend on query phrases and document term statistics. [FTS5 section 5.1.1](https://sqlite.org/fts5.html#the_bm25_function)
 - The trigram tokenizer indexes each sequence of three consecutive characters and supports substring matching. **Substrings shorter than three Unicode characters match no rows**. With `detail=none/column`, query tokens cannot exceed three characters. [FTS5 section 4.3.4](https://sqlite.org/fts5.html#the_trigram_tokenizer)
 - By default, unicode61 treats Unicode categories `L*`, `N*`, and `Co` as token characters and makes each uninterrupted run a token. Chinese characters belong to `Lo`, so **an uninterrupted Chinese phrase without spaces or punctuation becomes one token**. [FTS5 section 4.3.1](https://sqlite.org/fts5.html#unicode61_tokenizer)
-- The recorded local experiment used SQLite 3.53.4 and the synthetic text `我今天心情很好，想去公园` ("I feel good today and want to go to the park"). On a trigram table, `MATCH '"心情"'` returned zero rows, while `MATCH '"心情很"'` returned one. A unicode61 vocabulary contained `["想去公园", "我今天心情很好"]`, and `MATCH '"心情"'` returned zero rows. The Chinese strings are retained because their character boundaries are the subject of the experiment.
+- The recorded local experiment used SQLite 3.53.4 and the synthetic Chinese text `"\u6211\u4eca\u5929\u5fc3\u60c5\u5f88\u597d\uff0c\u60f3\u53bb\u516c\u56ed"` ("I feel good today and want to go to the park"). Language-specific literals here use JavaScript/JSON Unicode escapes; decode them before passing them to SQLite, which does not interpret these escapes in SQL string literals. On a trigram table, a `MATCH` query for the decoded two-character term `"\u5fc3\u60c5"` ("mood") returned zero rows, while `"\u5fc3\u60c5\u5f88"` ("mood" followed by the character meaning "very") returned one. A unicode61 vocabulary contained `["\u60f3\u53bb\u516c\u56ed", "\u6211\u4eca\u5929\u5fc3\u60c5\u5f88\u597d"]` ("want to go to the park" and "I feel good today"), and a query for `"\u5fc3\u60c5"` returned zero rows. The original character boundaries are the subject of the experiment.
 
-Consequently, an FTS branch using `tokenize='trigram'` and `term.length >= 3` cannot match two-character Chinese words such as `心情` (mood), `北京` (Beijing), or `妈妈` (mother). The reviewed `Store.search` also had `instr()` substring matching, which could still find these terms; this FTS limitation was not a limitation of the entire search. The FTS branch did not call `bm25()`. Adding that ordering could change the rank of matched candidates, but could not recover candidates missed through tokenization.
+Consequently, an FTS branch using `tokenize='trigram'` and `term.length >= 3` cannot match two-character Chinese words such as `\u5fc3\u60c5` (mood), `\u5317\u4eac` (Beijing), or `\u5988\u5988` (mother). The reviewed `Store.search` also had `instr()` substring matching, which could still find these terms; this FTS limitation was not a limitation of the entire search. The FTS branch did not call `bm25()`. Adding that ordering could change the rank of matched candidates, but could not recover candidates missed through tokenization.
 
 ## 6. Benchmark evidence for BM25 versus dense retrieval
 
@@ -65,12 +65,12 @@ jieba builds a DAG from a prefix dictionary, uses dynamic programming to select 
 
 The expected effects on FTS are:
 
-| Approach | Two-character word `心情` (mood) | Strengths | Limitations |
+| Approach | Two-character word `\u5fc3\u60c5` (mood) | Strengths | Limitations |
 | --- | --- | --- | --- |
 | trigram | No match: fewer than three characters | No added dependency; substring matching | Misses two-character terms; larger index |
 | Raw unicode61 | No match within an uninterrupted phrase | Works for English and numbers | Poor segmentation of Chinese |
 | unicode61 with jieba preprocessing | Matches as one word token | Word-level IDF; segmentation closer to Chinese usage | Writes and queries must use the same dictionary; nicknames and out-of-vocabulary words may be split incorrectly |
-| Single-character or bigram index | Matches, with more noise | No dictionary needed | Frequent characters such as `的`, `我`, and `是` dilute IDF |
+| Single-character or bigram index | Matches, with more noise | No dictionary needed | Frequent characters such as `\u7684` (a possessive/attributive particle), `\u6211` ("I"), and `\u662f` ("to be") dilute IDF |
 
 Two-character words are common in modern Chinese, while trigram requires three characters. **Keeping trigram and adding `bm25()` ordering therefore offers limited help with this specific problem**. More promising approaches are a segmented word index, or retaining `instr()` for exact entities while using vectors for semantics.
 

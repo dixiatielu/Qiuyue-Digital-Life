@@ -40,23 +40,23 @@ These mechanisms do not establish that memory quality in real group chats is sat
 
 The research record of 2026-11-02 reports running `node --import tsx --test --test-reporter=spec test/store.test.ts test/recall.test.ts test/development.test.ts`, with 37/37 tests passing at that time. This is a historical result, not a claim about the current test count or status. Those tests cover protocol behavior; they do not establish memory completeness, correctness of understanding, or appropriate recall timing. Retrieval tests use synthetic vectors, so they are neither an evaluation of Chinese embedding quality nor a comparison with external products.
 
-A separate experiment wrote the long-term understanding `小明说最近喜欢乌龙茶` ("Xiaoming says he has recently liked oolong tea") to an in-memory database, with subject identifiers `['7', '小明']`. `Store.search('喜欢')` ("like") and `Store.search('小明 乌龙茶')` ("Xiaoming oolong tea") each returned one result; `Store.search('小明最近喜欢什么茶')` ("What tea has Xiaoming liked recently?") returned none. This verifies that short Chinese substring matching still works and that full-sentence lexical queries have a segmentation gap. The semantic branch may fill that gap, so this alone does not establish a failure of the complete retrieval path. The experiment neither read nor modified a production database.
+The original Chinese test data is represented here with JavaScript Unicode escapes. A separate experiment wrote the long-term understanding `\u5c0f\u660e\u8bf4\u6700\u8fd1\u559c\u6b22\u4e4c\u9f99\u8336` ("Xiaoming says he has recently liked oolong tea") to an in-memory database, with subject identifiers `['7', '\u5c0f\u660e']` (numeric ID and the name Xiaoming). `Store.search('\u559c\u6b22')` ("like") and `Store.search('\u5c0f\u660e \u4e4c\u9f99\u8336')` ("Xiaoming oolong tea") each returned one result; `Store.search('\u5c0f\u660e\u6700\u8fd1\u559c\u6b22\u4ec0\u4e48\u8336')` ("What tea has Xiaoming liked recently?") returned none. This verifies that short Chinese substring matching still works and that full-sentence lexical queries have a segmentation gap. The semantic branch may fill that gap, so this alone does not establish a failure of the complete retrieval path. The experiment neither read nor modified a production database.
 
-The synthetic example can be reproduced from the repository root. All people, messages, and identifiers below are test data, and only an in-memory database is used. The Chinese strings are retained because their segmentation is the behavior under test.
+The synthetic example can be reproduced from the repository root. All people, messages, and identifiers below are test data, and only an in-memory database is used. Chinese test strings use JavaScript Unicode escapes, which preserve the original characters at runtime because their segmentation is the behavior under test.
 
 ```sh
 node --import tsx --input-type=module <<'JS'
 import { Store } from './src/store.ts';
 const store = new Store(':memory:');
 try {
-  const text = '小明说最近喜欢乌龙茶';
+  const text = '\u5c0f\u660e\u8bf4\u6700\u8fd1\u559c\u6b22\u4e4c\u9f99\u8336';
   const source = store.receive({
     key: 'synthetic:tea', kind: 'message', at: 1, actorId: 7, groupId: 100,
     text, payload: { message: [{ type: 'text', data: { text } }] },
   });
   store.writeMemory({ kind: 'understanding', title: 'Tea preference', content: text,
-    importance: 5, subjects: ['7', '小明'], sources: [source.id] }, false);
-  for (const query of ['喜欢', '小明 乌龙茶', '小明最近喜欢什么茶']) {
+    importance: 5, subjects: ['7', '\u5c0f\u660e'], sources: [source.id] }, false);
+  for (const query of ['\u559c\u6b22', '\u5c0f\u660e \u4e4c\u9f99\u8336', '\u5c0f\u660e\u6700\u8fd1\u559c\u6b22\u4ec0\u4e48\u8336']) {
     console.log(query, store.search(query).length);
   }
 } finally { store.close(); }
