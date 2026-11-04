@@ -8,7 +8,7 @@ These documents record dated investigations, source snapshots, and hypotheses. T
 | [BM25 and hybrid retrieval](bm25-hybrid-retrieval.md) | Chinese tokenization and retrieval research from 2026-10-30; includes synthetic FTS5 examples, not a retrieval benchmark |
 | [Memory system options](memory-system-options.md) | Dated comparison of external memory systems and migration tradeoffs; no replacement architecture has been accepted |
 | [Alibaba Cloud Agent Memory](aliyun-agent-memory.md) | Distinguishes PolarDB for AI graph memory, the Mem0-compatible service, and Milvus AMS; domain fit and proposed association-retrieval experiments, with no cloud integration or migration performed |
-| [Graph memory alternatives](graph-memory-alternatives.md) | Follow-up comparison of graph mechanisms and service boundaries; paper results are not project benchmarks |
+| [Graph memory alternatives](graph-memory-alternatives.md) | November 5 follow-up prioritizes a Graphiti/Neo4j experiment beside existing Memory, with Hindsight as a comparison; earlier mechanism research and source-review limits are retained |
 | [Context compaction](context-compaction.md) | Historical implementation research; current context behavior follows the README and ADRs |
 | [SnowLuma recovery](snowluma-recovery.md) | Sending and disconnection boundaries underlying ADR-0007 and ADR-0008 |
 | [Social tool use](social-agent-tool-use-survey.md) | Historical comparison of resource access, tools, and skills; current plugins are documented separately |

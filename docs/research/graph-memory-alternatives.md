@@ -1,6 +1,53 @@
-# Graph memory alternatives beyond Graphiti
+# Graph memory alternatives and engine selection
 
 Reviewed: 2026-11-02. This investigation examined the authors' papers, official repositories, and official documentation. None of these systems was deployed, and no comparative product benchmark used Qiuyue's real group chats. Paper results describe particular experiments and do not directly establish the benefits of migrating Qiuyue. See the [earlier investigation](memory-system-options.md) for the context of a wholesale migration. Capabilities and recommendations below are a dated research snapshot, not a freshly verified product assessment.
+
+## Follow-up selection — 2026-11-05
+
+The user clarified that the immediate goal is a locally deployable graph engine for the previously discussed associative memory. **Start with Graphiti plus local Neo4j as a derived temporal relationship index; keep Hindsight as the main comparison candidate.** This is an architectural fit judgment, not a measured recall winner or an accepted implementation decision. The original investigation below remains a dated snapshot; this section records the new checks.
+
+### Candidate order for this project
+
+| Candidate | Current evidence | Recommendation for Qiuyue |
+| --- | --- | --- |
+| Graphiti | Explicit entities, relation edges, supporting episodes, fact validity and invalidation times; custom entity/edge schemas | First experiment when adding a relationship layer to the existing Memory model |
+| Hindsight | Fact extraction, graph and temporal retrieval, automatic consolidation; PostgreSQL stores both vectors and graph connections | Main comparison, particularly if evaluating a broader replacement of extraction and recall |
+| Cognee | Relational provenance, vector retrieval, customizable entity-relation graphs and ingestion pipelines | Reconsider first when organizing mixed documents and knowledge around a custom ontology becomes the priority |
+
+Graphiti sources: [overview](https://help.getzep.com/graphiti/getting-started/overview), [custom types](https://help.getzep.com/graphiti/core-concepts/custom-entity-and-edge-types). Hindsight sources: [retain](https://hindsight.vectorize.io/developer/retain), [recall](https://hindsight.vectorize.io/developer/retrieval), [storage](https://hindsight.vectorize.io/developer/storage). Cognee sources: [architecture](https://docs.cognee.ai/core-concepts/architecture), [graph stores](https://docs.cognee.ai/setup-configuration/graph-stores). Hindsight and Cognee can also be used incrementally; this ordering does not imply that either requires a wholesale migration.
+
+The reason to start with Graphiti is that Qiuyue already owns memory formation, development, continuing state, provenance, and revision. Its immediate gap is navigating explicit relationships and their changes. Graphiti exposes this layer directly. For example, a test can ask how the Agent came to know someone through two introductions, or which relationship held before a later correction. Temporal fields make these questions representable; extraction and retrieval accuracy still need testing.
+
+### What a local deployment would contain
+
+Use a small Python service embedding `graphiti-core`, initially backed by Neo4j Community, with the current TypeScript process calling a narrow local API. Graphiti handles ingestion and retrieval; Neo4j stores the graph. The documented Neo4j route is the initial choice because it is the primary supported backend, not because this investigation measured it against alternatives. FalkorDB and embedded FalkorDB Lite are also available. Model extraction and embeddings need their own providers; hosting the graph locally does not by itself keep model processing local. The upstream REST/MCP servers are reference implementations and should not be assumed to supply production operation guarantees. [Neo4j configuration](https://help.getzep.com/graphiti/configuration/neo4j-configuration), [pinned README](https://github.com/getzep/graphiti/blob/fb60e59d4a208c99e7d0186ee6335d2a257f17f2/README.md), [REST reference](https://github.com/getzep/graphiti/blob/fb60e59d4a208c99e7d0186ee6335d2a257f17f2/server/README.md)
+
+```mermaid
+flowchart LR
+    A[SQLite: authoritative experience and memory] --> B[Durable synchronization and deletion records]
+    B --> C[Graphiti and Neo4j: derived graph]
+    C --> D[Candidate facts and supporting sources]
+    D --> E[Local validity and social-context checks]
+    E --> F[Recall context]
+```
+
+This extends the replaceable retrieval direction in [ADR-0009](../adr/0009-embedded-pi-with-local-state-and-cli.md). Activities, commitments, habits, practices, and impressions retain their direct delivery paths under [ADR-0006](../adr/0006-experience-understanding-and-continuing-state.md) and [ADR-0012](../adr/0012-self-maintained-development-alongside-the-operator-persona.md); they do not become optional graph hits. Graph-generated summaries are not automatically promoted into the Agent's long-term understanding.
+
+### Source checks that affect integration
+
+The source recheck examined upstream main `fb60e59d4a208c99e7d0186ee6335d2a257f17f2`, dated 2026-11-03. This is not an installed or validated release.
+
+- `EntityEdge` records supporting episodes and fields including `valid_at`, `invalid_at`, and `expired_at`. Episodic nodes preserve source content and reference time. These support provenance and temporal representation, but do not verify the truth of extracted relationships. [edges.py](https://github.com/getzep/graphiti/blob/fb60e59d4a208c99e7d0186ee6335d2a257f17f2/graphiti_core/edges.py#L263), [nodes.py](https://github.com/getzep/graphiti/blob/fb60e59d4a208c99e7d0186ee6335d2a257f17f2/graphiti_core/nodes.py#L318)
+- Keep an application-owned map from canonical person/event/memory IDs to graph UUIDs. Supplying an ontology or a UUID is not sufficient to guarantee identity or idempotency: `add_triplet` still resolves missing entities, while `add_episode(uuid=...)` looks up an existing episode. One graph namespace should not automatically mean one QQ group. [triplet and episode handling](https://github.com/getzep/graphiti/blob/fb60e59d4a208c99e7d0186ee6335d2a257f17f2/graphiti_core/graphiti.py#L1447), [namespacing](https://help.getzep.com/graphiti/core-concepts/graph-namespacing)
+- `remove_episode` preserves facts with remaining sources and attempts to rebuild surviving entity summaries. On summary-rebuild failure, however, it restores the old summary and logs the error. A successful removal call alone therefore does not prove that deleted content cannot be recalled. The inspected routine also does not establish restoration of earlier facts invalidated by the removed episode or rebuilding of every aggregate summary. These latter limits are static-review inferences, not reproduced runtime failures. [removal implementation](https://github.com/getzep/graphiti/blob/fb60e59d4a208c99e7d0186ee6335d2a257f17f2/graphiti_core/graphiti.py#L2174)
+
+These are reasons to keep the graph rebuildable and gate returned evidence against local state. Explicit deletion must also clean the graph itself; filtering its output is not a substitute for deletion. If an affected projection cannot be verified, withhold it and rebuild from allowed surviving sources. Graph writes need reconciliation after timeouts rather than blind retries. [ADR-0003](../adr/0003-separate-runtime-control-from-social-requests.md), [ADR-0008](../adr/0008-preserve-unknown-action-outcomes.md)
+
+### First evaluation
+
+Use the same synthetic or sanitized material for the current retrieval baseline and Graphiti. Cover cross-group identity and aliases, two-hop associations, historical validity, conflicting first-hand and third-party reports, fictional versus actual experience, deletion with multiple supporting sources, deletion during ingestion, and summary-rebuild failure. Check evidence, incorrect associations, stale results, p95 latency, model calls, and cost under the same context budget. Start with deliberate recall; spontaneous recall currently uses local precomputed vectors and must not acquire an unbounded remote wait.
+
+Only after these cases pass should a production recall path use the graph. Hindsight is the next comparison if Graphiti does not improve associative recall or its integration cost outweighs the gain. No services were deployed, no data was migrated, and no runtime code was changed during this follow-up. Documentation-only changes did not require rerunning application tests.
 
 ## Distinguishing graph mechanisms
 
