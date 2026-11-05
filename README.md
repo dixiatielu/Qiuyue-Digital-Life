@@ -48,7 +48,7 @@ npm run dev -- models openai
 Replace `openai` with your provider when listing its models. Then edit:
 
 - **`config.json`:** Set the SnowLuma address, `adapters[0].accountId` to the logged-in QQ account as a decimal string, and `model.provider` and `model.id` to an image-capable model. Change `personaFile` to `persona.md`. Set `adapters[0].groups` to the groups whose history should be checked after connection or recovery; it can be empty and does not restrict live events.
-- **`model.thinkingLevel` in `config.json` (optional):** How much a reasoning model thinks before each turn: `off` (the default), `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. A custom model also needs `model.reasoning` set to `true`. `model.compat.thinkingFormat` decides how the level is sent; use the format your endpoint accepts, since a gateway may reject another. With the OpenAI format, `off` sends nothing and leaves the model at its own default, so use `minimal` for the least thinking.
+- **`model.thinkingLevel` in `config.json` (optional):** How much a reasoning model thinks before each turn: `off` (the default), `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. A custom model also needs `model.reasoning` set to `true`. For OpenAI Chat Completions, `model.compat.thinkingFormat` decides how the level is sent; use the format your endpoint accepts, since a gateway may reject another. With the OpenAI format, `off` sends nothing and leaves the model at its own default, so use `minimal` for the least thinking.
 - **`embedding` in `config.json` (optional):** To let the digital life recall memories by what people are talking about, set `enabled` to `true` and point `baseUrl` and `model` at an OpenAI-compatible embeddings endpoint. Every threshold depends on the model: `threshold` (what messages call to mind), `searchThreshold` (the few words of a deliberate `recall`, which score lower), and `stickerThreshold` (saved stickers whose descriptions fit what is said, at most `stickerLimit` of them) were calibrated at `0.65`, `0.55`, and `0.65` for `qwen3-vl-embedding`, and other models need their own values. List in `selfNames` the names people call the digital life, so a message is not matched to every memory that mentions it. Without embedding, thoughts recall nothing on their own, and `recall` searches by exact words only.
 - **`drawing` in `config.json` (optional):** To let the digital life generate images with `imagen`, including photorealistic photos, illustrations, stickers, and diagrams, set `enabled` to `true` and point `baseUrl` and `model` at an OpenAI-compatible `/images/generations` endpoint, such as a gateway serving `gpt-image-2.5`, with its credential named by `apiKeyEnv`. Generation takes half a minute or more, so an image comes back to the digital life as an observation when it is done, and requests give up after `timeoutMs`. Generated images are kept in `dir` (`data/drawings` beside the configuration by default) long term in the gallery, independently of chat-memory retention. There is no limit on how often it generates images; watch the endpoint's quota.
 - **`life` in `config.json`:** `enabled` turns autonomous life on at first start, and `allowFiction` permits fictional daily life. While autonomous life is on, `freeTime` offers a life wake when the chats have been quiet for a stretch between `quietMinMs` and `quietMaxMs`, at least `gapMs` from any other life wake and at most `perDay` a day. The digital life holds it back by marking rest on the activity it will wake for.
@@ -60,6 +60,27 @@ Replace `openai` with your provider when listing its models. Then edit:
 ### Models for thinking, review, and compaction
 
 `model` runs everyday thinking and actions. Optional `review.model` and `compaction.model` accept the same complete model configuration, including custom endpoint capabilities, credential name, and thinking level. For example, keep a less expensive model in `model` and copy the stronger model's full configuration into both `review.model` and `compaction.model`. All three must understand images. They share one persona, long-term memory, and continuing state.
+
+Custom endpoints support `openai-completions`, `openai-responses`, `anthropic-messages`, and Gemini's native `google-generative-ai` API. The management page offers **Gemini (native)** for providers and all three model assignments, including model listing and connection tests. For a built-in Gemini model, use provider `google` and a model ID from `npm run dev -- models google` without setting `api`.
+
+For a Gemini native custom endpoint, use a complete model object like this, replacing the ID and token limits with those of your model:
+
+```json
+{
+  "provider": "gemini-gateway",
+  "id": "your-gemini-model-id",
+  "api": "google-generative-ai",
+  "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+  "apiKeyEnv": "GEMINI_API_KEY",
+  "input": ["text", "image"],
+  "contextWindow": 1048576,
+  "maxTokens": 8192,
+  "reasoning": true,
+  "thinkingLevel": "low"
+}
+```
+
+Save `GEMINI_API_KEY` through Credentials or in `credentials.json`. The native adapter sends `x-goog-api-key` and streams `models/{id}:streamGenerateContent`; `baseUrl` must include the API version, usually `/v1beta`, including any gateway prefix. Leave `compat` empty for Gemini; Pi maps `thinkingLevel` to the model's native thinking level or token budget. Model listing follows native pagination and excludes models declared to support only other methods, such as embedding. See Google's [API reference](https://ai.google.dev/api) and [model listing reference](https://aistudio.google.com/api-reference/models/list-models). This native support covers thinking, review, and compaction; embedding and drawing still use their documented OpenAI-compatible endpoints.
 
 With no `review.model`, review follows `model`. With no `compaction.model`, each context uses its own model for summaries: primary summaries follow the primary model, review summaries follow the review model. An explicit compaction model handles both. Omit an override to inherit; an empty model object or `null` is invalid. Overrides never merge fields with another model and failed requests never silently switch models. Inherited summaries do not explicitly enable extra reasoning; an independent summary uses its own `thinkingLevel` (off by default).
 

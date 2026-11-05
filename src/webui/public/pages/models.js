@@ -1,6 +1,7 @@
 import { api, Badge, Card, ConfigField, failed, html, Loading, PageHeader, Modal, SaveBar, Tabs, t, toast, useAsync, useConfigDraft, useEffect, useState } from '../lib.js';
 
-const apis = [['openai-completions', 'OpenAI Chat Completions'], ['openai-responses', 'OpenAI Responses'], ['anthropic-messages', 'Anthropic Messages']];
+const apis = [['openai-completions', 'OpenAI Chat Completions'], ['openai-responses', 'OpenAI Responses'], ['anthropic-messages', 'Anthropic Messages'], ['google-generative-ai', 'Gemini (native)']];
+const geminiBaseHelp = () => t('Include the API version, e.g. https://generativelanguage.googleapis.com/v1beta, or your gateway’s equivalent path.', '地址须包含 API 版本，例如 https://generativelanguage.googleapis.com/v1beta，或网关对应的路径。');
 const thinking = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const sameEndpoint = (profile, section) => section?.baseUrl && profile.apiKeyEnv === section.apiKeyEnv && (!section.api || profile.api === section.api) && new URL(profile.baseUrl).href.replace(/\/+$/, '') === new URL(section.baseUrl).href.replace(/\/+$/, '');
 const safeSame = (profile, section) => { try { return sameEndpoint(profile, section); } catch { return false; } };
@@ -28,12 +29,13 @@ function ProviderEditor({ profile, secrets, onSave, onClose }) {
     <div class="fields">
       <div class="field"><div class="field-label"><label>${t('Name', '名称')}</label></div><input value=${draft.name} onInput=${event => field('name', event.currentTarget.value)} /></div>
       <div class="field"><div class="field-label"><label>API</label></div><select value=${draft.api} onChange=${event => field('api', event.currentTarget.value)}>${apis.map(([id, name]) => html`<option value=${id}>${name}</option>`)}</select></div>
-      <div class="field"><div class="field-label"><label>${t('Base URL', '接口地址')}</label></div><input value=${draft.baseUrl} placeholder="https://api.example.com/v1" onInput=${event => field('baseUrl', event.currentTarget.value)} spellcheck="false" /></div>
+      <div class="field"><div class="field-label"><label>${t('Base URL', '接口地址')}</label></div><input value=${draft.baseUrl} placeholder=${draft.api === 'google-generative-ai' ? 'https://generativelanguage.googleapis.com/v1beta' : 'https://api.example.com/v1'} onInput=${event => field('baseUrl', event.currentTarget.value)} spellcheck="false" />
+        ${draft.api === 'google-generative-ai' ? html`<div class="field-help">${geminiBaseHelp()}</div>` : null}</div>
       <div class="field"><div class="field-label"><label>${t('Credential name', '凭据名称')}</label></div><input list="secret-names" value=${draft.apiKeyEnv} onInput=${event => field('apiKeyEnv', event.currentTarget.value)} spellcheck="false" />
         <datalist id="secret-names">${secrets.map(secret => html`<option value=${secret.name} />`)}</datalist>
         <div class="field-help">${secrets.find(secret => secret.name === draft.apiKeyEnv)?.set ? html`<${Badge} kind="ok">${t('set', '已设置')}<//>` : html`<${Badge} kind="warn">${t('not set — add it under credentials', '未设置——请在下方凭据中添加')}<//>`}</div></div>
       <div class="field wide"><div class="field-label"><label>compat</label></div><textarea class="mono" rows="5" value=${compat} placeholder=${'{ "supportsDeveloperRole": false }'} onInput=${event => setCompat(event.currentTarget.value)}></textarea>
-        <div class="field-help">${t('Options for gateways that differ from the reference API, copied into a custom model with the endpoint.', '用于与标准接口有差异的网关，选用此供应商时会随地址一起填入自定义模型。')}</div></div>
+        <div class="field-help">${draft.api === 'google-generative-ai' ? t('Leave empty for Gemini native.', 'Gemini 原生格式请留空。') : t('Options for gateways that differ from the reference API, copied into a custom model with the endpoint.', '用于与标准接口有差异的网关，选用此供应商时会随地址一起填入自定义模型。')}</div></div>
     </div>
     ${models ? html`<div class="chips">${models.map(model => html`<span class="chip mono">${model}</span>`)}</div>` : null}
   <//>`;
@@ -141,7 +143,7 @@ function ModelEditor({ form, profiles, path = 'model', title = t('Primary thinki
           <option value="">—</option>${(catalog.data?.models ?? []).map(item => html`<option value=${item.id} disabled=${!item.input.includes('image')}>${item.id}${item.input.includes('image') ? '' : t(' (no images)', '（不支持图片）')}${item.reasoning ? ' · reasoning' : ''}</option>`)}</select></div>`}
       ${custom ? html`
         <${ConfigField} form=${form} path=${`${path}.api`} type="select" options=${apis} label="API" />
-        <${ConfigField} form=${form} path=${`${path}.baseUrl`} label=${t('Base URL', '接口地址')} />` : html`<${ConfigField} form=${form} path=${`${path}.baseUrl`} label=${t('Base URL override', '覆盖接口地址')} help=${t('Optional; leave empty for the provider default.', '可选；留空使用供应商默认地址。')} />`}
+        <${ConfigField} form=${form} path=${`${path}.baseUrl`} label=${t('Base URL', '接口地址')} help=${model.api === 'google-generative-ai' ? geminiBaseHelp() : undefined} />` : html`<${ConfigField} form=${form} path=${`${path}.baseUrl`} label=${t('Base URL override', '覆盖接口地址')} help=${t('Optional; leave empty for the provider default.', '可选；留空使用供应商默认地址。')} />`}
       <${ConfigField} form=${form} path=${`${path}.apiKeyEnv`} label=${t('Credential name', '凭据名称')} help=${t('The named credential is used for both catalog models and custom endpoints.', '内置目录模型和自定义端点都使用这里指定的凭据。')} />
       <${ConfigField} form=${form} path=${`${path}.thinkingLevel`} type="select" options=${[['', t('(off)', '（关闭）')], ...thinking.map(level => [level, level])]} label=${t('Thinking level', '思考强度')} help=${t('Only a reasoning model can think; with the OpenAI format, off sends nothing and the model uses its own default.', '只有推理模型可以思考；使用 OpenAI 格式时，off 不发送参数，模型按自身默认强度思考。')} />
       ${custom ? html`
@@ -150,7 +152,7 @@ function ModelEditor({ form, profiles, path = 'model', title = t('Primary thinki
         <${ConfigField} form=${form} path=${`${path}.contextWindow`} type="int" label=${t('Context window (tokens)', '上下文窗口（tokens）')} />
         <${ConfigField} form=${form} path=${`${path}.maxTokens`} type="int" label=${t('Largest output (tokens)', '最大输出（tokens）')} />
         <${ConfigField} form=${form} path=${`${path}.reasoning`} type="bool" label=${t('Reasoning model', '推理模型')} />
-        <${ConfigField} form=${form} path=${`${path}.compat`} type="json" label="compat" help=${t('Gateway differences, such as maxTokensField or thinkingFormat.', '网关差异设置，例如 maxTokensField、thinkingFormat。')} />` : null}
+        <${ConfigField} form=${form} path=${`${path}.compat`} type="json" label="compat" help=${model.api === 'google-generative-ai' ? t('Leave empty for Gemini native.', 'Gemini 原生格式请留空。') : t('Gateway differences, such as maxTokensField or thinkingFormat.', '网关差异设置，例如 maxTokensField、thinkingFormat。')} />` : null}
     </div>
   <//>`;
 }
@@ -164,7 +166,7 @@ function Endpoint({ form, profiles, section, title, help, fields, testable }) {
     setTest({ running: true });
     try { setTest(await api(`/api/test/${section}`, { method: 'POST', body: { [section]: current } })); } catch (error) { setTest({ error: error.message }); }
   };
-  return html`<${Card} title=${title} actions=${html`<${FromProvider} profiles=${profiles} onPick=${pick} />
+  return html`<${Card} title=${title} actions=${html`<${FromProvider} profiles=${profiles.filter(profile => profile.api !== 'google-generative-ai')} onPick=${pick} />
       <button class="ghost" onClick=${() => listModels({ id: section, name: section, api: 'openai-completions', baseUrl: current.baseUrl, apiKeyEnv: current.apiKeyEnv }, setModels)}>${t('List models', '获取模型列表')}</button>
       ${testable ? html`<button onClick=${run} disabled=${test?.running}>${t('Test', '测试')}</button>` : null}`}>
     <p class="muted small">${help}</p>

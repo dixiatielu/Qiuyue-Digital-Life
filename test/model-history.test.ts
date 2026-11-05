@@ -24,7 +24,7 @@ test('real SDK requests preserve source content, images and paired tool IDs acro
   const server = createServer(async (request, response) => {
     const parts: Buffer[] = []; for await (const part of request) parts.push(Buffer.from(part));
     const body = JSON.parse(Buffer.concat(parts).toString());
-    requests.push({ path: request.url!, key: String(request.headers['x-api-key'] ?? request.headers.authorization), body });
+    requests.push({ path: request.url!, key: String(request.headers['x-goog-api-key'] ?? request.headers['x-api-key'] ?? request.headers.authorization), body });
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     if (request.url!.includes('anthropic')) {
       const events = [
@@ -36,6 +36,8 @@ test('real SDK requests preserve source content, images and paired tool IDs acro
         { type: 'message_stop' },
       ];
       response.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''));
+    } else if (request.url!.includes('gemini')) {
+      response.end(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'Outcome remains unknown; consult event-1.' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 12, totalTokenCount: 112 } })}\n\n`);
     } else {
       response.end(`data: ${JSON.stringify({ id: 'chat-test', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta: { content: 'Outcome remains unknown; consult event-1.' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 12, total_tokens: 112 } })}\n\ndata: [DONE]\n\n`);
     }
@@ -44,10 +46,11 @@ test('real SDK requests preserve source content, images and paired tool IDs acro
   const address = server.address(); assert.ok(address && typeof address === 'object');
   const origin = `http://127.0.0.1:${address.port}`;
   try {
-    for (const api of ['openai-completions', 'anthropic-messages'] as const) {
-      const selected: ModelConfig = { provider: 'same-provider', id: 'same-model', api, apiKeyEnv: 'SUMMARY_KEY', baseUrl: `${origin}/${api === 'anthropic-messages' ? 'anthropic' : 'completions'}/v1`, input: ['text', 'image'], contextWindow: 131072, maxTokens: 8192, reasoning: true };
+    for (const api of ['openai-completions', 'anthropic-messages', 'google-generative-ai'] as const) {
+      const google = api === 'google-generative-ai';
+      const selected: ModelConfig = { provider: 'same-provider', id: google ? 'gemini-3-flash-preview' : 'same-model', api, apiKeyEnv: 'SUMMARY_KEY', baseUrl: `${origin}/${google ? 'gemini/v1beta' : api === 'anthropic-messages' ? 'anthropic/v1' : 'completions/v1'}`, input: ['text', 'image'], contextWindow: 131072, maxTokens: 8192, reasoning: true };
       // Same model metadata still needs sanitation when moving to another endpoint.
-      const original = history(selected.provider, api === 'anthropic-messages' ? 'openai-responses' : api, selected.id);
+      const original = history(selected.provider, api === 'openai-completions' ? api : 'openai-responses', selected.id);
       const before = JSON.stringify(original);
       const { model, stream } = createModelBackend(selected, () => 'summary-key');
       const context = normalizeContext({ systemPrompt: 'Keep reported claims and unknown outcomes distinct.', tools: [{ name: 'read_event', description: 'Read an event', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } }], messages: toModelMessages(portableSummaryMessages(original)) });
@@ -55,13 +58,25 @@ test('real SDK requests preserve source content, images and paired tool IDs acro
       assert.equal(result.stopReason, 'stop', result.errorMessage);
       assert.equal(JSON.stringify(original), before, 'archived originals are not mutated');
       const sent = requests.at(-1)!;
-      assert.equal(sent.body.model, 'same-model');
-      assert.equal(sent.key, api === 'anthropic-messages' ? 'summary-key' : 'Bearer summary-key');
+      if (google) assert.equal(sent.path, '/gemini/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse');
+      else assert.equal(sent.body.model, 'same-model');
+      assert.equal(sent.key, api === 'openai-completions' ? 'Bearer summary-key' : 'summary-key');
       assert.doesNotMatch(JSON.stringify(sent.body), /PRIVATE_/);
       assert.match(JSON.stringify(sent.body), /Outcome unknown\. Source event-1/);
       assert.match(JSON.stringify(sent.body), new RegExp(pixel.replace(/[+]/g, '\\+')));
-      assert.ok((sent.body.max_tokens ?? sent.body.max_completion_tokens) <= 4096, 'reasoning stays within the caller reserve');
-      if (api === 'anthropic-messages') {
+      assert.ok((sent.body.max_tokens ?? sent.body.max_completion_tokens ?? sent.body.generationConfig?.maxOutputTokens) <= 4096, 'reasoning stays within the caller reserve');
+      if (google) {
+        const parts = sent.body.contents.flatMap((content: any) => content.parts);
+        const call = parts.find((part: any) => part.functionCall)?.functionCall;
+        const result = parts.find((part: any) => part.functionResponse)?.functionResponse;
+        assert.equal(call.name, 'read_event');
+        assert.equal(call.name, result.name);
+        assert.equal(call.id, result.id);
+        assert.match(call.id, /^[a-zA-Z0-9_-]{1,64}$/);
+        assert.deepEqual(call.args, { id: 'event-1' });
+        assert.ok(parts.some((part: any) => part.inlineData?.data === pixel), 'the source image survives');
+        assert.ok(result.parts.some((part: any) => part.inlineData?.data === pixel), 'the tool-result image survives');
+      } else if (api === 'anthropic-messages') {
         const blocks = sent.body.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : []);
         const call = blocks.find((block: any) => block.type === 'tool_use');
         const result = blocks.find((block: any) => block.type === 'tool_result');
@@ -74,6 +89,6 @@ test('real SDK requests preserve source content, images and paired tool IDs acro
         assert.equal(call.id, result.tool_call_id);
       }
     }
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 3);
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });

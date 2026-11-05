@@ -299,6 +299,9 @@ test('providers start from the endpoints already configured and are checked when
   const good = await call('/api/providers', { method: 'PUT', body: { providers: [{ id: 'a', name: 'A', api: 'anthropic-messages', baseUrl: 'https://example.com', apiKeyEnv: 'KEY' }] } });
   assert.equal(good.status, 200);
   assert.deepEqual((await call('/api/providers')).body.providers.map((item: any) => item.name), ['A']);
+  const native = { id: 'g', name: 'Gemini', api: 'google-generative-ai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', apiKeyEnv: 'GEMINI_KEY' };
+  assert.equal((await call('/api/providers', { method: 'PUT', body: { providers: [native] } })).status, 200);
+  assert.deepEqual((await call('/api/providers')).body.providers, [native]);
 }));
 
 test('the working context identity follows the persona, prompt, model, and tools, and nothing else', () => {

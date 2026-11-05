@@ -4,7 +4,9 @@ import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
+import { googleGenerativeAIApi } from '@earendil-works/pi-ai/api/google-generative-ai.lazy';
 import { OpenAICompletionsCompatSchema, OpenAIResponsesCompatSchema, AnthropicMessagesCompatSchema } from '@earendil-works/pi-ai/providers/compat-schema';
+import { Type } from 'typebox';
 import { Check } from 'typebox/value';
 import type { Config } from './config.js';
 import { summaryEnvelope } from './context.js';
@@ -13,6 +15,7 @@ const apis = {
   'openai-completions': { create: openAICompletionsApi, compat: OpenAICompletionsCompatSchema },
   'openai-responses': { create: openAIResponsesApi, compat: OpenAIResponsesCompatSchema },
   'anthropic-messages': { create: anthropicMessagesApi, compat: AnthropicMessagesCompatSchema },
+  'google-generative-ai': { create: googleGenerativeAIApi, compat: Type.Object({}) },
 };
 type CustomApi = keyof typeof apis;
 const thinkingLevels: ModelThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -115,7 +118,7 @@ export function validateModelConfig(config: ModelConfig) {
     if (['input', 'contextWindow', 'maxTokens', 'reasoning', 'compat'].some(key => config[key as keyof ModelConfig] !== undefined)) throw new Error('Custom model capabilities require model.api.');
     return;
   }
-  if (typeof config.api !== 'string' || !Object.hasOwn(apis, config.api)) throw new Error('model.api must be openai-completions, openai-responses, or anthropic-messages.');
+  if (typeof config.api !== 'string' || !Object.hasOwn(apis, config.api)) throw new Error(`model.api must be one of ${Object.keys(apis).join(', ')}.`);
   if (!config.baseUrl) throw new Error('A custom model requires model.baseUrl.');
   if (!Array.isArray(config.input) || !config.input.includes('text') || config.input.some(value => !['text', 'image'].includes(value))) throw new Error('model.input must be an array of input capabilities containing text and optionally image.');
   for (const key of ['contextWindow', 'maxTokens'] as const) if (!Number.isSafeInteger(config[key]) || config[key]! <= 0) throw new Error(`The custom model field model.${key} must be a positive integer.`);

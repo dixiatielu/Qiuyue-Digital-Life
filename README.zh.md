@@ -48,7 +48,7 @@ npm run dev -- models openai
 查看其他服务商的模型时，将 `openai` 替换为对应的服务商名称。然后编辑：
 
 - **`config.json`：** 设置 SnowLuma 地址，将 `adapters[0].accountId` 设为已登录 QQ 账号的十进制字符串，并将 `model.provider` 和 `model.id` 设为支持图片输入的模型。将 `personaFile` 改为 `persona.md`。`adapters[0].groups` 指定连接或恢复时需要补查历史消息的群，可为空，不限制实时事件的接收范围。
-- **`config.json` 中的 `model.thinkingLevel`（可选）：** 推理模型每轮思考的强度：`off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`。自定义模型还需将 `model.reasoning` 设为 `true`。强度如何发送由 `model.compat.thinkingFormat` 决定，请使用接口接受的格式，网关可能拒绝其他格式。使用 OpenAI 格式时，`off` 不发送任何参数，模型按自身默认强度思考；想尽量少思考请用 `minimal`。
+- **`config.json` 中的 `model.thinkingLevel`（可选）：** 推理模型每轮思考的强度：`off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`。自定义模型还需将 `model.reasoning` 设为 `true`。使用 OpenAI Chat Completions 时，强度如何发送由 `model.compat.thinkingFormat` 决定，请使用接口接受的格式，网关可能拒绝其他格式。使用 OpenAI 格式时，`off` 不发送任何参数，模型按自身默认强度思考；想尽量少思考请用 `minimal`。
 - **`config.json` 中的 `embedding`（可选）：** 如需让数字生命按大家正在聊的内容想起记忆，将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 embeddings 接口。各个阈值都取决于模型：`threshold`（消息让它想起什么）、`searchThreshold`（主动 `recall` 时的几个关键词，得分通常更低）和 `stickerThreshold`（描述与大家所说相符的已存表情，最多 `stickerLimit` 个）分别按 `qwen3-vl-embedding` 校准为 `0.65`、`0.55` 和 `0.65`，其他模型需要自行校准。在 `selfNames` 中列出别人对数字生命的称呼，避免一条消息因为提到它就匹配上所有提到它的记忆。不启用时，思考不会自动想起记忆，主动调用 `recall` 只按原词检索。
 - **`config.json` 中的 `drawing`（可选）：** 如需让数字生命通过 `imagen` 生成图片（包括写实照片、插画、表情包和示意图），将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 `/images/generations` 接口（例如提供 `gpt-image-2.5` 的网关），凭据名称由 `apiKeyEnv` 指定。生成一张图要半分钟以上，完成后会作为一条观察回到数字生命那里；请求超过 `timeoutMs` 即放弃。生成的图片保存在 `dir`（默认是配置文件旁的 `data/drawings`），由作品库长期保存，不随聊天记忆过期清理。生成次数不设上限，请自行留意接口额度。
 - **`config.json` 中的 `life`：** `enabled` 决定首次启动时是否开启自主生活，`allowFiction` 允许虚构日常。自主生活开启时，`freeTime` 会在聊天安静一段时间（每次在 `quietMinMs` 到 `quietMaxMs` 之间随机）后提供一次 life wake，与其他 life wake 至少相隔 `gapMs`，每天最多 `perDay` 次。数字生命在安排醒来要做的活动时标记 rest，就能让它在那之前不来。
@@ -60,6 +60,27 @@ npm run dev -- models openai
 ### 主思考、复盘与压缩模型
 
 `model` 负责日常思考与行动。可选的 `review.model` 和 `compaction.model` 接受同样的完整模型配置，包括自定义端点能力、凭据名称和思考强度。例如，把较便宜的模型放在 `model`，再将强模型的完整配置分别复制到 `review.model` 和 `compaction.model`。三个用途都须支持图片输入，共享同一人格、长期记忆和持续状态。
+
+自定义端点支持 `openai-completions`、`openai-responses`、`anthropic-messages` 和 Gemini 原生的 `google-generative-ai`。管理页中的供应商和三个模型用途都可选择 **Gemini (native)**，支持获取模型列表和连接测试。使用 Pi 内置的 Gemini 模型时，供应商填 `google`，从 `npm run dev -- models google` 选择模型 ID，无需填写 `api`。
+
+Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 token 上限替换为实际模型的值：
+
+```json
+{
+  "provider": "gemini-gateway",
+  "id": "your-gemini-model-id",
+  "api": "google-generative-ai",
+  "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+  "apiKeyEnv": "GEMINI_API_KEY",
+  "input": ["text", "image"],
+  "contextWindow": 1048576,
+  "maxTokens": 8192,
+  "reasoning": true,
+  "thinkingLevel": "low"
+}
+```
+
+在管理页「凭据」或 `credentials.json` 中保存 `GEMINI_API_KEY`。原生适配器使用 `x-goog-api-key` 鉴权，调用 `models/{id}:streamGenerateContent`；`baseUrl` 必须包含 API 版本路径（通常为 `/v1beta`），也可包含网关的路径前缀。Gemini 的 `compat` 请留空，Pi 会将 `thinkingLevel` 映射为模型原生的思考等级或 token 预算。模型列表按原生格式翻页，并排除明确只支持 embedding 等其他方法的模型。参见 Google 的 [API 参考](https://ai.google.dev/api)和[模型列表参考](https://aistudio.google.com/api-reference/models/list-models)。本次原生支持适用于思考、复盘和压缩；embedding 与画图仍使用各自文档说明的 OpenAI 兼容接口。
 
 不设置 `review.model` 时，复盘跟随主模型。不设置 `compaction.model` 时，各自使用所属上下文的模型生成摘要；显式设置后，主思考与复盘都由该模型压缩。删除 override 表示跟随，空模型对象或 `null` 无效。独立配置不会与其他模型逐字段合并，请求失败也不会自动切换模型。跟随模式下的摘要请求不主动开启额外推理；独立压缩模型使用自己的 `thinkingLevel`，默认 off。
 

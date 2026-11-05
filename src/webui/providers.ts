@@ -8,7 +8,7 @@ import { createModelBackend, validateModelConfig, type ModelConfig } from '../mo
 import { EmbeddingClient } from '../embedding.js';
 import { hash } from './files.js';
 
-export const providerApis = ['openai-completions', 'openai-responses', 'anthropic-messages'] as const;
+export const providerApis = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai'] as const;
 /**
  * A model provider the operator keeps for the page: an endpoint, its API, and where its key lives.
  * The daemon never reads these; choosing one for the model, embedding, or drawing copies its fields into the configuration.
@@ -61,6 +61,30 @@ const trimmed = (url: string) => url.replace(/\/+$/, '');
 export async function remoteModels(profile: ProviderProfile, request: typeof fetch = fetch, credential: CredentialReader = environmentCredential): Promise<string[]> {
   checkProfile(profile);
   const key = credential(profile.apiKeyEnv);
+  if (profile.api === 'google-generative-ai') {
+    // Match the generation adapter: baseUrl already includes the API version (usually /v1beta).
+    const url = new URL(`${trimmed(profile.baseUrl)}/models`);
+    const headers = key ? { 'x-goog-api-key': key } : undefined;
+    const models = new Set<string>();
+    const pages = new Set<string>();
+    const signal = AbortSignal.timeout(15_000);
+    while (true) {
+      const response = await request(url.href, { headers, signal });
+      if (!response.ok) throw new Error(`The model list could not be read: HTTP ${response.status} from ${url}.`);
+      const body = await response.json() as { models?: { name?: unknown; supportedGenerationMethods?: string[] }[]; nextPageToken?: string };
+      if (!Array.isArray(body.models)) throw new Error(`${url} did not return a model list.`);
+      for (const item of body.models) {
+        if (typeof item?.name !== 'string' || !item.name) continue;
+        if (item.supportedGenerationMethods && !item.supportedGenerationMethods.includes('generateContent') && !item.supportedGenerationMethods.includes('streamGenerateContent')) continue;
+        const id = item.name.replace(/^models\//, '');
+        if (id) models.add(id);
+      }
+      if (!body.nextPageToken) return [...models].sort();
+      if (pages.has(body.nextPageToken)) throw new Error('The model list repeated a page token.');
+      pages.add(body.nextPageToken);
+      url.searchParams.set('pageToken', body.nextPageToken);
+    }
+  }
   const anthropic = profile.api === 'anthropic-messages';
   const headers: Record<string, string> = anthropic ? { 'anthropic-version': '2023-06-01', ...(key ? { 'x-api-key': key } : {}) } : (key ? { Authorization: `Bearer ${key}` } : {});
   const base = trimmed(profile.baseUrl);
