@@ -270,8 +270,8 @@ test('review waits for a quiet moment and lists the chats it has not read', asyn
     f.reviewFaux.setResponses([context => {
       const review = JSON.stringify(context.messages.at(-1));
       assert.match(review, /memory_maintenance.*apart from your conversations.*schedule it as a commitment.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record.*person=900/);
-      // What happened comes before form: corrections, unknown outcomes, and one person's ways kept in their impression.
-      assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*say it is unknown.*into your impression of them/);
+      // What happened comes before form: corrections, unstated outcomes, and one person's ways kept in their impression.
+      assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*leave it unstated.*into your impression of them/);
       return answer('Reviewed');
     }]);
     await runtime.tick(); await runtime.idle();
