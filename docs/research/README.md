@@ -16,6 +16,7 @@ These documents record dated investigations, source snapshots, and hypotheses. T
 | [Aurabot anthropomorphism](aurabot-anthropomorphism.md) | Source-based behavior comparison; mechanisms and hypotheses do not demonstrate a measured improvement in human likeness |
 | [QQ project feature gaps](qq-project-feature-gaps.md) | Historical comparison with qq-bridge and Aurabot; later gallery, plugin, online-life, and platform-adapter work supersedes several gaps |
 | [Koishi comparison](koishi-comparison.md) | Dated comparison of plugin composition, configuration, testing, platform abstractions, and operational boundaries; recommendations are not accepted architecture changes |
+| [Cordis plugin framework](cordis-plugin-framework.md) | Dated evaluation of Cordis 4.0.0-rc.12 against the existing plugin host; recommends keeping the v2 contract and adding declarative dependencies first, not an accepted change |
 | [Agent TUI design references](agent-tui-design-references.md) | Design exploration; implementation status is stated in the document |
 
 Keep source dates, pinned revisions, inference boundaries, and reproducible synthetic examples. Do not include private deployment settings, actual account or group identifiers, credentials, private conversations, or links to ignored personal files. Local experiments and generated previews belong outside tracked research, for example under ignored `output/`.
