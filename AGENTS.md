@@ -16,6 +16,10 @@ Single-context layout: root `GLOSSARY.md` and `docs/adr/`. Read `docs/agents/dom
 
 Write all documentation under `docs/research/` in English.
 
+## README maintenance
+
+Keep `README.md` and `README.zh.md` as concise project entry points: overview, quick start, and documentation links. Edit them only when explicitly requested or when project positioning, prerequisites, startup steps, or documentation navigation need updating. Routine fixes and small feature changes alone do not warrant README edits. Put detailed configuration and operational instructions in the relevant `docs/` guide, and change history in commits and PRs. Keep both language versions aligned when an update is necessary.
+
 ## Completing changes
 
 After completing a feature or bug fix and passing the relevant checks, create a focused local Git commit without waiting for a separate user request. Stage only changes belonging to the task, and report the commit ID and validation results in the final response.

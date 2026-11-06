@@ -1,6 +1,6 @@
 # Context token budgets and compaction: review
 
-Reviewed: 2026-10-28. This is a record of design research at the time. The subsequent implementation uses server usage plus incremental estimates without a tokenizer; see the README for current configuration and behavior. First-party implementation facts are distinguished from this project’s engineering recommendations. Online documentation may change with versions; key source links are pinned to commits. [README](../../README.md).
+Reviewed: 2026-10-28. This is a record of design research at the time. The subsequent implementation uses server usage plus incremental estimates without a tokenizer; see the [usage guide](../usage.md#models) for current configuration and behavior. First-party implementation facts are distinguished from this project’s engineering recommendations. Online documentation may change with versions; key source links are pinned to commits.
 
 The references below to memory review in the primary thinking process predate the 2026-11-02 revision of [ADR-0012](../adr/0012-self-maintained-development-alongside-the-operator-persona.md). That revision moved review to its own working context. Context compaction and long-term memory review remain separate operations.
 

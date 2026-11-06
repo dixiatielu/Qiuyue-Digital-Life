@@ -3,7 +3,7 @@
 Research date: 2026-10-28. This document records an investigation of primary documentation and source code. It is not an accepted implementation plan; no deployment, QQ login, or actual publishing was performed.
 Source-code findings are pinned to the inspected commits. Product documentation and examples do not establish the actual behavior of every current version. The sections below distinguish built-in framework capabilities, third-party plugins, and design recommendations.
 
-Status: historical research from 2026-10-28. The local gaps and proposed work below describe that snapshot. Current image access and plugin capabilities are documented in the [README](../../README.md) and [plugin guide](../plugins.md); this document is not a current list of missing features.
+Status: historical research from 2026-10-28. The local gaps and proposed work below describe that snapshot. Current image access and plugin capabilities are documented in the [usage guide](../usage.md) and [plugin guide](../plugins.md); this document is not a current list of missing features.
 
 ## Findings
 

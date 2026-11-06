@@ -1,6 +1,6 @@
 # Research notes
 
-These documents record dated investigations, source snapshots, and hypotheses. They are not implementation specifications or a current feature backlog. The [README](../../README.md), implementation, and [ADRs](../adr/) describe accepted behavior; later ADR revisions take precedence over earlier research recommendations.
+These documents record dated investigations, source snapshots, and hypotheses. They are not implementation specifications or a current feature backlog. The [usage guide](../usage.md), implementation, and [ADRs](../adr/) describe accepted behavior; later ADR revisions take precedence over earlier research recommendations.
 
 | Topic | Scope and subsequent decisions |
 | --- | --- |
@@ -9,7 +9,7 @@ These documents record dated investigations, source snapshots, and hypotheses. T
 | [Memory system options](memory-system-options.md) | Dated comparison of external memory systems and migration tradeoffs; no replacement architecture has been accepted |
 | [Alibaba Cloud Agent Memory](aliyun-agent-memory.md) | Distinguishes PolarDB for AI graph memory, the Mem0-compatible service, and Milvus AMS; domain fit and proposed association-retrieval experiments, with no cloud integration or migration performed |
 | [Graph memory alternatives](graph-memory-alternatives.md) | November 5 follow-up prioritizes a Graphiti/Neo4j experiment beside existing Memory, with Hindsight as a comparison; earlier mechanism research and source-review limits are retained |
-| [Context compaction](context-compaction.md) | Historical implementation research; current context behavior follows the README and ADRs |
+| [Context compaction](context-compaction.md) | Historical implementation research; current context behavior follows the [usage guide](../usage.md#models) and ADRs |
 | [SnowLuma recovery](snowluma-recovery.md) | Sending and disconnection boundaries underlying ADR-0007 and ADR-0008 |
 | [Social tool use](social-agent-tool-use-survey.md) | Historical comparison of resource access, tools, and skills; current plugins are documented separately |
 | [Neuro-sama conversation style](neuro-sama-conversation-style.md) | Public evidence and hypothetical prompt experiments; examples are invented |

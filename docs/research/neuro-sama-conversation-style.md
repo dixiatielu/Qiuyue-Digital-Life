@@ -110,4 +110,4 @@ Compare the send-tool arguments the model actually selects, combining consecutiv
 
 If long replies persist after the prompt change, use real traces to distinguish model habits, old dialogue examples, and tasks that actually need detail. Do not directly clear Long-term Memory, hard-truncate generated messages, or mechanically split a long passage into several messages just to lower the count.
 
-To test a persona change, edit the file selected by `personaFile` and follow the documented restart procedure. [Startup loading](../../src/config.ts), [Operating instructions](../../README.md).
+To test a persona change, edit the file selected by `personaFile` and follow the documented restart procedure. [Startup loading](../../src/config.ts), [Operating instructions](../usage.md#persona-and-system-prompt).
