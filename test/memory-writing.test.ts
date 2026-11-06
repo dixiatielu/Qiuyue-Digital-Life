@@ -4,6 +4,7 @@ import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentTools, 
 import { event, fixture } from './helpers.js';
 import { pruneToolResults } from '../src/context.js';
 import { createModelBackend } from '../src/model.js';
+import { handleControl } from '../src/control.js';
 
 const results = (messages: Message[]) => messages.filter(message => message.role === 'toolResult');
 
@@ -111,5 +112,29 @@ test('direct memory writes report every invalid source and the available charact
       return true;
     });
     assert.equal(f.store.development(['global']).length, 1);
+  } finally { f.store.close(); }
+});
+
+test('memory budgets count Unicode code points consistently before and after storage', async () => {
+  const f = fixture();
+  try {
+    f.cfg.development.personChars = 40; f.cfg.development.scopeChars = 40; f.restart();
+    const source = event(f.store);
+    const remember = f.reviewTools.current().find(tool => tool.name === 'remember')!;
+    const args = { kind: 'impression' as const, title: 'P7', content: '🙂'.repeat(40), importance: 5, scope: 'person:qq:user:7', sources: [source.id] };
+    await remember.prepareArguments!(args);
+    const impression = f.store.writeMemory(args, false, f.cfg.development);
+    assert.deepEqual(f.store.inspectMemoryWrite({ ...args, supersedes: impression.id }, f.cfg.development).problems, []);
+    assert.match(f.store.inspectMemoryWrite({ ...args, content: args.content + '字', supersedes: impression.id }, f.cfg.development).problems.join('\n'), /41 characters.*limit of 40/);
+    const practice = { ...args, kind: 'practice' as const, scope: 'global', content: '🙂'.repeat(30) };
+    f.store.writeMemory(practice, false, f.cfg.development);
+    f.store.writeMemory({ ...practice, content: '🙂'.repeat(10) }, false, f.cfg.development);
+    assert.match(f.store.inspectMemoryWrite({ ...practice, content: '字' }, f.cfg.development).problems.join('\n'), /41 characters.*limit of 40/);
+    const note = { ...args, kind: 'note' as const, title: '🙂'.repeat(200), content: '🙂'.repeat(12_000) };
+    await remember.prepareArguments!(note);
+    const saved = f.store.writeMemory(note, false);
+    assert.throws(() => f.store.writeMemory({ ...note, content: note.content + '字' }, false), /too long/);
+    assert.throws(() => handleControl(f.store, { args: ['memory', 'correct', saved.id, note.content + '字'] }), /too long/);
+    assert.doesNotThrow(() => handleControl(f.store, { args: ['memory', 'correct', saved.id, note.content] }));
   } finally { f.store.close(); }
 });

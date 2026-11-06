@@ -16,7 +16,7 @@ export function validatedMemoryTool(tool: AgentTool, store: Store, limits: Confi
         problems.push(message.split('\n\nReceived arguments:')[0]!);
       }
       if (args && typeof args === 'object' && !Array.isArray(args)) problems.push(...store.inspectMemoryWrite(args as Partial<MemoryInput>, limits).problems);
-      if (problems.length) throw new Error(`${problems.join('\n')}\nNothing was saved. Fix all reported fields. Copy source IDs exactly from evidence; reread missing evidence with read_event, read_chat_record, or read_context. If evidence does not support a claim, omit the claim rather than substituting unrelated sources.`);
+      if (problems.length) throw new Error(`${problems.join('\n')}\nNothing was saved. Fix all reported fields. Copy source IDs exactly from evidence into sources; keep source IDs and #xxxxxxxx references out of content for every memory kind. Reread missing evidence with read_event, read_chat_record, or read_context. If evidence does not support a claim, omit the claim rather than substituting unrelated sources.`);
       return args as Record<string, unknown>;
     },
   };

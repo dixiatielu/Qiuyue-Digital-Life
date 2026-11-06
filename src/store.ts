@@ -10,6 +10,8 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 
 const json = (value: unknown) => JSON.stringify(value);
 const parse = <T>(value: unknown): T => JSON.parse(String(value)) as T;
+/** Match JSON Schema's character counts, including for supplementary Unicode characters. */
+const characters = (value: string): number => [...value].length;
 const id = (prefix: string) => `${prefix}:${randomUUID()}`;
 export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
 /** While the digital life rests, group chat not addressed to it waits instead of starting or steering a thought (ADR-0016). */
@@ -285,15 +287,16 @@ export class Store {
       if (typeof scope === 'string') {
         const cap = scope.startsWith('person:') ? limits.personChars : limits.scopeChars;
         // Habits and practices have separate budgets; replacing an entry frees its old content.
-        const used = Number(this.db.prepare('SELECT coalesce(sum(length(content)),0) AS n FROM memories WHERE active=1 AND scope=? AND kind=? AND id IS NOT ?').get(scope, input.kind, typeof input.supersedes === 'string' ? input.supersedes : null)!.n);
-        if (used + input.content.length > cap) problems.push(`Your ${input.kind}s in ${scope} would reach ${used + input.content.length} characters, above the limit of ${cap}; merge entries with supersedes or retire some with retire_memory first. This write has room for ${Math.max(0, cap - used)} characters; its content has ${input.content.length}. Shorten it before retrying.`);
+        const used = this.db.prepare('SELECT content FROM memories WHERE active=1 AND scope=? AND kind=? AND id IS NOT ?').all(scope, input.kind, typeof input.supersedes === 'string' ? input.supersedes : null).reduce((sum, row) => sum + characters(String(row.content)), 0);
+        const length = characters(input.content);
+        if (used + length > cap) problems.push(`Your ${input.kind}s in ${scope} would reach ${used + length} characters, above the limit of ${cap}; merge entries with supersedes or retire some with retire_memory first. This write has room for ${Math.max(0, cap - used)} characters; its content has ${length}. Shorten it before retrying.`);
       }
     }
     return { sources: [...sources], problems };
   }
   /** Limits bound the digital life's own development writes; operator corrections pass none. */
   writeMemory(input: MemoryInput, allowFiction: boolean, limits?: { scopeChars: number; personChars: number }): Memory {
-    if (!input.content.trim() || input.content.length > 12_000 || input.title.length > 200) throw new Error('Memory content is empty or too long.');
+    if (!input.content.trim() || characters(input.content) > 12_000 || characters(input.title) > 200) throw new Error('Memory content is empty or too long.');
     if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
     if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
     // A review and a conversation may revise the same version; the later one merges into what the first wrote (ADR-0012).

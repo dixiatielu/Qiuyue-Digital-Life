@@ -35,7 +35,7 @@ export function handleControl(store: Store, request: ControlRequest, runtime?: L
     if (sub === 'correct') {
       const memory = store.memory(memoryId); if (!memory) throw new Error('Memory does not exist.');
       const content = rest.slice(1).join(' '); if (!content) throw new Error('Correction content is required.');
-      if (content.length > 12000 || !memory.active) throw new Error('Correction content is too long, or the record is not the current version.');
+      if ([...content].length > 12000 || !memory.active) throw new Error('Correction content is too long, or the record is not the current version.');
       runtime?.brain.abort();
       const source = store.receive({ key: `correction:${crypto.randomUUID()}`, kind: 'operator_correction', at: Date.now(), text: content, payload: { supersedes: memory.id } }, true)!;
       const reach = store.revisionReach(memory.id);
