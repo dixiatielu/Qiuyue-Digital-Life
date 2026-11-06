@@ -1,13 +1,19 @@
 # Qiuyue Digital Life
 
-A locally hosted digital life built with [Pi Agent](https://github.com/earendil-works/pi), with one identity, long-term memory, and continuing state across QQ and Telegram.
+A digital life with a persistent identity and memory, built with Pi Agent. Platform adapters expose complete native APIs as tools; one Agent observes QQ or Telegram and decides when to participate, act, or stay silent.
 
 English | [简体中文](README.zh.md)
 
-- **Autonomous socializing:** Perceives messages and decides when to participate, act, or stay silent.
-- **Continuity and growth:** Develops habits and relationships from experience, carries activities across days, and chooses when to rest.
-- **Extensible capabilities:** Platform adapters expose permitted native APIs; plugins add web browsing, image generation, and other activities.
-- **Local control:** CLI, TUI, and WebUI manage operation, configuration, and memory. Runtime control stays separate from ordinary chat.
+## What it is
+
+A locally hosted digital life with a persistent persona and memory:
+
+- **One soul:** Shares a single identity, memory, and ongoing activity across platforms, group chats, and private chats, keeping a unified persona everywhere.
+- **Autonomous socializing:** Treats incoming messages as environmental perceptions, deciding on its own when to chime in, react, send images, or stay silent—and preempts unfinished thoughts when new replies arrive.
+- **Grounded growth:** Builds on the operator's core persona through independent reviews, learning group norms, expression habits, and impressions from real interaction evidence without self-reinforcing loops.
+- **Personal life:** Carries pursuits across days, spends quiet stretches browsing online feeds, communities, and the web or curating its own drawing gallery, and schedules its own sleep and rest.
+- **Native interaction:** Exposes complete permitted native APIs to the same Agent through platform adapters, paired with hot-reloadable plugins for system faces, semantic sticker recall, and card sharing to use platform features like a real user.
+- **Local control:** Separates social requests from runtime management, with a live TUI and standalone WebUI for status, separate thinking/review/compaction models, and provenance-aware memory editing.
 
 ## Quick start
 
@@ -71,9 +77,19 @@ Use `npm start -- help` for CLI commands such as `status`, `pause`, `resume`, an
 - [Glossary](GLOSSARY.md) · [Architecture decisions](docs/adr/) — domain model and design rationale.
 - [Contributing](CONTRIBUTING.md) — issues, pull requests, and local checks. Chinese and English are welcome.
 
-## Acknowledgments
+## Acknowledgments and inspiration
 
-Built on Pi, with ideas from Letta / MemGPT, Letta Code, Koishi, OpenClaw, Generative Agents, Mem0, Graphiti, Hindsight, MaiBot, AstrBot, Aurabot, qq-bridge, and DeepSeek Harness. Sources and design comparisons are recorded in the [research notes](docs/research/).
+Thanks to the following projects and their contributors for the ideas and design references explored in our [research notes](docs/research/):
+
+- [Letta / MemGPT](https://github.com/letta-ai/letta) and [Letta Code](https://github.com/letta-ai/letta-code): external memory, memory consolidation, and context compaction.
+- [Koishi](https://github.com/koishijs/koishi): plugin composition and lifecycle, configuration schemas, platform adapters, and testing tools.
+- [Pi](https://github.com/earendil-works/pi): the embedded Agent runtime used by this project, tool interfaces, and on-demand skill loading.
+- [OpenClaw](https://github.com/openclaw/openclaw): layered memory, saving memories before compaction, and skill organization.
+- [Generative Agents](https://arxiv.org/abs/2304.03442): experience-based reflection, memory importance, and continuing plans.
+- [Mem0](https://github.com/mem0ai/mem0), [Graphiti](https://github.com/getzep/graphiti), and [Hindsight](https://github.com/vectorize-io/hindsight): memory organization, hybrid retrieval, and associations between experiences.
+- [MaiBot](https://github.com/MaiM-with-u/MaiBot) and [AstrBot](https://docs.astrbot.app/use/skills.html): sticker resources, social tool use, and the separation of skills and plugins.
+- [Aurabot](https://github.com/aureth-labs/dsh-aurabot-qq) and [qq-bridge](https://github.com/Derpyu520/qq-bridge): conversational expression, proactive participation, online activities, and plugin design.
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): token budgeting, tool-result pruning, and context compaction.
 
 ## License
 

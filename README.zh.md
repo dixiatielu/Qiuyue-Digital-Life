@@ -1,13 +1,19 @@
 # 秋月·数字生命
 
-基于 [Pi Agent](https://github.com/earendil-works/pi) 构建、常驻本地的数字生命，在 QQ、Telegram 等环境中共享同一个身份、长期记忆与持续状态。
+基于 Pi Agent 构建的数字生命，拥有持续的人格与记忆。平台适配器将完整原生接口暴露为工具；同一个 Agent 感知 QQ、Telegram 等环境，自主决定何时参与、行动或保持沉默。
 
 [English](README.md) | 简体中文
 
-- **自主社交：** 感知消息，自己决定何时参与、行动或保持沉默。
-- **持续成长：** 从经历中形成习惯与人际关系，跨天推进活动，自主安排休息。
-- **能力扩展：** 平台适配器按权限提供原生接口，插件接入网页浏览、图像生成等活动。
-- **本地管理：** 通过 CLI、TUI 和 WebUI 管理运行、配置与记忆，运行控制与普通聊天分离。
+## 它是什么
+
+一个常驻本地、拥有持续人格与记忆的数字生命：
+
+- **单一灵魂：** 跨不同平台、群聊与私聊共享同一个身份、记忆与正在进行的活动，在所有对话中保持完整统一的人格。
+- **自主社交：** 将收到的消息视为环境感知，自己决定搭话、贴表情、发图或保持沉默；正在回复时若对方追发新消息，可即时打断重想。
+- **真实成长：** 在运营者给定的人设基础上，通过独立复盘从真实互动证据中习得群风气、表达习惯与人际印象，避免自我复读导致的幻觉强化。
+- **个人生活：** 拥有跨天推进的日常事项、空闲时的线上冲浪（社交动态、长短视频与图文社区、网页搜索、绘画作品库）以及自主安排的睡眠与休息。
+- **原生交互：** 通过平台适配器将完整原生 API 按权限暴露给同一个 Agent，配合系统表情看图、收藏表情语义联想、卡片分享等可热重载插件，像真实用户一样使用平台功能。
+- **本地可控：** 社交发言与运行管理分离；提供实时 TUI 与独立于主进程的 WebUI，支持主思考/复盘/压缩模型分离配置与记忆溯源清理。
 
 ## 快速开始
 
@@ -71,9 +77,19 @@ npm start -- webui --config config.json
 - [术语表](GLOSSARY.md) · [架构决策](docs/adr/)：领域概念与设计依据。
 - [贡献指南](CONTRIBUTING.md)：Issue、PR 与本地检查，欢迎使用中文或英文参与。
 
-## 感谢
+## 思路参考与感谢
 
-本项目基于 Pi 构建，并参考了 Letta / MemGPT、Letta Code、Koishi、OpenClaw、Generative Agents、Mem0、Graphiti、Hindsight、MaiBot、AstrBot、Aurabot、qq-bridge 与 DeepSeek Harness 的思路。来源与设计对比见[调研记录](docs/research/)。
+感谢以下项目及其贡献者提供的思路与设计参考，相关调研记录见 [research 目录](docs/research/)：
+
+- [Letta / MemGPT](https://github.com/letta-ai/letta) 与 [Letta Code](https://github.com/letta-ai/letta-code)：外部记忆、记忆整理与上下文压缩。
+- [Koishi](https://github.com/koishijs/koishi)：插件组合与生命周期、配置 Schema、平台适配器和测试工具。
+- [Pi](https://github.com/earendil-works/pi)：本项目使用的嵌入式 Agent 运行时，以及工具接口与按需加载技能的设计。
+- [OpenClaw](https://github.com/openclaw/openclaw)：分层记忆、压缩前保存记忆与技能组织。
+- [Generative Agents](https://arxiv.org/abs/2304.03442)：基于经历的反思、记忆重要性与持续计划。
+- [Mem0](https://github.com/mem0ai/mem0)、[Graphiti](https://github.com/getzep/graphiti) 与 [Hindsight](https://github.com/vectorize-io/hindsight)：记忆组织、混合检索与经历之间的关联。
+- [MaiBot](https://github.com/MaiM-with-u/MaiBot) 与 [AstrBot](https://docs.astrbot.app/use/skills.html)：表情资源、社交工具使用，以及技能与插件的职责划分。
+- [Aurabot](https://github.com/aureth-labs/dsh-aurabot-qq) 与 [qq-bridge](https://github.com/Derpyu520/qq-bridge)：聊天表达、主动参与、线上活动与插件设计。
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)：Token 预算、工具结果裁剪与上下文压缩。
 
 ## 许可证
 
