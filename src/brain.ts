@@ -13,6 +13,7 @@ import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
+import { waitFor } from './async.js';
 import type { SemanticRecall } from './recall.js';
 import type { OnlineActivity } from './plugins.js';
 
@@ -38,6 +39,19 @@ function localTime(at: number) {
 /** A day of life runs from 05:00 local time, so staying up past midnight does not start the next one. */
 const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
 interface ObservationMessage { role: 'observation'; batchId: string; content: (TextContent | ImageContent)[]; eventIds: string[]; lifeOnly: boolean; timestamp: number }
+interface ModelRequest { callId: string; runId: string; owner: ModelOwner; purpose: 'thought' | 'review' | 'compaction'; provider: string; model: string; api: string; startedAt: number; attempt?: number }
+interface BackgroundCompaction {
+  identity: string;
+  thought: ThoughtContext;
+  runId: string;
+  controller: AbortController;
+  meter: TokenMeter;
+  original: AgentMessage[];
+  prefix: string[];
+  promise: Promise<void>;
+  summary?: Message;
+  record?: Record<string, unknown>;
+}
 declare module '@earendil-works/pi-agent-core' { interface CustomAgentMessages { observation: ObservationMessage } }
 export interface Brain {
   readonly streaming: boolean;
@@ -84,7 +98,8 @@ export class PiBrain implements Brain {
   /** Preemptions since a decision was last carried out as made. */
   private preemptions = 0;
   private callStartedAt = 0;
-  private activeRequest?: { callId: string; runId: string; owner: ModelOwner; purpose: 'thought' | 'review' | 'compaction'; provider: string; model: string; api: string; startedAt: number; attempt?: number };
+  private activeRequest?: ModelRequest;
+  private background?: BackgroundCompaction;
   private lastCallId?: string;
   private readonly summaryBackend?: { model: Model<any>; stream: StreamFn };
   constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential, private owner: ModelOwner = 'main', compactionBackend?: { model: Model<any>; stream: StreamFn }) {
@@ -118,8 +133,9 @@ export class PiBrain implements Brain {
         const { budget } = this.budget(currentModel);
         const route = this.route(currentModel);
         let measured: TokenMeasurement;
-        // The first request leaves room for the observations steered in after it; later ones may fill the budget.
-        const limit = first ? Math.floor(budget * config.compaction.idleRatio) : budget;
+        // Main thoughts use the full budget while idle compaction runs separately.
+        // Reviews have no idle period, so still make room on their first request.
+        const limit = owner === 'review' && first ? Math.floor(budget * config.compaction.idleRatio) : budget;
         ({ messages, measured } = await this.shrink(messages, limit, budget, currentModel, runtime, signal));
         if (measured.tokens > budget) throw new Error('Required state or the latest observation exceeds the context budget; reduce the batch size or organize pending items.');
         store.log('context_budget', { runId: this.runId, owner, ...measured, inputBudget: budget, outputReserveTokens: modelUse(config, owner).limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
@@ -160,7 +176,8 @@ export class PiBrain implements Brain {
   /** A preempted thought takes no more steering while it winds down. */
   get streaming() { return this.agent.state.isStreaming && !this.preempted; }
   private display(update: (monitor: Monitor) => void) { if (this.monitor) { try { update(this.monitor); } catch {} } }
-  abort() { this.controller.abort(); this.agent.abort(); }
+  abort() { this.cancelBackground(); this.controller.abort(); this.agent.abort(); }
+  private cancelBackground() { this.background?.controller.abort(); this.background = undefined; }
   private instructions() {
     return systemInstructions(this.config, this.activityPrompts());
   }
@@ -193,6 +210,9 @@ export class PiBrain implements Brain {
     const request = this.activeRequest;
     if (!request) return;
     this.activeRequest = undefined; this.lastCallId = request.callId;
+    this.recordRequestFinished(request, response, aborted);
+  }
+  private recordRequestFinished(request: ModelRequest, response?: AssistantMessage, aborted = false) {
     const status = response ? response.stopReason === 'aborted' ? 'aborted' : response.stopReason === 'error' ? 'error' : 'success' : aborted ? 'aborted' : 'error';
     const usage = response?.usage;
     const known = usage && (status === 'success' || [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].some(value => value > 0));
@@ -209,6 +229,19 @@ export class PiBrain implements Brain {
   /** Bring the context under limit: prune old tool results first, and summarize older exchanges only if that is not enough. */
   private async shrink(messages: AgentMessage[], limit: number, budget: number, model: Model<any>, runtime: RuntimeSnapshot, signal?: AbortSignal) {
     const route = this.route(model);
+    const background = this.background;
+    if (background) {
+      if (!this.matchesBackground(background, messages)) this.cancelBackground();
+      else {
+        // Only a full context waits. Ordinary messages keep using the uncompressed history.
+        if (!background.summary && this.meter.measure(messages, route).tokens > budget) {
+          try { await (signal ? waitFor(background.promise, signal) : background.promise); }
+          catch { ensureCurrent(this.store, this.thought, signal); }
+        }
+        ensureCurrent(this.store, this.thought, signal);
+        messages = this.applyBackground(messages, runtime);
+      }
+    }
     let measured = this.meter.measure(messages, route);
     const before = measured.tokens;
     if (measured.tokens <= limit) return { messages, measured };
@@ -234,14 +267,18 @@ export class PiBrain implements Brain {
     }
     return { messages, measured };
   }
-  private async compact(messages: AgentMessage[], budget: number, ownerModel: Model<any>, signal?: AbortSignal): Promise<AgentMessage[]> {
+  private async compact(messages: AgentMessage[], budget: number, ownerModel: Model<any>, signal?: AbortSignal, background?: BackgroundCompaction): Promise<AgentMessage[]> {
+    const thought = background?.thought ?? this.thought;
+    const meter = background?.meter ?? this.meter;
+    const runId = background?.runId ?? this.runId;
     const use = modelUse(this.config, this.owner);
     const { model, stream } = this.summaryBackend ?? { model: ownerModel, stream: this.stream };
     const { window } = modelBudget(model, use.compactionContextTokens, this.config.compaction.summaryMaxTokens, this.config.limits.contextSafetyTokens);
     const summaryLimit = this.config.compaction.summaryMaxTokens;
     const { system, pinned, removed, kept } = compactionSplit(messages, Math.min(this.config.compaction.keepRecentTokens, budget), budget, summaryLimit + 100, this.owner === 'review');
     if (!removed.length) throw new Error('No older exchanges can be safely compacted; reduce the latest input or increase the context budget.');
-    const ids = this.store.archiveContext(removed, [...this.thought.sources]);
+    const ids = this.store.archiveContext(removed, [...thought.sources]);
+    if (background) background.prefix = background.original.slice(0, 1 + removed.length).map(contextRecordId);
     const { framing, references, reserve } = summaryEnvelope(ids);
     const outputLimit = summaryLimit - reserve;
     if (outputLimit < 64) throw new Error('The summary token limit is too small to retain the required source references.');
@@ -251,7 +288,7 @@ export class PiBrain implements Brain {
     const directive: Message = { role: 'user', content: instructions, timestamp: Date.now() };
     // Reuse the complete warm prefix when it fits; the old prefix remains a fallback for oversized new input.
     let request: AgentMessage[] = [system, ...pinned, ...removed, ...kept, directive];
-    const fits = (candidate: AgentMessage[]) => this.meter.measure(candidate, this.route(model)).tokens + summaryLimit + this.config.limits.contextSafetyTokens <= window;
+    const fits = (candidate: AgentMessage[]) => meter.measure(candidate, this.route(model)).tokens + summaryLimit + this.config.limits.contextSafetyTokens <= window;
     const includedRecentContext = fits(request);
     if (!includedRecentContext) request = [system, ...pinned, ...removed, directive];
     const sized = includedRecentContext || fits(request);
@@ -264,17 +301,27 @@ export class PiBrain implements Brain {
     let result: ReturnType<typeof replacement>; let truncated = false; let transient = false;
     let failure = 'The history to consolidate exceeds the context budget; a continuity summary cannot be generated safely.';
     for (let attempt = 0; sized && !result && attempt <= this.config.compaction.retries; attempt++) {
-      ensureCurrent(this.store, this.thought, signal);
-      this.startRequest(model, 'compaction', attempt);
-      this.display(monitor => monitor.requestStarted('compacting'));
+      ensureCurrent(this.store, thought, signal);
+      let requestInfo: ModelRequest;
+      if (background) {
+        if (this.config.limits.maxTurnsPerRun !== null && attempt >= this.config.limits.maxTurnsPerRun) throw new Error('The compaction call limit has been reached.');
+        requestInfo = { callId: this.store.chargeCall(runId, this.config.limits.modelCallsPerDay), runId, owner: this.owner, purpose: 'compaction', provider: model.provider, model: model.id, api: model.api, startedAt: Date.now(), attempt };
+        this.store.log('model_request_started', requestInfo);
+      } else {
+        this.startRequest(model, 'compaction', attempt);
+        requestInfo = this.activeRequest!;
+        this.display(monitor => monitor.requestStarted('compacting'));
+      }
+      const finish = (response?: AssistantMessage) => background ? this.recordRequestFinished(requestInfo, response, signal?.aborted) : this.finishRequest(response, signal?.aborted);
       let response: AssistantMessage;
       try {
         const portable = this.route(model) === this.route(ownerModel) ? request : portableSummaryMessages(request);
-        response = await (await stream(model, normalizeContext({ messages: toModelMessages(portable) }), { apiKey: this.credential(use.compaction.apiKeyEnv), reasoning: use.compactionThinkingLevel === 'off' ? undefined : use.compactionThinkingLevel, signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result();
-        this.finishRequest(response);
-      } catch (error) { this.finishRequest(undefined, signal?.aborted); throw error; }
-      ensureCurrent(this.store, this.thought, signal);
-      this.store.log('context_summary_completed', { runId: this.runId, callId: this.lastCallId, owner: this.owner, attempt, usage: response.usage, stopReason: response.stopReason });
+        const responseWork = (async () => (await stream(model, normalizeContext({ messages: toModelMessages(portable) }), { apiKey: this.credential(use.compaction.apiKeyEnv), reasoning: use.compactionThinkingLevel === 'off' ? undefined : use.compactionThinkingLevel, signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result())();
+        response = await (background && signal ? waitFor(responseWork, signal) : responseWork);
+        finish(response);
+      } catch (error) { finish(); throw error; }
+      ensureCurrent(this.store, thought, signal);
+      this.store.log('context_summary_completed', { runId, callId: requestInfo.callId, owner: this.owner, attempt, usage: response.usage, stopReason: response.stopReason });
       transient = response.stopReason === 'error' || response.stopReason === 'aborted';
       const written = transient || response.content.some(item => item.type === 'toolCall') ? '' : response.content.filter((item): item is TextContent => item.type === 'text').map(item => item.text).join('\n').trim();
       // A summary cut off at the limit keeps its complete lines, which come in order of importance.
@@ -287,9 +334,13 @@ export class PiBrain implements Brain {
     // Only a transport failure, which a later run may not meet, still fails it.
     if (!result && !transient) { result = replacement(this.setAside(removed, ids, outputLimit, failure)); truncated = false; }
     if (!result) throw new Error(failure);
-    this.store.archiveContext([result.summary], [...this.thought.sources]);
-    this.meter.reset();
-    this.compactions.push({ runId: this.runId, owner: this.owner, provider: model.provider, model: model.id, beforeTokens: result.before, afterTokens: result.after, removedMessages: removed.length, includedRecentContext, ...(truncated ? { truncated } : {}), ...(failure ? { setAside: failure } : {}), firstKeptRecordId: kept[0] ? contextRecordId(kept[0]) : undefined, summaryRecordId: contextRecordId(result.summary) });
+    ensureCurrent(this.store, thought, signal);
+    const record = { runId, owner: this.owner, provider: model.provider, model: model.id, beforeTokens: result.before, afterTokens: result.after, removedMessages: removed.length, includedRecentContext, ...(truncated ? { truncated } : {}), ...(failure ? { setAside: failure } : {}), firstKeptRecordId: kept[0] ? contextRecordId(kept[0]) : undefined, summaryRecordId: contextRecordId(result.summary) };
+    if (background) { background.summary = result.summary; background.record = record; }
+    else {
+      this.store.archiveContext([result.summary], [...thought.sources]);
+      this.meter.reset(); this.compactions.push(record);
+    }
     return result.compacted;
   }
   /** Without a summary, older messages leave under a note; their originals stay archived and their events recallable. */
@@ -302,6 +353,7 @@ export class PiBrain implements Brain {
     return previous ? `${previous}\n${note}` : note;
   }
   private resetContext() {
+    this.cancelBackground();
     this.agent.reset(); this.agent.state.tools = this.tools.current();
     this.agent.state.messages = [createInitialSystemMessage(this.instructions(), this.tools.current().map(toToolDeclaration))!];
     this.meter.reset(); this.thought.sources.clear(); this.runtimeSnapshot = undefined;
@@ -481,6 +533,7 @@ export class PiBrain implements Brain {
       ensureCurrent(this.store, this.thought);
       // The next thought decides again, so a preempted one leaves what it was looking at for it to fold.
       if (!this.preempted) this.fold();
+      if (this.background?.summary) this.agent.state.messages = this.applyBackground(this.agent.state.messages, this.runtimeContext());
       this.store.saveContext(this.checkpoint(), [...this.seen], this.compactions);
       this.seen.clear();
     }
@@ -545,23 +598,70 @@ export class PiBrain implements Brain {
     this.agent.state.messages = images.messages;
     this.store.log('context_folded', { runId: this.runId, results: records.changed, images: images.changed });
   }
-  /** Between runs, compact a context above compaction.idleRatio of its budget; the first request of a run does the same, later ones compact at the full budget. */
-  async consolidate() {
+  private matchesBackground(job: BackgroundCompaction, messages: AgentMessage[]) {
+    return !job.controller.signal.aborted && job.identity === this.identity && job.thought.generation === this.store.settings().generation
+      && job.prefix.length > 0 && job.prefix.every((id, index) => messages[index] && contextRecordId(messages[index]!) === id);
+  }
+  /** Replace only the snapshotted prefix. The current tail may have grown or had images folded since then. */
+  private applyBackground(messages: AgentMessage[], runtime: RuntimeSnapshot, records = this.compactions): AgentMessage[] {
+    const job = this.background;
+    if (!job?.summary) return messages;
+    this.background = undefined;
+    if (!this.matchesBackground(job, messages)) return messages;
+    ensureCurrent(this.store, job.thought, job.controller.signal);
+    // Retained deltas may have lost their base. End with today's complete state, never the job's old snapshot.
+    const next = [messages[0]!, job.summary, ...messages.slice(job.prefix.length), this.runtimeMessage(runtimeUpdate(runtime)!)];
+    const beforeTokens = estimatedContextTokens(messages); const afterTokens = estimatedContextTokens(next);
+    if (afterTokens >= beforeTokens) return messages;
+    this.meter.reset(); this.runtimeSnapshot = runtime;
+    records.push({ ...job.record, beforeTokens, afterTokens, background: true });
+    return next;
+  }
+  /** Persist an idle replacement without acknowledging events or changing an active thought's bookkeeping. */
+  private saveIdleContext(messages: AgentMessage[], records: Record<string, unknown>[]) {
+    const rollback = this.checkpoint();
+    try {
+      this.agent.state.messages = messages;
+      this.store.saveContext(this.checkpoint(), [], records);
+    } catch (error) { this.revert(rollback, rollback.generation); throw error; }
+  }
+  /** Start one summary of an idle snapshot. It keeps running while new thoughts append to the live context. */
+  async consolidate(): Promise<void> {
+    if (this.background) return this.background.promise;
+    if (this.phase !== 'idle' || this.agent.state.isStreaming) return Promise.resolve();
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const model = this.agent.state.model;
     const { budget } = this.budget(model);
     const limit = Math.floor(budget * this.config.compaction.idleRatio);
-    if (this.meter.measure(this.agent.state.messages, this.route(model)).tokens <= limit) return;
-    const rollback = this.checkpoint(); this.compactions = [];
-    this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [];
-    this.controller = new AbortController();
-    this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: false };
-    try {
-      const { messages } = await this.shrink(this.agent.state.messages.slice(), limit, budget, model, this.runtimeContext(), this.controller.signal);
-      this.agent.state.messages = messages;
-      this.store.saveContext(this.checkpoint(), [], this.compactions);
-    } catch (error) { this.revert(rollback, generation); throw error; }
+    if (this.meter.measure(this.agent.state.messages, this.route(model)).tokens <= limit) return Promise.resolve();
+    const original = structuredClone(this.agent.state.messages);
+    const runtime = this.runtimeContext();
+    const job: BackgroundCompaction = {
+      identity: this.identity, thought: { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: false },
+      runId: crypto.randomUUID(), controller: new AbortController(), meter: new TokenMeter(structuredClone(this.meter.anchor)),
+      original, prefix: [], promise: Promise.resolve(),
+    };
+    this.background = job;
+    job.promise = (async () => {
+      ensureCurrent(this.store, job.thought, job.controller.signal);
+      this.store.archiveContext(original, [...job.thought.sources]);
+      const pruned = pruneToolResults(original, Math.min(this.config.compaction.keepRecentTokens, budget));
+      if (job.meter.measure(pruned.messages, this.route(model)).tokens <= limit) {
+        this.background = undefined;
+        this.meter.reset();
+        this.saveIdleContext(pruned.messages, []);
+        return;
+      }
+      await this.compact([...pruned.messages, this.runtimeMessage(runtimeUpdate(runtime)!)], budget, model, job.controller.signal, job);
+      // A running request owns its transcript until its next boundary. Idle completion can commit now.
+      if (this.background === job && this.phase === 'idle' && !this.agent.state.isStreaming) {
+        const records: Record<string, unknown>[] = [];
+        const messages = this.applyBackground(this.agent.state.messages, this.runtimeContext(), records);
+        if (records.length) this.saveIdleContext(messages, records);
+      }
+    })().catch(error => { if (this.background === job) this.background = undefined; throw error; });
+    return job.promise;
   }
   async steer(observation: Observation): Promise<boolean> {
     const runId = this.runId;

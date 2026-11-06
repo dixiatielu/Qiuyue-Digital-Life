@@ -17,7 +17,8 @@ export class LifeRuntime {
   private timer?: ReturnType<typeof setInterval>;
   private work?: Promise<void>;
   private steering: Promise<void> = Promise.resolve();
-  private consolidating = false;
+  private consolidating?: Promise<void>;
+  private consolidationGeneration = -1;
   private consolidated = false;
   private settledAt = 0;
   private ticking = false;
@@ -46,7 +47,8 @@ export class LifeRuntime {
     this.ticking = true;
     try {
       const settings = this.store.settings();
-      if (settings.paused || (this.work && settings.generation !== this.brain.thought.generation)) this.brain.abort();
+      if (settings.paused || (this.work && settings.generation !== this.brain.thought.generation)
+        || (this.consolidating && settings.generation !== this.consolidationGeneration)) this.brain.abort();
       if (settings.paused || (this.reviewing && settings.generation !== this.reviewer!.thought.generation)) this.reviewer?.abort();
       if (settings.paused) return;
       const now = Date.now();
@@ -55,18 +57,16 @@ export class LifeRuntime {
       // After due wakes are queued, so the wake a rest was for ends it.
       const resting = this.rest(now);
       if ((this.config.limits.modelCallsPerDay !== null && this.store.dailyCalls() >= this.config.limits.modelCallsPerDay) || now < this.retryAfter) return;
-      // A life wake may interrupt housekeeping, but waits out a thought already under way.
-      let pending = this.store.pendingTiming(settings.lifeEnabled && (!this.work || this.consolidating), resting);
+      // Life wakes wait for thoughts, while background compaction does not hold any observation.
+      let pending = this.store.pendingTiming(settings.lifeEnabled && !this.work, resting);
       // Events received above (due wakes) are stamped after `now`; time them against a later clock.
       let checkedAt = Date.now();
       const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
       this.startReview(idle, now);
-      // Consolidation is housekeeping: an event that can wake a thought takes attention back at once.
-      if (this.consolidating) { if (pending.first !== undefined) this.brain.abort(); return; }
       if (this.work && !this.brain.streaming) return;
       if (idle && settings.lifeEnabled && this.offerFreeTime(now)) { pending = this.store.pendingTiming(settings.lifeEnabled, resting); checkedAt = Date.now(); }
       if (!this.ready(pending, checkedAt, resting)) {
-        if (idle && !this.consolidated && pending.first === undefined) this.consolidate();
+        if (idle && !this.consolidated && !this.consolidating && pending.first === undefined) this.consolidate();
         return;
       }
       // Anything that wakes or steers a thought during rest brings the held chat with it.
@@ -160,12 +160,12 @@ export class LifeRuntime {
   }
   /** Compact an oversized working context once per idle period, so a later observation does not wait for it. */
   private consolidate() {
-    this.consolidated = true; this.consolidating = true;
-    this.work = this.brain.consolidate().catch(error => { this.store.log('consolidation_stopped', { message: errorText(error) }); }).finally(() => {
-      this.consolidating = false; this.work = undefined;
+    this.consolidated = true; this.consolidationGeneration = this.store.settings().generation;
+    this.consolidating = this.brain.consolidate().catch(error => { this.store.log('consolidation_stopped', { message: errorText(error) }); }).finally(() => {
+      this.consolidating = undefined;
     });
   }
-  async idle() { await this.work; await this.steering; await this.reviewing; }
+  async idle() { await this.work; await this.steering; await this.reviewing; await this.consolidating; }
   /** Perception writes directly to the store. Only dispatch pauses while both brains and housekeeping drain. */
   async maintain<T>(signal: AbortSignal, change: () => Promise<T>): Promise<T> {
     if (this.maintenance || this.stopped) throw new Error('The runtime is already in maintenance or stopping.');
@@ -173,7 +173,7 @@ export class LifeRuntime {
     try { await waitFor(this.idle(), signal); signal.throwIfAborted(); if (this.stopped) throw new Error('The runtime is stopping.'); return await change(); }
     finally { this.maintenance = false; void this.tick(); }
   }
-  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); this.reviewer?.abort(); await this.work; await this.steering; await this.reviewing; }
+  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); this.reviewer?.abort(); await this.idle(); }
   control(command: string, value?: boolean) {
     this.store.transaction(() => {
       if (command === 'pause' || command === 'resume') this.store.setSetting('paused', command === 'pause');

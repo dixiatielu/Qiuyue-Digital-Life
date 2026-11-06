@@ -404,7 +404,7 @@ test('setting exchanges aside carries the previous summary forward', async () =>
   } finally { f.store.close(); }
 });
 
-test('a first request that cannot make room ahead of time goes on within the full budget', async () => {
+test('a first request below the hard budget does not attempt foreground compaction', async () => {
   const f = fixture();
   try {
     smallWindow(f); f.cfg.compaction.idleRatio = 0.05;
@@ -412,8 +412,7 @@ test('a first request that cannot make room ahead of time goes on within the ful
     f.faux.setResponses([context => { assert.ok(!isSummary(context.messages)); return answer('Continue'); }]);
     await f.brain.run(f.store.claim(20)!);
     assert.equal(f.store.event(source.id)?.status, 'processed');
-    const skipped = f.store.logs(100).find(log => log.kind === 'context_compaction_skipped')?.data as Record<string, unknown> | undefined;
-    assert.match(String(skipped?.message), /No older exchanges can be safely compacted/);
+    assert.ok(!f.store.logs(100).some(log => log.kind === 'context_compaction_skipped'));
   } finally { f.store.close(); }
 });
 
@@ -433,25 +432,25 @@ test('history too large for one summary request is set aside without a summary c
   } finally { f.store.close(); }
 });
 
-test("a run's first request compacts above idleRatio, while later requests compact only at the full budget", async () => {
-  const f = fixture(); let summaries = 0;
+test('idleRatio does not block the first or subsequent requests of a thought', async () => {
+  const f = fixture();
   try {
     smallWindow(f); f.cfg.compaction.keepRecentTokens = 200;
     for (const text of ['Previous observation', 'Another observation']) {
       event(f.store, text); f.faux.setResponses([answer('Short previous judgment')]);
       await f.brain.run(f.store.claim(20)!);
     }
-    // Any context is crowded at this ratio; only the first request may act on it.
+    // This soft threshold is deliberately below even the fixed prompt size.
     f.cfg.compaction.idleRatio = 0.05;
     event(f.store, 'Next observation');
     f.faux.setResponses([
-      context => { assert.ok(isSummary(context.messages)); summaries++; return answer('Handoff of the short previous judgment'); },
       context => { assert.ok(!isSummary(context.messages)); return answer(call('set_activity', { activity: 'Chatting' })); },
       context => { assert.ok(!isSummary(context.messages)); return answer('Done'); },
     ]);
     await f.brain.run(f.store.claim(20)!);
-    assert.equal(summaries, 1);
-    assert.equal(f.store.logs(100).filter(log => log.kind === 'context_compacted').length, 1);
+    assert.equal(f.store.settings().activity, 'Chatting');
+    assert.ok(!f.store.logs(100).some(log => log.kind === 'model_request_started' && (log.data as any).purpose === 'compaction'));
+    assert.equal(f.store.logs(100).filter(log => log.kind === 'context_compacted').length, 0);
   } finally { f.store.close(); }
 });
 
@@ -492,23 +491,152 @@ test('idle consolidation compacts between runs and persists, so the next run doe
   } finally { f.store.close(); }
 });
 
-test('idle consolidation stopped by an arriving event keeps the original working context', async () => {
+test('background compaction preserves replies and runtime updates made while its snapshot is summarized', async () => {
+  const f = await idleFixture(); const entered = deferred(); const release = deferred();
+  let background: Promise<void> | undefined;
+  try {
+    f.faux.setResponses([
+      async context => { assert.ok(isSummary(context.messages)); entered.resolve(); await release.promise; return answer('Background handoff of the previous judgment'); },
+      context => {
+        assert.ok(!isSummary(context.messages));
+        assert.match(JSON.stringify(context.messages), /Judgment from the previous run/);
+        return answer(call('set_activity', { activity: 'New activity during compaction' }));
+      },
+      answer(call('qq_main__send_group_msg', { group_id: 100, message: 'Reply while summarizing' })),
+    ]);
+    background = f.brain.consolidate(); await entered.promise;
+    const latest = event(f.store, 'Message arriving during compaction');
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(f.sent[0]?.args.message, 'Reply while summarizing');
+    assert.equal(f.store.event(latest.id)?.status, 'processed');
+    release.resolve(); await background;
+    const state = JSON.stringify(f.brain.agent.state.messages);
+    assert.match(state, /Background handoff/);
+    assert.match(state, /Message arriving during compaction/);
+    assert.match(state, /Reply while summarizing/);
+    assert.match(String(snapshots(f.brain.agent.state.messages as Message[]).at(-1)?.content), /New activity during compaction/);
+    assert.doesNotMatch(state, /Judgment from the previous run/);
+    assert.equal(f.store.logs(100).filter(log => log.kind === 'context_compacted').length, 1);
+    const started = f.store.logs(100).filter(log => log.kind === 'model_request_started');
+    const finished = f.store.logs(100).filter(log => log.kind === 'model_request_finished');
+    assert.equal(started.length, finished.length);
+    assert.deepEqual(started.map(log => (log.data as any).callId).sort(), finished.map(log => (log.data as any).callId).sort());
+    f.restart(); event(f.store, 'After background compaction and restart');
+    f.faux.setResponses([context => {
+      const text = JSON.stringify(context.messages);
+      assert.match(text, /Background handoff/); assert.match(text, /Reply while summarizing/);
+      return answer('Continue');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+  } finally { release.resolve(); await background?.catch(() => {}); f.store.close(); }
+});
+
+test('administrative cancellation discards a background summary without rolling back newer replies', async () => {
   const f = await idleFixture(); const entered = deferred(); const release = deferred();
   try {
-    f.faux.setResponses([async () => { entered.resolve(); await release.promise; return answer('Summary that must be discarded'); }]);
+    f.faux.setResponses([async () => { entered.resolve(); await release.promise; return answer('Summary that must be discarded'); }, answer('Reply before cancellation')]);
     const work = f.brain.consolidate();
-    await entered.promise; f.brain.abort(); release.resolve();
-    await assert.rejects(work);
+    const rejected = assert.rejects(work);
+    await entered.promise;
+    event(f.store, 'A new observation before cancellation'); await f.brain.run(f.store.claim(20)!);
+    f.brain.abort(); release.resolve(); await rejected;
     assert.match(JSON.stringify(f.brain.agent.state.messages), /Judgment from the previous run/);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /Reply before cancellation/);
     assert.ok(!f.store.logs().some(log => log.kind === 'context_compacted'));
     event(f.store, 'Arrived during consolidation');
-    // The context is still crowded, so the run compacts it on its first request instead.
+    // Enough room remains to answer without starting the cancelled work again.
     f.faux.setResponses([context => {
-      assert.ok(isSummary(context.messages));
+      assert.ok(!isSummary(context.messages));
       assert.match(JSON.stringify(context.messages), /Judgment from the previous run/);
       assert.doesNotMatch(JSON.stringify(context.messages), /Summary that must be discarded/);
-      return answer('Handoff written by the run');
-    }, answer('Continue')]);
+      return answer('Continue');
+    }]);
     await f.brain.run(f.store.claim(20)!);
   } finally { release.resolve(); f.store.close(); }
+});
+
+test('a completed background summary waits for the active model call and keeps its tools paired', async () => {
+  const f = await idleFixture(); const summarizing = deferred(); const finishSummary = deferred();
+  const thinking = deferred(); const finishThought = deferred(); let background: Promise<void> | undefined; let run: Promise<void> | undefined;
+  try {
+    f.faux.setResponses([
+      async () => { summarizing.resolve(); await finishSummary.promise; return answer('Handoff ready during a model call'); },
+      async context => {
+        thinking.resolve(); await finishThought.promise;
+        assert.doesNotMatch(JSON.stringify(context.messages), /Handoff ready/);
+        return answer(call('set_activity', { activity: 'Activity after the summary finished' }));
+      },
+      context => {
+        const text = JSON.stringify(context.messages);
+        assert.match(text, /Handoff ready/); assert.match(text, /Activity after the summary finished/);
+        const tools = context.messages.filter(message => message.role === 'toolResult');
+        assert.equal(tools.length, 1);
+        assert.ok(context.messages.some(message => message.role === 'assistant' && message.content.some(block => block.type === 'toolCall' && block.id === tools[0]!.toolCallId)));
+        return answer('Reply after safe replacement');
+      },
+    ]);
+    background = f.brain.consolidate(); await summarizing.promise;
+    event(f.store, 'Message before the summary finishes'); run = f.brain.run(f.store.claim(20)!); await thinking.promise;
+    const active = JSON.stringify(f.brain.agent.state.messages);
+    finishSummary.resolve(); await background;
+    assert.equal(JSON.stringify(f.brain.agent.state.messages), active, 'the active transcript is not replaced mid-call');
+    finishThought.resolve(); await run;
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /Reply after safe replacement/);
+  } finally { finishSummary.resolve(); finishThought.resolve(); await Promise.allSettled([background, run]); f.store.close(); }
+});
+
+test('a hard-budget request waits for the existing background summary instead of starting another', async () => {
+  const f = await idleFixture(); const entered = deferred(); const release = deferred();
+  let background: Promise<void> | undefined; let run: Promise<void> | undefined; let replies = 0;
+  try {
+    f.faux.setResponses([
+      async () => { entered.resolve(); await release.promise; return answer('One reusable summary'); },
+      context => { assert.ok(!isSummary(context.messages)); replies++; assert.match(JSON.stringify(context.messages), /One reusable summary/); return answer('Reply after making room'); },
+    ]);
+    background = f.brain.consolidate(); await entered.promise;
+    // Model budget changes are observed at the next request; the old prefix still matches.
+    f.cfg.limits.contextTokens = estimatedContextTokens(f.brain.agent.state.messages) + f.cfg.limits.outputReserveTokens + f.cfg.limits.contextSafetyTokens - 200;
+    const source = event(f.store, 'Message at the hard budget');
+    run = f.brain.run(f.store.claim(20)!);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(replies, 0, 'thinking waits only after the hard budget is reached');
+    release.resolve(); await background; await run;
+    assert.equal(replies, 1); assert.equal(f.store.event(source.id)?.status, 'processed');
+    assert.equal(f.store.logs(100).filter(log => log.kind === 'context_summary_completed').length, 1);
+  } finally { release.resolve(); await Promise.allSettled([background, run]); f.store.close(); }
+});
+
+test('a background summary failure leaves newer context and event acknowledgements intact', async () => {
+  const f = await idleFixture(); const entered = deferred(); const release = deferred(); let rejected: Promise<void> | undefined;
+  try {
+    f.faux.setResponses([
+      async () => { entered.resolve(); await release.promise; throw new Error('Summary endpoint unavailable'); },
+      answer('New reply survives a summary failure'),
+    ]);
+    rejected = assert.rejects(f.brain.consolidate()); await entered.promise;
+    const source = event(f.store, 'Message during a failing summary'); await f.brain.run(f.store.claim(20)!);
+    const current = JSON.stringify(f.brain.agent.state.messages);
+    release.resolve(); await rejected;
+    assert.equal(JSON.stringify(f.brain.agent.state.messages), current);
+    assert.equal(f.store.event(source.id)?.status, 'processed');
+    assert.equal(f.store.logs(100).filter(log => log.kind === 'context_compacted').length, 0);
+  } finally { release.resolve(); await rejected; f.store.close(); }
+});
+
+test('deleting a source while a background summary is running prevents its resurrection', async () => {
+  const f = await idleFixture(); const entered = deferred(); const release = deferred(); let rejected: Promise<void> | undefined;
+  try {
+    const source = f.brain.agent.state.messages.find(message => message.role === 'observation')!;
+    assert.equal(source.role, 'observation');
+    f.faux.setResponses([async () => { entered.resolve(); await release.promise; return answer('Deleted material must never return'); }]);
+    rejected = assert.rejects(f.brain.consolidate()); await entered.promise;
+    f.store.forget(source.eventIds[0]!); release.resolve(); await rejected;
+    event(f.store, 'After deletion');
+    f.faux.setResponses([context => {
+      assert.doesNotMatch(JSON.stringify(context.messages), /Deleted material must never return|Judgment from the previous run/);
+      return answer('Start from valid state');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.ok(!f.store.logs(100).some(log => log.kind === 'context_compacted'));
+  } finally { release.resolve(); await rejected; f.store.close(); }
 });

@@ -137,29 +137,62 @@ test('ambient events ride along with other events and never start or steer a tho
   } finally { release.resolve(); await runtime.stop(); store.close(); }
 });
 
-test('idle consolidation runs once per quiet period and yields to an event that can wake a thought', async t => {
+test('idle consolidation runs beside new thoughts and is not restarted while still running', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const cfg = config(); cfg.compaction.idleAfterMs = 1000;
-  const store = new Store(':memory:'); let consolidations = 0; let runs = 0;
+  const store = new Store(':memory:'); let consolidations = 0; let runs = 0; let aborts = 0;
   let stopConsolidation = () => {}; let finishConsolidation = () => {};
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs++; store.acknowledge(observation.batchId); },
     steer: async () => false,
     consolidate: () => { consolidations++; return new Promise<void>((resolve, reject) => { finishConsolidation = resolve; stopConsolidation = () => reject(new Error('Yielded to a new event')); }); },
-    abort: () => stopConsolidation(),
+    abort: () => { aborts++; stopConsolidation(); },
   };
   const runtime = new LifeRuntime(cfg, store, brain);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); };
   try {
     runtime.start(); await flush(); assert.equal(consolidations, 1);
     event(store, 'Message during consolidation'); await step(0);
-    assert.equal(runs, 0); assert.ok(store.logs().some(log => log.kind === 'consolidation_stopped'));
-    await step(0); assert.equal(runs, 1);
-    await step(999); assert.equal(consolidations, 1);
-    await step(1); assert.equal(consolidations, 2);
+    assert.equal(runs, 1); assert.equal(aborts, 0);
+    await step(5000); assert.equal(consolidations, 1);
+    finishConsolidation(); await flush(); await step(0); assert.equal(consolidations, 2);
     finishConsolidation(); await flush(); await step(5000); assert.equal(consolidations, 2);
   } finally { await runtime.stop(); store.close(); }
+});
+
+test('maintenance drains background compaction before changing bindings while received messages remain pending', async () => {
+  const cfg = config(); const store = new Store(':memory:'); const release = deferred();
+  let started = false; let applied = false; let runs = 0;
+  const brain: Brain = {
+    streaming: true, thought: thought(),
+    run: async observation => { runs++; store.acknowledge(observation.batchId); }, steer: async () => false,
+    consolidate: async () => { started = true; await release.promise; }, abort: () => release.resolve(),
+  };
+  const runtime = new LifeRuntime(cfg, store, brain);
+  try {
+    runtime.start(); await flush(); assert.equal(started, true);
+    const maintenance = runtime.maintain(new AbortController().signal, () => { applied = true; });
+    const incoming = event(store, 'During background maintenance'); await runtime.tick(); await flush();
+    assert.equal(applied, false); assert.equal(runs, 0); assert.equal(store.event(incoming.id)?.status, 'pending');
+    release.resolve(); await maintenance; await runtime.idle();
+    assert.equal(applied, true); assert.equal(runs, 1);
+  } finally { release.resolve(); await runtime.stop(); store.close(); }
+});
+
+test('pause cancels background compaction even when no foreground thought is running', async () => {
+  const cfg = config(); const store = new Store(':memory:'); const release = deferred(); let aborts = 0;
+  const brain: Brain = {
+    streaming: false, thought: thought(), run: async () => { assert.fail('paused events must not start a thought'); }, steer: async () => false,
+    consolidate: () => release.promise, abort: () => { aborts++; release.resolve(); },
+  };
+  const runtime = new LifeRuntime(cfg, store, brain);
+  try {
+    runtime.start(); await flush(); runtime.control('pause'); await runtime.idle();
+    assert.equal(aborts, 1);
+    event(store, 'While paused'); await runtime.tick();
+    assert.equal(store.pending(), 1);
+  } finally { release.resolve(); await runtime.stop(); store.close(); }
 });
 
 test('a quiet stretch, its length drawn afresh each time, offers free time when nothing runs and no other life wake is near', async t => {
