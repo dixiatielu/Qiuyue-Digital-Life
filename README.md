@@ -69,6 +69,24 @@ The management page defaults to `http://127.0.0.1:8848`. Log in with the `WEBUI_
 
 Use `npm start -- help` for CLI commands such as `status`, `pause`, `resume`, and memory management. Core configuration changes require a daemon restart; see the [usage guide](docs/usage.md) for daily operation.
 
+## How it works
+
+```mermaid
+flowchart LR
+  QQ[QQ chats and events] --> SL[SnowLuma]
+  TG[Telegram Bot API] --> AP[Platform adapters]
+  SL --> AP
+  AP --> DB[(SQLite)]
+  DB --> RT[Perception and scheduling]
+  RT --> PI[Single Pi Agent]
+  PI -->|Memory and continuing state| DB
+  PI --> Tools[Actions and receipts]
+  Tools --> AP
+  CLI[Local management] --> RT
+```
+
+The TypeScript service keeps receiving events while the Agent thinks. Named adapters expose all permitted APIs as `instance__operation` tools with native parameters unchanged; each account's `tools` controls availability, and the catalog stays searchable and readable at runtime.
+
 ## Documentation
 
 - [Usage guide](docs/usage.md) — models, credentials, optional capabilities, TUI, WebUI, and gallery.

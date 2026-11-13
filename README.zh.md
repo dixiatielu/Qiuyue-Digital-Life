@@ -69,6 +69,24 @@ npm start -- webui --config config.json
 
 执行 `npm start -- help` 查看 `status`、`pause`、`resume` 和记忆管理等命令。修改核心配置后需重启常驻进程；日常操作见[使用指南](docs/usage.zh.md)。
 
+## 工作原理
+
+```mermaid
+flowchart LR
+  QQ[QQ 聊天和事件] --> SL[SnowLuma]
+  TG[Telegram Bot API] --> AP[平台适配器]
+  SL --> AP
+  AP --> DB[(SQLite)]
+  DB --> RT[感知与调度]
+  RT --> PI[单一 Pi Agent]
+  PI -->|记忆与持续状态| DB
+  PI --> Tools[行动与回执]
+  Tools --> AP
+  CLI[本地管理] --> RT
+```
+
+TypeScript 服务在 Agent 思考期间持续接收事件。具名适配器按 `实例名__原生接口名` 暴露所有已开放接口，原生参数保持不变；可用范围由各账号的 `tools` 控制，接口目录可在运行时搜索和查阅。
+
 ## 文档
 
 - [使用指南](docs/usage.zh.md)：模型、凭据、可选能力、TUI、WebUI 与作品库。
