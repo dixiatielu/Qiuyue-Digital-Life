@@ -1,8 +1,9 @@
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Type } from 'typebox';
 import { fauxAssistantMessage as answer } from '@earendil-works/pi-ai';
-import { systemInstructions } from '../src/prompts.js';
+import { builtinSystemPrompt, checkSystemPrompt, systemInstructions } from '../src/prompts.js';
 import { scopePlugin } from '../src/adapters/scope.js';
 import { PluginHost, type LifePlugin } from '../src/plugins.js';
 import { config, event, fixture } from './helpers.js';
@@ -64,4 +65,22 @@ test('activity guidance names the correct adapter account and filters its unavai
   const host = new PluginHost([scopePlugin(plugin, 'first', actions, adapter), scopePlugin(plugin, 'second', actions, adapter)]);
   const prompts = host.activityPrompts(new Set(['second__read_book']));
   assert.deepEqual(prompts, [{ plugin: 'second-reading', activity: 'Read a book', tools: ['second__read_book'], instructions: 'Use second__read_book when curious.' }]);
+});
+
+test('built-in system prompt and example persona preserve prompt markers and render cleanly', () => {
+  checkSystemPrompt(builtinSystemPrompt);
+  const examplePersona = readFileSync(new URL('../persona.example.md', import.meta.url), 'utf8');
+  const baseCfg = { ...config(), persona: examplePersona, systemPrompt: undefined };
+  const withoutFiction = systemInstructions({ ...baseCfg, life: { ...baseCfg.life, allowFiction: false } });
+  const withFiction = systemInstructions({ ...baseCfg, life: { ...baseCfg.life, allowFiction: true } });
+
+  for (const rendered of [withoutFiction, withFiction]) {
+    assert.ok(rendered.includes(examplePersona));
+    assert.ok(!rendered.includes('{{persona}}'));
+    assert.ok(!rendered.includes('<!-- current-context -->'));
+    assert.ok(!rendered.includes('<!-- allow-fiction -->'));
+    assert.ok(!rendered.includes('<!-- /allow-fiction -->'));
+  }
+  assert.ok(!withoutFiction.includes('Save fictional daily life with remember as fiction'));
+  assert.ok(withFiction.includes('Save fictional daily life with remember as fiction'));
 });
