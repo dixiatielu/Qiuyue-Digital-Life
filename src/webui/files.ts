@@ -65,7 +65,11 @@ export class OperatorFiles {
     this.replace('config', this.configPath, JSON.stringify(raw, null, 2) + '\n');
     return config;
   }
-  personaPath(raw = this.raw()) { return resolve(this.base, String(raw.personaFile)); }
+  personaPath(raw = this.raw()) {
+    // Without this a save would write a file named "undefined" beside the configuration.
+    if (typeof raw.personaFile !== 'string' || !raw.personaFile.trim()) throw new Error('The personaFile configuration must be a non-empty file path.');
+    return resolve(this.base, raw.personaFile);
+  }
   persona() { const path = this.personaPath(); const text = readText(path); return { path, text, hash: hash(text) }; }
   savePersona(text: string, baseHash?: string) {
     text = normalized(text);

@@ -77,7 +77,8 @@ export function PluginsPage() {
   const [submitting, setSubmitting] = useState(false);
   const form = useConfigDraft();
   const info = useAsync(() => api('/api/plugins'));
-  useEffect(() => { const timer = setInterval(info.reload, 2000); return () => clearInterval(timer); }, [info.reload]);
+  // Each poll has the daemon read every plugin's sources again, so a hidden tab does not ask.
+  useEffect(() => { const timer = setInterval(() => { if (!document.hidden) info.reload(); }, 2000); return () => clearInterval(timer); }, [info.reload]);
   if (!form.state.data || !info.data) return html`<${Loading} state=${form.state.data ? info : form.state} />`;
   if (!form.raw) return html`<p class="note error">${t('config.json is not valid JSON; repair it on the configuration page first.', 'config.json 不是有效的 JSON，请先在配置页修复。')}</p>`;
   const value = path => form.get(path) ?? getPath(form.effective, path);

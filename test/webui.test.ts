@@ -530,3 +530,12 @@ test('a review left open by a daemon that died is not under way, and the next st
     release(); store.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('malformed percent-encoding is refused like any other bad request, and a missing personaFile writes nothing', () => page(async (call, dir) => {
+  assert.equal((await call('/app/%E0%A4%A.js')).status, 404);
+  assert.equal((await call('/api/overview', { headers: { Authorization: '', Cookie: 'qiuyue_webui=%E0%A4%A' } })).status, 401);
+  const { personaFile: _dropped, ...raw } = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(raw));
+  const saved = await call('/api/persona', { method: 'PUT', body: { text: 'Someone else entirely.' } });
+  assert.equal(saved.status, 400); assert.match(saved.body.error, /personaFile/); assert.equal(existsSync(join(dir, 'undefined')), false);
+}));

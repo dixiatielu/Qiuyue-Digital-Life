@@ -50,7 +50,13 @@ function App({ initial }) {
   const live = useLive();
   useEffect(() => { const change = () => setPage(route()); addEventListener('hashchange', change); return () => removeEventListener('hashchange', change); }, []);
   const refresh = () => api('/api/overview').then(setOverview, () => {});
-  useEffect(() => { const timer = setInterval(refresh, 5000); return () => clearInterval(timer); }, []);
+  // A tab nobody is looking at asks nothing; it catches up when it is shown again.
+  useEffect(() => {
+    const timer = setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+    const shown = () => { if (!document.hidden) refresh(); };
+    document.addEventListener('visibilitychange', shown);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', shown); };
+  }, []);
   const entry = pages().find(([id]) => id === page) ?? pages()[0];
   const Page = entry[2];
   const daemon = overview.daemon;

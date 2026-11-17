@@ -33,6 +33,8 @@ const cookie = 'qiuyue_webui';
 const loginAssets = new Set(['/app/style.css', '/app/favicon.svg', '/app/login.js', '/app/theme.js']);
 const credentialFields: [string, string][] = [['model', 'apiKeyEnv'], ['web', 'searchKeyEnv'], ['embedding', 'apiKeyEnv'], ['drawing', 'apiKeyEnv'], ['webui', 'tokenEnv']];
 
+/** Percent-decoding that answers a malformed sequence with nothing, which its caller refuses, rather than with an exception that becomes a 500. */
+const decoded = (value: string) => { try { return decodeURIComponent(value); } catch { return undefined; } };
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 type Handler = (request: { url: URL; body: any; params: string[] }) => unknown | Promise<unknown>;
 type Paths = { database: string; socket: string; log: string };
@@ -302,7 +304,7 @@ export class WebUi {
     const expected = Buffer.from(this.token);
     const header = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : undefined;
     const fromCookie = request.headers.cookie?.split(';').map(part => part.trim().split('=')).find(([name]) => name === cookie)?.[1];
-    return [header, fromCookie ? decodeURIComponent(fromCookie) : undefined].some(value => {
+    return [header, fromCookie ? decoded(fromCookie) : undefined].some(value => {
       if (!value) return false;
       const given = Buffer.from(value);
       return given.length === expected.length && timingSafeEqual(given, expected);
@@ -408,7 +410,9 @@ export class WebUi {
       if (!name || !vendored.has(name)) return send(response, 404, 'Not found.', 'text/plain; charset=utf-8');
       root = resolve(modulesDir, name); relative = rest.join('/');
     } else return send(response, 404, 'Not found.', 'text/plain; charset=utf-8');
-    const path = resolve(root, decodeURIComponent(relative));
+    const file = decoded(relative);
+    if (file === undefined) return send(response, 404, 'Not found.', 'text/plain; charset=utf-8');
+    const path = resolve(root, file);
     const type = types[extname(path)];
     if (!path.startsWith(root + sep) || !type || !existsSync(path) || !statSync(path).isFile()) return send(response, 404, 'Not found.', 'text/plain; charset=utf-8');
     send(response, 200, readFileSync(path), type, { 'Cache-Control': 'no-cache' });
