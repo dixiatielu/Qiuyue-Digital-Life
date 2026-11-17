@@ -13,6 +13,11 @@ coverage/
 .qiuyue-cache/
 credentials.json
 credentials.json.*.tmp
+# Left beside the configuration only if the management page is killed mid-save.
+config.json.*.tmp
+persona.md.*.tmp
+system-prompt.md.*.tmp
+.webui-check-*
 /output/
 
 # Offline identity migration backups and temporary locks may contain private configuration.
