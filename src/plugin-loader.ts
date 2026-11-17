@@ -234,7 +234,9 @@ export async function loadUserPlugin(id: string, config: Config, store: Store, c
     if (!exported || exported.id !== id || exported.apiVersion !== 2 || typeof exported.setup !== 'function') throw new Error(`Plugin ${id} must export { id: '${id}', apiVersion: 2, setup(ctx) }.`);
     // Read the sidecar from the same snapshot as the code, not a newer directory revision.
     const sidecar = source.entries.find(entry => entry.name === 'plugin.json');
-    const definition = { ...exported, ...(sidecar ? validateManifest(JSON.parse(sidecar.data.toString('utf8')), id) : {}) };
+    // The sidecar's fields are authoritative; one it leaves out must not erase what the module declares, such as its settings schema.
+    const declared = sidecar ? Object.entries(validateManifest(JSON.parse(sidecar.data.toString('utf8')), id)).filter(([, value]) => value !== undefined) : [];
+    const definition = { ...exported, ...Object.fromEntries(declared) };
     const metadata = validateManifest(definition, id);
     // Keep the form available even if settings fail validation; only the daemon imports this code.
     describe?.(metadata);

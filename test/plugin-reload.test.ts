@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fauxAssistantMessage as answer } from '@earendil-works/pi-ai';
 import { PluginManager } from '../src/plugin-manager.js';
+import { loadUserPlugin } from '../src/plugin-loader.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { contextIdentity } from '../src/brain.js';
 import { callControl, handleControl, serveControl } from '../src/control.js';
@@ -499,4 +500,23 @@ test('SDK image attachments require a current recorded source and reject late us
     await assert.rejects(h.execute('sample_images', { mode: 'old' }), /recorded by this invocation/);
     await assert.rejects(h.execute('sample_images', { mode: 'late' }), /call has ended/);
   } finally { await h.close(); }
+});
+
+test('a plugin.json that omits a field leaves what the module declares for it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-sidecar-')); const f = fixture();
+  f.cfg.extensions = { directory: join(dir, 'plugins'), dataDirectory: join(dir, 'data'), settings: {}, reloadTimeoutMs: 5000 };
+  const write = (file: string, text: string) => { mkdirSync(join(dir, 'plugins/room'), { recursive: true }); writeFileSync(join(dir, 'plugins/room', file), text); };
+  const load = () => loadUserPlugin('room', f.cfg, f.store, () => undefined, AbortSignal.timeout(5000));
+  try {
+    write('index.mjs', `export default { id: 'room', apiVersion: 2, name: 'Inline name', contextVersion: '7', defaults: { city: 'Shanghai' },
+      configSchema: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false }, setup() {} };`);
+    write('plugin.json', JSON.stringify({ id: 'room', apiVersion: 2, name: 'Sidecar name', defaultEnabled: true }));
+    const loaded = await load();
+    // The sidecar wins where it speaks, and the module's defaults, schema, and context version stand where it does not.
+    assert.equal(loaded.definition.name, 'Sidecar name'); assert.deepEqual(loaded.definition.defaults, { city: 'Shanghai' });
+    assert.equal(loaded.definition.contextVersion, '7'); assert.ok(loaded.definition.configSchema);
+    await loaded.plugin.stop?.();
+    f.cfg.extensions.settings.room = { city: 42, bogus: true };
+    await assert.rejects(load(), /Invalid settings/);
+  } finally { f.store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
