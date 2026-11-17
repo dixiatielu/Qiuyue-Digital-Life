@@ -24,7 +24,7 @@ test('generated native tools expose canonical native names and schemas directly'
       const tool = f.tools.current().find(tool => tool.name === `qq_main__${action.name}`)!;
       assert.ok(tool, action.name);
       // add_custom_face also takes the description it is saved with.
-      if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...tool.parameters.properties, desc: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, desc: undefined } });
+      if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, desc: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, desc: undefined } });
       else assert.deepEqual(tool.parameters, action.inputSchema);
       if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name)) assert.ok(tool.description.replaceAll('qq_main__', '').startsWith(action.summary ?? action.name));
       assert.equal(findSnowLumaAction(action.name), action);
@@ -84,7 +84,7 @@ test('tool discovery supports common wording, category browsing and an empty-res
   try {
     assert.ok(f.tools.current().some(tool => tool.name === "qq_main__send_private_msg"));
     const search = f.tools.current().find(tool => tool.name === "qq_main__search_snowluma_tools")!;
-    const find = async (args: Record<string, unknown>) => JSON.parse((await search.execute('search', args)).content[0]!.text!);
+    const find = async (args: Record<string, unknown>) => JSON.parse(((await search.execute('search', args)).content[0] as { text: string }).text);
     for (const [query, expected] of [['帮我发私信', 'send_private_msg'], ['撤销消息', 'delete_msg'], ['查看群友列表', 'get_group_member_list'], ['get_forward_msg', 'get_forward_msg'], ['send private message', 'send_private_msg'], ['list group members', 'get_group_member_list']]) {
       assert.ok((await find({ query })).actions.some((action: { name: string }) => action.name === expected), query);
     }
@@ -126,7 +126,7 @@ test('names outside the catalog cannot be found or described and canonical schem
     assert.ok(credentials.properties.token); assert.ok(!credentials.properties.csrf_token);
     assert.ok(!credentials.required.includes('csrf_token'));
     assert.ok(!(findSnowLumaAction('fetch_custom_face_detail').returnsSchema as any).items.properties.resId);
-    assert.ok(!findSnowLumaAction('get_group_share_link').inputSchema.properties.src_id);
+    assert.ok(!(findSnowLumaAction('get_group_share_link').inputSchema as any).properties.src_id);
     const user = findSnowLumaAction('get_stranger_info').returnsSchema as any;
     assert.ok(user.properties.qq_level); assert.ok(user.properties.extStatus);
     for (const name of ['qqLevel', 'level', 'ext_status', 'is_vip']) assert.ok(!user.properties[name]);
@@ -167,7 +167,7 @@ test('native sends preserve rich messages, optional fields, private targets and 
   const message = [{ type: 'image', data: { file: 'base64://aGVsbG8=', summary: 'Image' } }, { type: 'face', data: { id: '14' } }];
   try {
     event(f.store);
-    f.faux.setResponses([answer(call("qq_main__send_group_msg", { group_id: 999, message, auto_escape: false, custom_field: { keep: true } }))]);
+    f.faux.setResponses([answer(call("qq_main__send_group_msg", { group_id: 999, message: message as any, auto_escape: false, custom_field: { keep: true } }))]);
     await f.brain.run(f.store.claim(10)!);
     // The send ended that thought; its raw receipt comes with the next one.
     event(f.store, 'Next');
@@ -197,7 +197,7 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
     f.faux.setResponses([
       answer([
         call("qq_main__send_private_msg", { user_id: 7, message: [{ type: 'image', data: { file: avif } }] }),
-        call("qq_main__send_private_forward_msg", { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') }),
+        call("qq_main__send_private_forward_msg", { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') as any }),
         call("qq_main__send_group_msg", { group_id: 100, message: [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }] }),
       ]),
       answer('Done'),

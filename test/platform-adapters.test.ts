@@ -32,7 +32,7 @@ function bind(store: Store, host: PluginHost) {
   const tools = host.bind(runtime)([]);
   const run = async (name: string, args: Record<string, unknown> = {}) => {
     const tool = tools.find(tool => tool.name === name); assert.ok(tool, name);
-    return JSON.parse((await tool.execute('test', args)).content[0]!.text!);
+    return JSON.parse(((await tool.execute('test', args)).content[0] as { text: string }).text);
   };
   return { run, tools, thought, runtime };
 }
@@ -274,7 +274,7 @@ test('a configured account that cannot connect stops startup, while an optional 
     const unreachable = { execute: async () => ({}), connect: async () => { throw new Error('SnowLuma WebSocket closed'); }, close: async () => {} };
     const left: string[] = [];
     await assert.rejects(createPlugins(cfg, store, undefined, undefined, () => unreachable).start(plugin => { left.push(plugin.id); }), /SnowLuma WebSocket closed/);
-    assert.deepEqual(left, []);
+    assert.equal(left.length, 0);
     const optional = new PluginHost([{ id: 'optional', tools: () => [], start: async () => { throw new Error('broken startup'); } }]);
     await optional.start(plugin => { left.push(plugin.id); });
     assert.deepEqual(left, ['optional']); assert.deepEqual(optional.installed().map(plugin => plugin.id), []);

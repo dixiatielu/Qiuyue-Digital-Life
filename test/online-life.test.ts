@@ -86,7 +86,7 @@ async function imageTransport(t: TestContext) {
   t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
   t.mock.method(https, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => originalRequest(new URL(`http://image.example:${address.port}${url.pathname}`), {
     ...options, autoSelectFamily: false, lookup: (_hostname, _options, done) => done(null, '127.0.0.1', 4),
-  }, callback));
+  } as http.RequestOptions, callback));
   syncBuiltinESMExports();
   t.after(async () => { t.mock.restoreAll(); syncBuiltinESMExports(); await new Promise<void>(resolve => server.close(() => resolve())); });
   return requests;

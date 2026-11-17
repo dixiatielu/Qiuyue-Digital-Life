@@ -5,7 +5,11 @@ import { Monitor } from '../src/monitor.js';
 import { Store } from '../src/store.js';
 import { normalizeEvent } from '../src/adapters/snowluma/index.js';
 import { config } from './helpers.js';
-import { feedItems, presentItem, imageUrl } from '../src/webui/public/feed-model.js';
+import { feedItems as browserFeedItems, presentItem as browserPresentItem, imageUrl } from '../src/webui/public/feed-model.js';
+
+// The page's modules are plain JavaScript; what they return is asserted below, not typed.
+const feedItems = browserFeedItems as (records: unknown[], options?: Record<string, unknown>) => any[];
+const presentItem = browserPresentItem as (item: unknown) => any;
 
 const item = (overrides: Record<string, unknown> = {}) => ({ id: 'event', at: 100, type: 'environment', title: 'Received', text: 'Hello', eventKind: 'message', state: 'processed', ...overrides });
 
@@ -61,7 +65,7 @@ test('the feed uses occurrence time, keeps failures visible, and filters routine
   assert.equal(feedItems(records, { quiet: true }).length, 4);
   assert.equal(feedItems(records, { filter: 'messages' }).length, 2);
   assert.equal(feedItems(records, { filter: 'system' })[0].state, 'error');
-  assert.equal(feedItems(records, { quiet: true })[0].item.text, records[1].text);
+  assert.equal(feedItems(records, { quiet: true })[0].item.text, records[1]!.text);
 });
 
 test('life event summaries describe structured facts and model prose is never presented as a sent message', () => {

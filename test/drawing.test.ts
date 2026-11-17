@@ -30,7 +30,7 @@ function setup(social?: Parameters<typeof fixture>[0]) {
   const done = () => new Promise<void>(resolve => { const stop = f.store.subscribe(notice => { if (notice.kind === 'environment' && notice.event.kind === 'drawing') { stop(); resolve(); } }); });
   return { f, dir, paint, run, done, get drawings() { return drawings; }, close: () => { f.store.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
-const text = (result: { content: { type: string }[] }) => JSON.parse((result.content[0] as { text: string }).text);
+const text = (result: { content: { type: string }[] }) => JSON.parse((result.content[0] as unknown as { text: string }).text);
 
 test('the image client asks for one picture and explains a refusal', async () => {
   const requests: { url: string; init: RequestInit }[] = [];
@@ -104,7 +104,7 @@ test('a drawing is sent by its ID: what is sent carries the picture, and the act
     const action = f.store.actions().find(item => item.kind === 'qq_main__send_group_msg')!;
     assert.deepEqual([action.status, action.args], ['success', { group_id: 100, message }]);
     await run("qq_main__send_qzone_msg", { content: '今天画的', images: [drawingId] });
-    assert.deepEqual(sent[1]!.args.images, [`base64://${png.toString('base64')}`]);
+    assert.deepEqual((sent[1]!.args as { images?: unknown }).images, [`base64://${png.toString('base64')}`]);
     // A drawing that does not exist fails before anything is recorded or sent.
     const missing = 'drawing:00000000-0000-4000-8000-000000000000';
     await assert.rejects(run("qq_main__send_group_msg", { group_id: 100, message: [{ type: 'image', data: { file: missing } }] }), /does not exist/);

@@ -14,7 +14,7 @@ for (const deadline of [null, 50]) {
     const store = new Store(':memory:'); const release = deferred(); let aborts = 0;
     const brain: Brain = {
       streaming: true, thought: { generation: 0, sources: new Set(), triggers: new Set(), lifeOnly: false },
-      run: async () => { await release.promise; }, steer: async () => false, consolidate: async () => {}, abort: () => { aborts++; },
+      run: async () => { await release.promise; }, review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => { aborts++; },
     };
     const runtime = new LifeRuntime(cfg, store, brain);
     try {
@@ -41,7 +41,7 @@ test('a failed whole run releases its observations and waits thirty seconds befo
       if (++calls === 1) throw new Error('Model request failed');
       store.acknowledge(observation.batchId);
     },
-    steer: async () => false, consolidate: async () => {}, abort: () => {},
+    review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
   const runtime = new LifeRuntime(cfg, store, brain);
   try {
@@ -90,7 +90,7 @@ test('a burst starts one thought after the environment goes quiet, and a busy en
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs.push(observation.events.map(item => item.text)); store.acknowledge(observation.batchId); },
-    steer: async () => false, consolidate: async () => {}, abort: () => {},
+    review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
   const runtime = new LifeRuntime(cfg, store, brain);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); };
@@ -115,7 +115,7 @@ test('ambient events ride along with other events and never start or steer a tho
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs.push(kinds(observation.events)); await release.promise; store.acknowledge(observation.batchId); },
-    steer: async observation => { steers.push(kinds(observation.events)); store.acknowledge(observation.batchId); return true; },
+    review: async () => {}, steer: async observation => { steers.push(kinds(observation.events)); store.acknowledge(observation.batchId); return true; },
     consolidate: async () => {}, abort: () => {},
   };
   const typing = () => store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'notice:notify:input_status', at: Date.now(), actorId: 7, text: 'notify', payload: { status_text: 'typing' } }, store))!;
@@ -145,7 +145,7 @@ test('idle consolidation runs beside new thoughts and is not restarted while sti
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs++; store.acknowledge(observation.batchId); },
-    steer: async () => false,
+    review: async () => {}, steer: async () => false,
     consolidate: () => { consolidations++; return new Promise<void>((resolve, reject) => { finishConsolidation = resolve; stopConsolidation = () => reject(new Error('Yielded to a new event')); }); },
     abort: () => { aborts++; stopConsolidation(); },
   };
@@ -166,13 +166,13 @@ test('maintenance drains background compaction before changing bindings while re
   let started = false; let applied = false; let runs = 0;
   const brain: Brain = {
     streaming: true, thought: thought(),
-    run: async observation => { runs++; store.acknowledge(observation.batchId); }, steer: async () => false,
+    run: async observation => { runs++; store.acknowledge(observation.batchId); }, review: async () => {}, steer: async () => false,
     consolidate: async () => { started = true; await release.promise; }, abort: () => release.resolve(),
   };
   const runtime = new LifeRuntime(cfg, store, brain);
   try {
     runtime.start(); await flush(); assert.equal(started, true);
-    const maintenance = runtime.maintain(new AbortController().signal, () => { applied = true; });
+    const maintenance = runtime.maintain(new AbortController().signal, async () => { applied = true; });
     const incoming = event(store, 'During background maintenance'); await runtime.tick(); await flush();
     assert.equal(applied, false); assert.equal(runs, 0); assert.equal(store.event(incoming.id)?.status, 'pending');
     release.resolve(); await maintenance; await runtime.idle();
@@ -183,7 +183,7 @@ test('maintenance drains background compaction before changing bindings while re
 test('pause cancels background compaction even when no foreground thought is running', async () => {
   const cfg = config(); const store = new Store(':memory:'); const release = deferred(); let aborts = 0;
   const brain: Brain = {
-    streaming: false, thought: thought(), run: async () => { assert.fail('paused events must not start a thought'); }, steer: async () => false,
+    streaming: false, thought: thought(), run: async () => { assert.fail('paused events must not start a thought'); }, review: async () => {}, steer: async () => false,
     consolidate: () => release.promise, abort: () => { aborts++; release.resolve(); },
   };
   const runtime = new LifeRuntime(cfg, store, brain);
@@ -202,7 +202,7 @@ test('a quiet stretch, its length drawn afresh each time, offers free time when 
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs.push(observation.events.map(item => item.payload)); store.acknowledge(observation.batchId); },
-    steer: async () => false, consolidate: async () => {}, abort: () => {},
+    review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
   const runtime = new LifeRuntime(cfg, store, brain, undefined, () => draws.shift() ?? 0);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); };
@@ -236,7 +236,7 @@ test('rest marked on a planned wake holds free time back until that wake comes o
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs.push(observation.events.map(item => item.payload)); store.acknowledge(observation.batchId); },
-    steer: async () => false, consolidate: async () => {}, abort: () => {},
+    review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
   const runtime = new LifeRuntime(cfg, store, brain, undefined, () => 0);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); };
@@ -270,7 +270,7 @@ test('a rest holds group chat not addressed to her until a thought starts, and i
       for (const item of observation.events) if (item.kind === 'rest_backlog') notes.push(item.payload);
       store.acknowledge(observation.batchId);
     },
-    steer: async () => false, consolidate: async () => {}, abort: () => {},
+    review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
   const runtime = new LifeRuntime(cfg, store, brain);
   const step = async (ms: number) => { t.mock.timers.tick(ms); await runtime.tick(); await flush(); await runtime.idle(); };
@@ -314,7 +314,7 @@ for (const trigger of ['mention', 'reply', 'private', 'poke', 'commitment'] as c
     const brain: Brain = {
       streaming: true, thought: thought(),
       run: async observation => { runs.push(observation); store.acknowledge(observation.batchId); },
-      steer: async () => false, consolidate: async () => {}, abort: () => {},
+      review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
     };
     const runtime = new LifeRuntime(cfg, store, brain);
     try {
@@ -361,7 +361,7 @@ test('a failed waking thought keeps its backlog for retry, including after runti
       if (runs.length === 1) throw new Error('Model unavailable');
       store.acknowledge(observation.batchId);
     },
-    steer: async () => false, consolidate: async () => {}, abort: () => {},
+    review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: () => {},
   };
   let runtime = new LifeRuntime(cfg, store, brain);
   try {
@@ -389,7 +389,7 @@ test('a life wake waiting out a thought during rest does not steer held chat ear
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs.push(observation.events.map(item => item.kind)); if (runs.length === 1) await release.promise; store.acknowledge(observation.batchId); },
-    steer: async observation => { steers.push(observation.events.map(item => item.kind)); store.acknowledge(observation.batchId); return true; },
+    review: async () => {}, steer: async observation => { steers.push(observation.events.map(item => item.kind)); store.acknowledge(observation.batchId); return true; },
     consolidate: async () => {}, abort: () => {},
   };
   const runtime = new LifeRuntime(cfg, store, brain);
@@ -417,7 +417,7 @@ test('a life wake starts a thought of its own: it waits out a running thought an
   const brain: Brain = {
     streaming: true, thought: thought(),
     run: async observation => { runs.push(observation.events.map(item => item.kind)); if (runs.length === 1) await release.promise; store.acknowledge(observation.batchId); },
-    steer: async observation => { steers.push(observation.events.map(item => item.kind)); store.acknowledge(observation.batchId); return true; },
+    review: async () => {}, steer: async observation => { steers.push(observation.events.map(item => item.kind)); store.acknowledge(observation.batchId); return true; },
     consolidate: async () => {}, abort: () => {},
   };
   const runtime = new LifeRuntime(cfg, store, brain);

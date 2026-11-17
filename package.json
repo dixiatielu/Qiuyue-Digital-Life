@@ -15,7 +15,7 @@
   "scripts": {
     "prebuild": "node scripts/clean-dist.mjs",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
-    "check": "tsc --noEmit && tsc -p packages/tsconfig.json",
+    "check": "tsc --noEmit && tsc -p packages/tsconfig.json && tsc -p test/tsconfig.json",
     "sync:snowluma": "node scripts/sync-snowluma-catalog.mjs",
     "test": "tsx --test test/*.test.ts",
     "dev": "tsx src/cli.ts",

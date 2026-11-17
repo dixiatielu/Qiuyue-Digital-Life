@@ -48,7 +48,7 @@ test('view_event_image reads an image URL found in a tool result, asking Qzone f
   t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
   t.mock.method(http, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => originalRequest(url, {
     ...options, autoSelectFamily: false, lookup: (_hostname, _options, done) => done(null, '127.0.0.1', 4),
-  }, callback));
+  } as http.RequestOptions, callback));
   syncBuiltinESMExports();
   const f = fixture();
   f.brain.thought.lifeOnly = false;
@@ -93,7 +93,7 @@ test('DeepSeek search sends authenticated JSON and handles results and failures'
   t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
   t.mock.method(http, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => originalRequest(url, {
     ...options, autoSelectFamily: false, lookup: (_hostname, _options, done) => done(null, '127.0.0.1', 4),
-  }, callback));
+  } as http.RequestOptions, callback));
   syncBuiltinESMExports();
   const cfg = { ...config().web, enabled: true, searchUrl: `http://search.example:${address.port}/v1/tools/search`, searchKeyEnv: 'TEST_DEEPSEEK_KEY' };
   const oldKey = process.env.TEST_DEEPSEEK_KEY; process.env.TEST_DEEPSEEK_KEY = 'test-key';
@@ -110,7 +110,7 @@ test('DeepSeek search sends authenticated JSON and handles results and failures'
       headers: { ...requests[0]!.headers, authorization: 'Bearer test-key', 'content-type': 'application/json', accept: 'application/json' },
       body: { query: 'Qiuyue site:example.com', count: 5, need_content: false },
     });
-    assert.equal(requests[0]!.headers['x-subscription-token'], undefined);
+    assert.equal((requests[0]!.headers as Record<string, unknown>)['x-subscription-token'], undefined);
     body = { results: [] }; assert.deepEqual(await reader.search('No match'), []);
     body = { web: { results: [] } }; await assert.rejects(reader.search('Invalid format'), /invalid results format/);
     body = { results: [{ title: 'Missing link' }] }; await assert.rejects(reader.search('Invalid format'), /invalid results format/);

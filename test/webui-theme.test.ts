@@ -16,7 +16,7 @@ test('custom colors keep primary buttons and accent text readable in light and d
   for (const color of colors) for (const dark of [false, true]) {
     const tokens = themeTokens(color, dark);
     assert.ok(contrastRatio(tokens['accent-fill'], tokens['on-accent']) >= 4.5, `${color} primary button`);
-    for (const surface of ['bg', 'panel', 'accent-soft']) assert.ok(contrastRatio(tokens.accent, tokens[surface]) >= 4.5, `${color} / ${dark} / ${surface}`);
+    for (const surface of ['bg', 'panel', 'accent-soft'] as const) assert.ok(contrastRatio(tokens.accent, tokens[surface]) >= 4.5, `${color} / ${dark} / ${surface}`);
     assert.ok(contrastRatio(tokens['nav-text'], tokens['nav-active']) >= 4.5, `${color} navigation`);
   }
 });

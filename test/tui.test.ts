@@ -307,10 +307,10 @@ test('interface language defaults to English and supports Chinese for monitoring
       try {
         const snapshot = monitor.snapshot();
         assert.equal(snapshot.status.phase, phase);
-        assert.ok(snapshot.items.some(item => item.title.includes(title)));
+        assert.ok(snapshot.items.some(item => item.title.includes(title!)));
         const model = new DisplayModel(); model.apply(snapshot);
-        assert.ok(model.note.includes(note));
-        assert.ok(new Timeline(model).render(100).some(line => plainText(line).includes(state)));
+        assert.ok(model.note.includes(note!));
+        assert.ok(new Timeline(model).render(100).some(line => plainText(line).includes(state!)));
         const preview = handleControl(store, { args: ['memory', 'forget', [...model.items.keys()][0]!] }) as { message: string };
         assert.match(preview.message, language === 'zh' ? /此操作/ : /This also deletes/);
       } finally { monitor.close(); }

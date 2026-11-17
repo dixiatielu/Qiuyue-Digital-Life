@@ -29,7 +29,7 @@ export function config() {
   value.extensions.directory = join(scratch, 'plugins'); value.extensions.dataDirectory = join(scratch, 'plugin-data'); value.drawing.dir = join(scratch, 'drawings');
   return value;
 }
-export function event(store: Store, text = 'Hello', groupId = 100, key = crypto.randomUUID()) {
+export function event(store: Store, text = 'Hello', groupId = 100, key: string = crypto.randomUUID()) {
   return store.receive(qqEvent({ key, kind: 'message', at: Date.now(), text, groupId, actorId: 7, payload: { message: [{ type: 'text', data: { text } }] } }, store))!;
 }
 export function deferred<T = void>() {

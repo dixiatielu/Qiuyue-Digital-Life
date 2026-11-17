@@ -50,7 +50,7 @@ test('a review receives the configured memory budgets and can recover a pruned r
         const remember = tools.find(tool => tool.name === 'remember')!;
         assert.match(remember.description, /500/); assert.match(remember.description, /1500/);
         assert.match(remember.description, /kind/);
-        return answer(call('read_context', { id }));
+        return answer(call('read_context', { id: id! }));
       },
       context => {
         const result = results(context.messages).at(-1)!;
