@@ -5,7 +5,7 @@ import http from 'node:http';
 import dns from 'node:dns/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { once } from 'node:events';
-import { preferJpeg } from '../src/web.js';
+import { preferJpeg, publicFetch } from '../src/web.js';
 import { WebSearch } from '../src/plugins/web-search.js';
 import { config, fixture } from './helpers.js';
 
@@ -17,6 +17,22 @@ test('Qzone image URLs drop the format selector and keep everything else as writ
   assert.equal(preferJpeg('https://a1.qpic.cn/psc?/SAMPLE_B!/c&ek=1&tl=1'), 'https://a1.qpic.cn/psc?/SAMPLE_B!/c&ek=1&tl=1');
   for (const unchanged of ['https://example.com/a.png?t=8', 'https://notqpic.cn/a?t=8', 'https://qpic.cn.example.com/a?t=8', 'base64://aGVsbG8=', 'file:///tmp/a.png', 'not a url'])
     assert.equal(preferJpeg(unchanged), unchanged);
+});
+
+test('a redirect to an address that cannot be parsed fails the request, not the process', async t => {
+  const locations = ['http://[', 'http://a b/'];
+  const server = http.createServer((request, response) => { response.writeHead(302, { Location: locations[Number(request.url!.slice(1))]! }); response.end(); });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  const originalRequest = http.request;
+  t.mock.method(dns, 'lookup', async () => [{ address: '8.8.8.8', family: 4 }]);
+  t.mock.method(http, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => originalRequest(url, {
+    ...options, lookup: (_hostname, wanted, done) => { const answer = done as (...values: unknown[]) => void; if (wanted.all) answer(null, [{ address: '127.0.0.1', family: 4 }]); else answer(null, '127.0.0.1', 4); },
+  }, callback));
+  syncBuiltinESMExports();
+  try {
+    for (const index of locations.keys()) await assert.rejects(publicFetch(`http://redirect.example:${address.port}/${index}`, { maxBytes: 1000, timeoutMs: 2000 }), /redirect address is not a valid URL/);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); server.close(); }
 });
 
 test('view_event_image reads an image URL found in a tool result, asking Qzone for JPEG', async t => {

@@ -6,7 +6,7 @@ import { request as httpsRequest } from 'node:https';
 export function publicAddress(address: string): boolean {
   if (isIP(address) === 4) {
     const [a = 0, b = 0, c = 0] = address.split('.').map(Number);
-    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || b === 0 || (b === 88 && c === 99))) || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113));
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113));
   }
   const normalized = address.toLowerCase();
   const parts = normalized.split(':'); const second = Number.parseInt(parts[1] || '0', 16);
@@ -38,7 +38,12 @@ export async function publicFetch(input: string, options: { maxBytes: number; ti
         else callback(null, target.address, target.family);
       },
     }, response => {
-      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) { response.resume(); resolve({ data: Buffer.alloc(0), type: '', redirect: new URL(response.headers.location, url).href }); return; }
+      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        response.resume();
+        // A throw in this callback would be an uncaught exception, and the server chooses this header.
+        try { resolve({ data: Buffer.alloc(0), type: '', redirect: new URL(response.headers.location, url).href }); } catch { reject(new Error('The redirect address is not a valid URL.')); }
+        return;
+      }
       if (!response.statusCode || response.statusCode >= 400) { response.resume(); reject(new Error(`HTTP ${response.statusCode}`)); return; }
       const chunks: Buffer[] = []; let size = 0;
       response.on('data', (chunk: Buffer) => { size += chunk.length; if (size > options.maxBytes) { const error = new Error('The response exceeds the size limit.'); reject(error); request.destroy(error); } else chunks.push(chunk); });

@@ -284,6 +284,9 @@ test('large observations can be consumed without losing their source IDs or over
 test('public readers refuse local/private/reserved addresses and non-HTTP protocols', async () => {
   for (const address of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.64.0.1', '::1', '::ffff:127.0.0.1', 'fd00::1', '2002:7f00:1::']) assert.equal(publicAddress(address), false, address);
   assert.equal(publicAddress('8.8.8.8'), true); assert.equal(publicAddress('2606:4700:4700::1111'), true);
+  // Only two /24 blocks of 192.0.0.0/16 are reserved; the rest is ordinary public space.
+  for (const address of ['192.0.0.8', '192.0.2.1', '192.88.99.1']) assert.equal(publicAddress(address), false, address);
+  for (const address of ['192.0.78.24', '192.0.66.2']) assert.equal(publicAddress(address), true, address);
   for (const url of ['http://127.0.0.1/', 'http://[::1]/', 'file:///etc/passwd', 'https://user:secret@example.com/']) await assert.rejects(publicFetch(url, { maxBytes: 100, timeoutMs: 1000 }));
 });
 
