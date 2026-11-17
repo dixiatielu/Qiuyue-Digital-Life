@@ -51,7 +51,7 @@ export function createPlugins(config: Config, store: Store, semantics?: Semantic
   for (const instance of config.adapters) {
     if (instance.driver === 'telegram') {
       const plugin = nativeAdapterPlugin(telegramAdapter(instance, credential), store);
-      plugin.enabled = () => config.plugins[plugin.id] !== false;
+      plugin.enabled = () => config.plugins[plugin.id] !== false; plugin.essential = true;
       plugins.push(plugin); continue;
     }
     const local: Config = { ...config, plugins: { ...config.plugins } };
@@ -62,6 +62,7 @@ export function createPlugins(config: Config, store: Store, semantics?: Semantic
       const plugin = scopePlugin(createBuiltinPlugin(id, local, store, semantics, credential, { account: instance, adapter }), instance.id, actions, adapter);
       plugin.requiresRestart = true;
       if (id === 'snowluma-tools') {
+        plugin.essential = true;
         plugin.start = async () => { store.bindPlatformAccount(instance.id, { platform: 'qq', accountId: instance.accountId }); await adapter.connect?.(); };
         plugin.stop = () => adapter.close?.();
       }

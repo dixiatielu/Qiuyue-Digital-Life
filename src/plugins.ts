@@ -30,6 +30,8 @@ export interface LifePlugin {
   contextVersion?: string;
   /** Exclusive platform consumers need a restart instead of overlapping reload lifetimes. */
   requiresRestart?: boolean;
+  /** A platform account the operator configured. The daemon does not start without it, where an optional plugin that fails is only left out. */
+  essential?: boolean;
   enabled?(): boolean;
   tools(runtime: ToolRuntime): PluginTool[];
   nativeActions?: { accounts?: readonly import('./identity.js').PlatformIdentity[]; definition(name: string): NativeActionDefinition | undefined; allowed(name: string): boolean; execute?(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> };
@@ -213,7 +215,8 @@ export class PluginHost {
     for (const plugin of [...this.plugins]) if (this.enabled(plugin)) {
       try { await plugin.start?.(); }
       catch (error) {
-        if (!onError) throw error;
+        // Left out, a configured account would leave the digital life running deaf with no reconnection and a different tool set.
+        if (!onError || plugin.essential) throw error;
         this.plugins = this.plugins.filter(item => item !== plugin);
         try { await waitFor(Promise.resolve(plugin.stop?.()), AbortSignal.timeout(5000)); } catch { /* the original startup error is reported */ }
         onError(plugin, error);

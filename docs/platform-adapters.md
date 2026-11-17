@@ -45,6 +45,8 @@ The top-level `snowluma` key and unscoped QQ plugin switches are rejected. A Tel
 
 Named connection plugins and user plugins registering adapters require a daemon restart when changed. This prevents two versions from polling the same account during a reload. Ordinary capability plugins still reload between thoughts. Their capability entries indicate when restart is required. For named SnowLuma, switches such as `qq-main-snowluma-tools` and `qq-main-qq-stickers` address the individual plugin; disabling the native connection plugin also stops that account's reception. The Telegram plugin ID is `adapter-telegram-main`.
 
+The daemon does not start while a configured account cannot be reached or verified: the SnowLuma service is not running, the logged-in account differs from `accountId`, or the Telegram token is missing or rejected. Start and log in to the platform service first. Once the daemon is running, a dropped SnowLuma connection reconnects and verifies the account again by itself. A user plugin that fails to start is only left out and reported on the capabilities page.
+
 ## Native parameters, receipts, and media
 
 Each tool keeps its native object schema, including nested fields, unions, and references. Telegram declarations omit repeated prose to reduce context use; `telegram_main__describe_api({"operation":"sendMessage"})` returns the complete original parameter documentation. It does not change the available tools. A large complete catalog needs a model and provider that accept the tool count and have context space for all declarations plus the conversation. The host never silently reduces that catalog to fit a provider limit.

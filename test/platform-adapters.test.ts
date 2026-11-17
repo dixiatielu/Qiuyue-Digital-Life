@@ -266,3 +266,17 @@ test('messages on another platform recall the same memories and review finds can
     const own = store.receive(qqEvent({ ...message, key: 'own', source: { ...message.source!, own: true, actor: 'telegram:user:900' } }, store))!; await recall.idle(); assert.equal(recall.queries([own]).length, 0);
   } finally { await recall.stop(); store.close(); }
 });
+
+test('a configured account that cannot connect stops startup, while an optional plugin that fails is only left out', async () => {
+  const store = new Store(':memory:');
+  try {
+    const cfg = config();
+    const unreachable = { execute: async () => ({}), connect: async () => { throw new Error('SnowLuma WebSocket closed'); }, close: async () => {} };
+    const left: string[] = [];
+    await assert.rejects(createPlugins(cfg, store, undefined, undefined, () => unreachable).start(plugin => { left.push(plugin.id); }), /SnowLuma WebSocket closed/);
+    assert.deepEqual(left, []);
+    const optional = new PluginHost([{ id: 'optional', tools: () => [], start: async () => { throw new Error('broken startup'); } }]);
+    await optional.start(plugin => { left.push(plugin.id); });
+    assert.deepEqual(left, ['optional']); assert.deepEqual(optional.installed().map(plugin => plugin.id), []);
+  } finally { store.close(); }
+});
