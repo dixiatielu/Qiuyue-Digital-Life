@@ -267,15 +267,17 @@ test('review waits for a quiet moment and lists the chats it has not read', asyn
     await runtime.tick(); await runtime.idle();
     assert.equal(f.store.pending(), 0); assert.equal(f.reviewFaux.state.callCount, 0);
     f.cfg.compaction.idleAfterMs = 0;
-    f.reviewFaux.setResponses([context => {
-      const review = JSON.stringify(context.messages.at(-1));
-      assert.match(review, /memory_maintenance.*apart from your conversations.*schedule it as a commitment.*Unreviewed chat records: group:100: 2 new messages since .*read_chat_record.*person=900/);
-      // What happened comes before form: corrections, unstated outcomes, and one person's ways kept in their impression.
-      assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*leave it unstated.*into your impression of them/);
-      return answer('Reviewed');
-    }]);
+    let review = '';
+    f.reviewFaux.setResponses([context => { review = JSON.stringify(context.messages); return answer('Reviewed'); }]);
     await runtime.tick(); await runtime.idle();
     assert.equal(f.faux.state.callCount, 1); assert.equal(f.reviewFaux.state.callCount, 1);
+    // Checked here rather than in the callback, where the runtime would record a failed assertion as review_stopped and the test would still pass.
+    assert.ok(!f.store.logs(50).some(log => log.kind === 'review_stopped'));
+    assert.match(review, /memory_maintenance.*apart from your conversations.*schedule it as a commitment.*Unreviewed chat records: \S*group:100: 2 new messages since .*read_chat_record.*person=self/);
+    // What happened comes before form: corrections, unstated outcomes, and one person's ways kept in their impression.
+    assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*leave it unstated.*into your impression of them/);
+    // The prompt is the review's instructions: it arrives whole, not cut off with a pointer to read_event.
+    assert.match(review, /retire entries that no longer hold\./); assert.doesNotMatch(review, /chars; read_event/);
   } finally { await runtime.stop(); f.store.close(); }
 });
 

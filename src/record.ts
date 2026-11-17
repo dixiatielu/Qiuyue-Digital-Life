@@ -238,8 +238,8 @@ export function observationText(store: Store, events: EnvironmentEvent[], faces:
     if (key !== items[0]!.id) return new ChatRecord(store, key, faces, { limit }).observe(items);
     const event = items[0]!; const ref = eventRef(event.id);
     const pushed = typeof event.payload.post_type === 'string';
-    // A push's text only repeats its kind.
-    const text = pushed && event.kind.includes(event.text) ? '' : ` ${clip(event.text, ref, limit)}`;
+    // A push's text only repeats its kind. A review's prompt is its instructions, which must arrive whole.
+    const text = pushed && event.kind.includes(event.text) ? '' : ` ${event.kind === 'memory_maintenance' ? event.text : clip(event.text, ref, limit)}`;
     const extra = event.kind === 'wake' || pushed ? details(event.payload, pushKeys) : '';
     return `${day(event.at) === today ? '' : `${day(event.at)} `}${clock(event.at)} ${ref} [${event.kind}]${event.source?.actor ? ` ${event.source.actor}` : ''}${text}${extra}`;
   }).join('\n');
