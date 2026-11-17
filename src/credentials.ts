@@ -85,7 +85,9 @@ export class Credentials {
 }
 
 /** Every credential referenced by effective configuration, including defaults. */
-export function credentialNames(config: { model: { apiKeyEnv: string }; adapters: { tokenEnv: string }[]; web: { searchKeyEnv: string }; embedding: { apiKeyEnv: string }; drawing: { apiKeyEnv: string }; webui: { tokenEnv: string }; extensions?: { directory: string; settings: Record<string, Record<string, unknown>> } }) {
+export function credentialNames(config: { model: { apiKeyEnv: string }; review?: { model?: { apiKeyEnv: string } }; compaction?: { model?: { apiKeyEnv: string } }; adapters: { tokenEnv: string }[]; web: { searchKeyEnv: string }; embedding: { apiKeyEnv: string }; drawing: { apiKeyEnv: string }; webui: { tokenEnv: string }; extensions?: { directory: string; settings: Record<string, Record<string, unknown>> } }) {
   const plugins = pluginCredentialReferences(config.extensions).map(item => item.name);
-  return [...new Set([config.model.apiKeyEnv, ...config.adapters.map(account => account.tokenEnv), config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv, config.webui.tokenEnv, ...plugins])];
+  // A review or compaction model of its own may use a key of its own.
+  const roles = [config.review?.model?.apiKeyEnv, config.compaction?.model?.apiKeyEnv].filter((name): name is string => typeof name === 'string');
+  return [...new Set([config.model.apiKeyEnv, ...roles, ...config.adapters.map(account => account.tokenEnv), config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv, config.webui.tokenEnv, ...plugins])];
 }

@@ -187,6 +187,19 @@ test('display projection strips credentials, reasoning, images and terminal cont
   } finally { monitor.close(); store.close(); if (old === undefined) delete process.env[cfg.model.apiKeyEnv]; else process.env[cfg.model.apiKeyEnv] = old; }
 });
 
+test('display projection also strips the keys of a separate review or compaction model', () => {
+  const cfg = config();
+  cfg.review = { model: { ...cfg.model, apiKeyEnv: 'REVIEW_MODEL_KEY' } }; cfg.compaction.model = { ...cfg.model, apiKeyEnv: 'COMPACTION_MODEL_KEY' };
+  const keys: Record<string, string> = { REVIEW_MODEL_KEY: 'review-display-secret', COMPACTION_MODEL_KEY: 'compaction-display-secret' };
+  const store = new Store(':memory:'); const monitor = new Monitor(cfg, store, 2000, name => keys[name]);
+  try {
+    event(store, 'keys review-display-secret and compaction-display-secret');
+    const serialized = JSON.stringify(monitor.snapshot());
+    for (const value of Object.values(keys)) assert.ok(!serialized.includes(value), value);
+    assert.ok(serialized.includes('<REDACTED>'));
+  } finally { monitor.close(); store.close(); }
+});
+
 test('socket viewers reconnect without starting another Agent and management commands remain available', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'life-display-')); const path = join(dir, 'control.sock');
   const store = new Store(':memory:'); const cfg = config(); let monitor = new Monitor(cfg, store);
