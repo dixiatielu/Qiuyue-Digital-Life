@@ -9,7 +9,8 @@ export interface FreeTimeView { now: number; heardAt: number; quietMs: number; l
 /** A quiet stretch offers free time unless the digital life rests, another life wake is near, or the day's free time is spent (ADR-0015). */
 export function freeTimeDue({ now, heardAt, quietMs, lifeWakes, plans }: FreeTimeView, { gapMs, perDay }: Config['life']['freeTime']): boolean {
   if (now - heardAt < quietMs || plans.some(wake => wake.rest && wake.status === 'pending')) return false;
-  if (lifeWakes.some(wake => now - wake.at < gapMs) || plans.some(wake => wake.kind === 'life' && wake.dueAt - now < gapMs)) return false;
+  // A plan already woken counts through its wake event; left unfinished, it would otherwise hold free time back for good.
+  if (lifeWakes.some(wake => now - wake.at < gapMs) || plans.some(wake => wake.kind === 'life' && wake.status === 'pending' && wake.dueAt - now < gapMs)) return false;
   return lifeWakes.filter(wake => wake.freeTime && now - wake.at < 86_400_000).length < perDay;
 }
 

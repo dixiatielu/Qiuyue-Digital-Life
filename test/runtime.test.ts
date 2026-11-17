@@ -3,7 +3,7 @@ import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Brain } from '../src/brain.js';
-import { LifeRuntime } from '../src/runtime.js';
+import { LifeRuntime, freeTimeDue } from '../src/runtime.js';
 import { Store } from '../src/store.js';
 import { config, deferred, event } from './helpers.js';
 
@@ -431,4 +431,14 @@ test('a life wake starts a thought of its own: it waits out a running thought an
     event(store, 'After'); await step(0); await runtime.idle(); await step(0); await runtime.idle();
     assert.deepEqual(runs, [['message'], ['wake'], ['message']]);
   } finally { release.resolve(); await runtime.stop(); store.close(); }
+});
+
+test('a life plan that was woken and never finished does not hold free time back', () => {
+  const now = Date.now(); const hour = 3_600_000; const free = config().life.freeTime;
+  const view = { now, heardAt: now - 2 * hour, quietMs: hour, lifeWakes: [{ at: now - 5 * hour, freeTime: false }] };
+  const plan = { id: 'w:1', title: 'Morning walk', kind: 'life' as const, dueAt: now - 5 * hour };
+  assert.equal(freeTimeDue({ ...view, plans: [{ ...plan, status: 'queued' }] }, free), true);
+  // One still to come, or overdue and about to be woken, does.
+  assert.equal(freeTimeDue({ ...view, plans: [{ ...plan, status: 'pending' }] }, free), false);
+  assert.equal(freeTimeDue({ ...view, plans: [{ ...plan, status: 'pending', dueAt: now + free.gapMs / 2 }] }, free), false);
 });
