@@ -242,6 +242,9 @@ test('one broken user plugin does not prevent startup, and disabling and removin
     h.write('broken', 'throw new Error("broken startup");'); await h.manager.start();
     assert.match(h.manager.status().plugins.find(plugin => plugin.id === 'broken')?.error ?? '', /broken startup/);
     assert.equal((await h.execute('sample_read')).result.value, 1);
+    // Still broken, it is left out of a reload of everything as it was left out at startup.
+    h.manager.request(['reload', 'all']); await h.manager.settled();
+    assert.equal(h.manager.job?.state, 'done'); assert.match(h.manager.status().plugins.find(plugin => plugin.id === 'broken')?.error ?? '', /broken startup/);
     h.saved.plugins.sample = false; h.manager.request(['reload', 'sample']); await h.manager.settled();
     assert.equal(h.manager.job?.state, 'done'); assert.ok(!h.tools.current().some(tool => tool.name === 'sample_read'));
     assert.equal(h.manager.status().plugins.find(plugin => plugin.id === 'sample')?.state, 'disabled');

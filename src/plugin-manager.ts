@@ -172,7 +172,7 @@ export class PluginManager {
     if (target === 'all') for (const id of [...discovered, ...this.installed.keys()]) { if (!builtin(id) && this.installed.get(id)?.source !== 'builtin') ids.add(id); }
     else if (!builtin(target)) ids.add(target);
     for (const [id, item] of this.installed) if (item.plugin.requiresRestart) ids.delete(id);
-    const candidates = new Map<string, Installed>();
+    const candidates = new Map<string, Installed>(); const leftOut = new Map<string, unknown>();
     const previous = [...this.host.installed()];
     let committed = false;
     try {
@@ -186,7 +186,13 @@ export class PluginManager {
           if (manifest) this.definitions.set(id, manifest);
           if (!(next.plugins[id] ?? manifest?.defaultEnabled ?? true)) candidates.set(id, this.disabled(id, next));
           else {
-            const loaded = await loadUserPlugin(id, next, this.store, credential, signal, definition => this.definitions.set(id, definition));
+            let loaded: Awaited<ReturnType<typeof loadUserPlugin>>;
+            try { loaded = await loadUserPlugin(id, next, this.store, credential, signal, definition => this.definitions.set(id, definition)); }
+            catch (error) {
+              // A plugin that is not running has no version to keep: left out again, it must not stop the others from reloading.
+              if (target !== 'all' || this.installed.has(id) || signal.aborted) throw error;
+              leftOut.set(id, error); continue;
+            }
             candidates.set(id, { ...loaded, source: 'user', metadata: loaded.definition, loadedAt: Date.now(), fingerprint: fingerprint(id, next) });
           }
         }
@@ -212,7 +218,8 @@ export class PluginManager {
           committed = true;
           for (const id of ids) { this.installed.delete(id); this.errors.delete(id); }
           for (const [id, item] of candidates) this.installed.set(id, item);
-          this.errors.delete(target); job.changed = [...ids];
+          this.errors.delete(target); job.changed = [...ids].filter(id => !leftOut.has(id));
+          for (const [id, error] of leftOut) this.failed(id, error);
           const cleanup = await Promise.allSettled(retiring.map(plugin => waitFor(Promise.resolve(plugin.stop?.()), AbortSignal.timeout(5000))));
           job.cleanupErrors = cleanup.flatMap(result => result.status === 'rejected' ? [errorText(result.reason)] : []);
           this.store.log('plugins_reloaded', { plugins: job.changed, contextReset: job.contextReset, cleanupErrors: job.cleanupErrors });
