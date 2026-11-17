@@ -1,7 +1,7 @@
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { TSchema } from 'typebox';
 import type { Config } from './config.js';
-import type { Memory } from './domain.js';
+import type { Action, Memory } from './domain.js';
 import { Store, type RevisionReach } from './store.js';
 import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName } from './platform.js';
 import { PluginHost } from './plugins.js';
@@ -15,6 +15,8 @@ export function ensureCurrent(store: Store, context: ThoughtContext, signal?: Ab
   if (context.lifeOnly && !settings.lifeEnabled) throw new Error('Autonomous life is disabled.');
 }
 export const errorResult = nativeErrorResult;
+/** What a tool learns of its action: the receipt, not the ledger row, whose source list alone can run to tens of kilobytes. */
+const receipt = ({ id, status, result }: Action) => ({ id, status, result });
 export const jsonResult = (result: unknown): AgentToolResult<any> => ({ content: [{ type: 'text', text: JSON.stringify(result) }], details: {} });
 
 /** Shared execution rules for built-in and plugin tools. Plugins never create their own action receipts. */
@@ -70,7 +72,7 @@ export class ToolRuntime {
       try { this.check(signal); dispatched = true; this.store.finishAction(attempt.action.id, 'success', await dispatch()); }
       catch (error) { this.store.finishAction(attempt.action.id, dispatched ? 'unknown' : 'failed', errorResult(error)); }
     }
-    return { outcome: this.store.actionById(attempt.action.id)!, reused: !attempt.fresh };
+    return { outcome: receipt(this.store.actionById(attempt.action.id)!), reused: !attempt.fresh };
   }
   /** Preparation may read through query; only dispatch can perform the recorded external action. */
   async action(name: string, args: Record<string, unknown>, perform: (dispatch: (name: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>, signal?: AbortSignal, failure = errorResult) {
@@ -90,6 +92,6 @@ export class ToolRuntime {
         this.store.finishAction(attempt.action.id, dispatched === undefined || definitelyFailed(error, dispatched) ? 'failed' : 'unknown', failure(error));
       }
     }
-    return { outcome: this.store.actionById(attempt.action.id)!, reused: !attempt.fresh };
+    return { outcome: receipt(this.store.actionById(attempt.action.id)!), reused: !attempt.fresh };
   }
 }
