@@ -13,7 +13,7 @@ export const hash = (text: string) => createHash('sha256').update(text).digest('
 export class ConflictError extends Error {}
 
 /** Replace a file whole, so a reader never sees half of it, and keep its permissions. */
-function writeAtomic(path: string, text: string) {
+export function writeAtomic(path: string, text: string) {
   const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`;

@@ -1,6 +1,6 @@
 import { checkCredentialName, environmentCredential, type CredentialReader } from '../credentials.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { writeAtomic } from './files.js';
 import { normalizeContext } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Config } from '../config.js';
@@ -50,8 +50,7 @@ export class ProviderProfiles {
     if (!Array.isArray(providers)) throw new Error('Providers must be a list.');
     for (const profile of providers) checkProfile(profile);
     if (new Set(providers.map(profile => profile.id)).size !== providers.length) throw new Error('Provider IDs must be unique.');
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    writeFileSync(this.path, JSON.stringify({ providers }, null, 2) + '\n', { mode: 0o600 });
+    writeAtomic(this.path, JSON.stringify({ providers }, null, 2) + '\n');
     return providers;
   }
 }

@@ -105,7 +105,9 @@ export class WebUi {
     const key = hash(JSON.stringify(config) + credentials.revision);
     if (this.inspected?.key !== key) this.inspected = { key, result: inspectConfig(config, credentials.get) };
     const result = this.inspected.result;
-    const userPlugins = discoverPlugins(config.extensions.directory).some(id => !(pluginIds as readonly string[]).includes(id) && config.plugins[id] !== false);
+    // A user plugin's tools are known only once its code runs, which the page never does; one that is off, in the configuration or by its own default, adds none.
+    const manifests = inspectPluginManifests(config.extensions.directory).metadata;
+    const userPlugins = discoverPlugins(config.extensions.directory).some(id => !(pluginIds as readonly string[]).includes(id) && (config.plugins[id] ?? manifests[id]?.defaultEnabled ?? true));
     return { continues: userPlugins ? null : Boolean(saved?.current && result.identities.includes(saved.identity)), unknown: userPlugins, saved: saved ? { at: saved.updatedAt, current: saved.current } : null, plugins: result.plugins, tools: result.tools.length, credentials: result.credentials, models: result.models };
   }
   private on(method: string, path: string, handler: Handler) {
