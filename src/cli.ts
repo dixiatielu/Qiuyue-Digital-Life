@@ -90,8 +90,8 @@ async function main() {
   const pluginManager = new PluginManager(config, plugins, store, () => loadConfig(configPath), credentials.get, recall, () => new Credentials(credentials.paths).get);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   const stopServices = async () => {
-    await Promise.all([pluginManager.stop(), runtime?.stop()]);
-    const results = await Promise.allSettled([runtime?.stop(), recall?.stop(), plugins.stop()]);
+    // Thoughts and reloads end first, then what they use. A failure in one must not leave the rest, the platform connections among them, running.
+    const results = [...await Promise.allSettled([pluginManager.stop(), runtime?.stop()]), ...await Promise.allSettled([recall?.stop(), plugins.stop()])];
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
     if (errors.length) throw new AggregateError(errors, errors.map(errorText).join('; '));
   };

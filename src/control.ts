@@ -51,8 +51,13 @@ export function handleControl(store: Store, request: ControlRequest, runtime?: L
 
 export async function serveControl(path: string, handler: (request: ControlRequest) => unknown, monitor?: Monitor): Promise<ControlServer> {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  // The database daemon lease must be held before removing a stale socket.
-  if (existsSync(path)) unlinkSync(path);
+  // The database daemon lease must be held before removing a stale socket. That lease is per database, so a daemon of another
+  // database may still be answering here; taking its socket would cut it off from its operator while it kept running.
+  if (existsSync(path)) {
+    const answering = await new Promise<boolean>(resolve => { const probe = createConnection(path); probe.once('connect', () => { probe.destroy(); resolve(true); }); probe.once('error', () => resolve(false)); });
+    if (answering) throw new Error(ui('Another daemon is already serving this management socket. Give each configuration its own socket path.', '已有另一个常驻进程在使用这个管理入口。请为每份配置设置各自的 socket 路径。'));
+    unlinkSync(path);
+  }
   const clients = new Set<Socket>();
   const server = createServer(socket => {
     clients.add(socket); socket.setEncoding('utf8');

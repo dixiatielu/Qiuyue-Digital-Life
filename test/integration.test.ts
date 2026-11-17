@@ -1,7 +1,7 @@
 import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -293,6 +293,12 @@ test('management socket changes persistent controls and previews deletion before
     await callControl(path, { args: ['memory', 'forget', source.id], yes: true }); assert.equal(store.event(source.id), undefined);
     await callControl(path, { args: ['life', 'on'] }); assert.equal(store.settings().lifeEnabled, true);
     await callControl(path, { args: ['resume'] }); assert.equal(store.settings().paused, false);
+    // A second daemon, of another database, must not take a socket that is still answered; a stale file is replaced.
+    await assert.rejects(serveControl(path, () => ({})), /already serving this management socket/);
+    await callControl(path, { args: ['pause'] }); assert.equal(store.settings().paused, true);
+    const stale = join(dir, 'stale.sock'); writeFileSync(stale, '');
+    const next = await serveControl(stale, () => ({ replaced: true }));
+    try { assert.deepEqual(await callControl(stale, { args: ['status'] }), { replaced: true }); } finally { await new Promise<void>(resolve => next.close(() => resolve())); }
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
