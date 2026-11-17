@@ -248,6 +248,9 @@ test('rate limits and cooldown survive new clients; aborted requests, redirects 
     await assert.rejects(client.json('https://api.bilibili.com/test', {}, AbortSignal.abort())); assert.equal(calls, 0);
     await client.json('https://api.bilibili.com/test');
     await assert.rejects(new PlatformNetwork('bilibili', storage(store, 'bilibili'), options, transport).json('https://api.bilibili.com/test'), /budget exhausted/); assert.equal(calls, 1);
+    // A write refused by the plugin's own limits says that nothing was sent; one the platform answered does not.
+    await assert.rejects(new PlatformNetwork('bilibili', storage(store, 'bilibili'), options, transport).write('https://api.bilibili.com/test'), (error: Error & { dispatched?: boolean }) => /budget exhausted/.test(error.message) && error.dispatched === false); assert.equal(calls, 1);
+    await assert.rejects(new PlatformNetwork('xiaohongshu', storage(store, 'xiaohongshu-write'), { ...options, requestsPerDay: 10 }, (async () => json({}, 500)) as typeof fetch).write('http://127.0.0.1:18060/api/v1/feeds/like'), (error: Error & { dispatched?: boolean }) => /HTTP 500/.test(error.message) && error.dispatched === undefined);
     const blocked = new PlatformNetwork('xiaohongshu', storage(store, 'xiaohongshu'), { ...options, requestsPerDay: 10 }, (async () => json({}, 429)) as typeof fetch);
     await assert.rejects(blocked.json('http://127.0.0.1:18060/api/v1/feeds/list'), /HTTP 429/);
     await assert.rejects(new PlatformNetwork('xiaohongshu', storage(store, 'xiaohongshu'), options, transport).json('http://127.0.0.1:18060/api/v1/feeds/list'), /cooling down/);

@@ -13,7 +13,7 @@ export interface PluginCall {
   record(kind: string, result: unknown): { sourceId: string; result: unknown };
   /** Attach actual images to this tool response. URLs must occur in a source recorded by this invocation. */
   attachImages(sourceId: string, urls: string[]): Promise<{ attached: string[]; failed: { url: string; error: string }[]; omitted: string[] }>;
-  /** External writes are recorded before dispatch; errors after dispatch leave an unknown outcome. */
+  /** External writes are recorded before dispatch; errors after dispatch leave an unknown outcome. A callback that gives up before sending anything throws an error whose `dispatched` property is `false`, and the attempt is recorded as failed. */
   action(kind: string, args: Record<string, unknown>, dispatch: (signal: AbortSignal) => Promise<unknown>): Promise<PluginActionResult>;
   adapters: {
     query(instance: string, operation: string, args: Record<string, unknown>): Promise<unknown>;

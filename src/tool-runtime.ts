@@ -70,7 +70,8 @@ export class ToolRuntime {
     if (attempt.fresh) {
       let dispatched = false;
       try { this.check(signal); dispatched = true; this.store.finishAction(attempt.action.id, 'success', await dispatch()); }
-      catch (error) { this.store.finishAction(attempt.action.id, dispatched ? 'unknown' : 'failed', errorResult(error)); }
+      // A callback that gave up before sending anything says so; whatever else it throws may follow a request that went out (ADR-0008).
+      catch (error) { this.store.finishAction(attempt.action.id, dispatched && (error as { dispatched?: unknown } | null)?.dispatched !== false ? 'unknown' : 'failed', errorResult(error)); }
     }
     return { outcome: receipt(this.store.actionById(attempt.action.id)!), reused: !attempt.fresh };
   }

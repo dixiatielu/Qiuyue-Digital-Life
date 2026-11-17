@@ -37,11 +37,11 @@ export class PlatformNetwork {
     const work = this.queue.catch(() => {}).then(async () => {
       controller.throwIfAborted();
       const blocked = this.storage.get('blockedUntil', 0)!;
-      if (Date.now() < blocked) throw new Error(`${this.platform} is cooling down until ${new Date(blocked).toISOString()}.`);
+      if (Date.now() < blocked) throw new Refused(`${this.platform} is cooling down until ${new Date(blocked).toISOString()}.`);
       const day = new Date().toISOString().slice(0, 10);
       const previous = this.storage.get('requests', { day, count: 0, at: 0 })!;
       const used = previous.day === day ? previous.count : 0;
-      if (used >= this.settings.requestsPerDay) throw new Error(`${this.platform} daily read budget exhausted.`);
+      if (used >= this.settings.requestsPerDay) throw new Refused(`${this.platform} daily read budget exhausted.`);
       const wait = previous.at + this.settings.requestGapMs - Date.now();
       if (wait > 0) await delay(wait, undefined, { signal: controller });
       controller.throwIfAborted();
@@ -74,7 +74,14 @@ export class PlatformNetwork {
     const response = await this.request(url, init, signal);
     try { return await response.json(); } catch { throw new Error(`${this.platform} returned invalid JSON.`); }
   }
+  /** The request that carries out an external write, as the first thing its action does. Refused here by the cool-down or the daily budget, nothing was sent, so the attempt is a definite failure rather than an unknown outcome. */
+  async write(url: string, init: RequestInit = {}, signal?: AbortSignal): Promise<any> {
+    try { return await this.json(url, init, signal); }
+    catch (error) { throw error instanceof Refused ? Object.assign(error, { dispatched: false }) : error; }
+  }
 }
+/** Declined by this plugin's own limits before any request was made. */
+class Refused extends Error {}
 
 /** Bounded navigation cache. Eviction never changes remote favorites or likes. */
 export class ReadingHistory {

@@ -27,9 +27,9 @@ export class XiaohongshuReader implements OnlineReader {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('xiaohongshu.baseUrl must be an HTTP/HTTPS service URL without credentials, query or fragment.');
     this.base = url.href.replace(/\/$/, ''); this.history = new ReadingHistory(storage);
   }
-  private async request(path: string, signal?: AbortSignal, body?: unknown) {
+  private async request(path: string, signal?: AbortSignal, body?: unknown, write = false) {
     const token = this.token();
-    const result = await this.network.json(`${this.base}/api/v1/${path}`, {
+    const result = await this.network[write ? 'write' : 'json'](`${this.base}/api/v1/${path}`, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -68,7 +68,7 @@ export class XiaohongshuReader implements OnlineReader {
     if (!token) throw new Error('Discover this note again to obtain its current access token before favoriting.');
     await this.login(call.signal);
     const action = await call.action('favorite', { id: item.id, saved }, async signal => {
-      const result = await this.request('feeds/favorite', signal, { feed_id: item.id, xsec_token: token, unfavorite: !saved });
+      const result = await this.request('feeds/favorite', signal, { feed_id: item.id, xsec_token: token, unfavorite: !saved }, true);
       if (result.success !== true || result.feed_id !== item.id) throw new Error('Xiaohongshu did not confirm the requested favorite action.');
       return { id: item.id, saved, platform: 'xiaohongshu' };
     });
@@ -86,7 +86,7 @@ export class XiaohongshuReader implements OnlineReader {
     };
     if (await currentLike(call.signal) === liked) return { confirmed: true, liked, unchanged: true };
     const action = await call.action('like', { id: item.id, liked }, async signal => {
-      const result = await this.request('feeds/like', signal, { feed_id: item.id, xsec_token: token, unlike: !liked });
+      const result = await this.request('feeds/like', signal, { feed_id: item.id, xsec_token: token, unlike: !liked }, true);
       if (result.success !== true || result.feed_id !== item.id) throw new Error('Xiaohongshu did not confirm the requested like action.');
       if (await currentLike(signal) !== liked) throw new Error('Xiaohongshu like state could not be confirmed after dispatch.');
       return { id: item.id, liked, platform: 'xiaohongshu' };

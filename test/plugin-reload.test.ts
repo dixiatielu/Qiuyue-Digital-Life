@@ -334,6 +334,26 @@ test('image generation finishes before disabling its plugin, without being repor
   } finally { painting.resolve(Buffer.alloc(0)); await manager.stop(); await runtime.stop(); await f.plugins.stop(); f.store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a plugin action that gave up before sending anything failed, and does not hold back the next attempt', async () => {
+  const h = harness();
+  try {
+    h.write('writer', `export default { id: 'writer', apiVersion: 2, setup(ctx) {
+      ctx.tool({ name: 'write_later', description: 'Write externally', parameters: { type: 'object' }, execute(args, call) {
+        return call.action('post', { text: 'hello' }, async () => {
+          const attempts = (ctx.storage.get('attempts') ?? 0) + 1; ctx.storage.set('attempts', attempts);
+          if (attempts === 1) throw Object.assign(new Error('Daily request budget spent'), { dispatched: false });
+          return { posted: true };
+        });
+      } });
+    } };`);
+    await h.manager.start();
+    const refused = await h.execute('write_later');
+    assert.equal(refused.outcome.status, 'failed'); assert.match(JSON.stringify(refused.outcome.result), /budget spent/);
+    const sent = await h.execute('write_later');
+    assert.equal(sent.reused, false); assert.equal(sent.outcome.status, 'success'); assert.equal(h.store.setting('plugin:writer:attempts'), 2);
+  } finally { await h.close(); }
+});
+
 test('plugin actions keep unknown outcomes and do not repeat a dispatch; read-only tools cannot send through query', async () => {
   const h = harness();
   try {

@@ -1,3 +1,5 @@
 # Preserve unknown action outcomes as a distinct result
 
 An action such as sending a message may have completed on QQ even though the local system did not receive a success receipt. Action outcomes are therefore distinguished as success, failure, or unknown. When an outcome is unknown, first attempt to verify it; if it cannot be confirmed, retain the unknown state and do not automatically retry blindly, avoiding duplicate messages or other external actions. A timeout, cancellation, or restart alone cannot prove that the remote action did not occur. See the [SnowLuma recovery boundary review](../research/snowluma-recovery.md) for technical background.
+
+Revision of 2026-11-17: unknown means that something may have been sent. A plugin action that its own request budget or cool-down refused before any request went out is recorded as failed, where it had been recorded as unknown because the ledger entry already existed. An unknown outcome still holds back the identical action for as long as it stays unknown, however much later it is asked for again: a later change of state does not make the old attempt safe to repeat.

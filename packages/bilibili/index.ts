@@ -97,7 +97,7 @@ export class BilibiliReader implements OnlineReader {
     if (await currentLike(call.signal) === liked) return { confirmed: true, liked, unchanged: true };
     const action = await call.action('like', { id: item.id, liked }, async signal => {
       const body = new URLSearchParams({ aid: String(video.aid), like: liked ? '1' : '2', csrf: cookies.bili_jct! });
-      const result = await this.network.json(api + '/x/web-interface/archive/like', { method: 'POST', headers: { ...this.headers(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }, signal);
+      const result = await this.network.write(api + '/x/web-interface/archive/like', { method: 'POST', headers: { ...this.headers(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }, signal);
       if ([-352, -412, -509].includes(result.code)) this.network.coolDown();
       if (result.code !== 0) throw new Error(`Bilibili like request failed with code ${Number(result.code)}.`);
       if (await currentLike(signal) !== liked) throw new Error('Bilibili like state could not be confirmed after dispatch.');
@@ -122,7 +122,7 @@ export class BilibiliReader implements OnlineReader {
     if (Boolean(folder.fav_state) === saved) return { confirmed: true, saved, collectionId: folder.id, unchanged: true };
     const action = await call.action('favorite', { id: item.id, saved, collectionId: folder.id }, async signal => {
       const body = new URLSearchParams({ rid: String(video.aid), type: '2', add_media_ids: saved ? String(folder.id) : '', del_media_ids: saved ? '' : String(folder.id), csrf: cookies.bili_jct!, platform: 'web' });
-      const result = await this.network.json(api + '/x/v3/fav/resource/deal', { method: 'POST', headers: { ...this.headers(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }, signal);
+      const result = await this.network.write(api + '/x/v3/fav/resource/deal', { method: 'POST', headers: { ...this.headers(), 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }, signal);
       if ([-352, -412, -509].includes(result.code)) this.network.coolDown();
       if (result.code !== 0) throw new Error(`Bilibili favorite request failed with code ${Number(result.code)}.`);
       const confirmed = folderFor(await this.request(path, signal));
