@@ -196,7 +196,8 @@ export class Monitor {
   }
   private trace(id: number, at: number, name: string, data: unknown, live = true) {
     const detail = data as Record<string, unknown>;
-    if (name === 'context_budget') { this.contextTokens = Number(detail.tokens); this.inputBudget = Number(detail.inputBudget); }
+    // A review has a working context and budget of its own; the status shows the conversations'.
+    if (name === 'context_budget' && (detail.owner ?? 'main') === 'main') { this.contextTokens = Number(detail.tokens); this.inputBudget = Number(detail.inputBudget); }
     if (live && name === 'connection_opened') this.connection = ui('Connected', '已连接');
     if (live && (name === 'connection_closed' || name === 'connection_error')) this.connection = ui('Disconnected', '已断开');
     if (!['context_budget', 'action_result', 'thought_turn_completed', 'observation_dispatched', 'observation_entered'].includes(name)) this.put({ id: `trace:${id}`, at, type: 'system', title: name, text: this.describe(data), state: name.includes('error') ? 'error' : undefined }, live);
@@ -225,6 +226,8 @@ export class Monitor {
         if (this.timer) clearTimeout(this.timer); this.timer = undefined;
         this.pending.clear(); this.items.clear(); this.itemBytes.clear(); this.totalItemBytes = 0; this.ring = []; this.ringBytes = 0;
         this.replayFloor = ++this.seq; this.assistantId = undefined; this.busy = undefined; this.runId = undefined; this.runningTools.clear(); this.runActions.clear();
+        // The snapshot carries the status. A status event sent ahead of it would skip a sequence number, and a viewer would drop the connection as a gap.
+        this.statusDirty = false;
         this.loadHistory(); this.broadcast(this.snapshot(ui('Memory forgotten; display cache cleared.', '记忆已遗忘，展示缓存已清除。'))); return;
       }
       this.trace(notice.id, notice.at, notice.name, notice.data);

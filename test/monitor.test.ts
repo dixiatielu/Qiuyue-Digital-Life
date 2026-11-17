@@ -153,6 +153,31 @@ test('bounded replay restores missed events, detects gaps and never replays forg
   } finally { monitor.close(); store.close(); }
 });
 
+test('a forget reaches connected viewers as the next packet, a snapshot, so they do not see a gap', () => {
+  const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
+  const packets: DisplayPacket[] = []; monitor.subscribe(undefined, packet => packets.push(packet));
+  try {
+    const source = event(store, 'Forget this line'); monitor.flush();
+    const before = packets.length; const seq = packets.at(-1)!.cursor.seq;
+    store.forget(source.id);
+    // A viewer over the socket drops the connection when a sequence number is skipped, and would keep the forgotten text on screen.
+    const next = packets[before]!;
+    assert.equal(next.type, 'snapshot'); assert.equal(next.cursor.seq, seq + 1);
+    assert.match(String((next as Extract<DisplayPacket, { type: 'snapshot' }>).reason), /forgotten/i);
+    assert.ok(!JSON.stringify(next).includes('Forget this line'));
+  } finally { monitor.close(); store.close(); }
+});
+
+test("the status keeps the conversations' context usage when a review reports its own", () => {
+  const store = new Store(':memory:'); const monitor = new Monitor(config(), store);
+  try {
+    store.log('context_budget', { owner: 'main', tokens: 150_000, inputBudget: 180_000 });
+    store.log('context_budget', { owner: 'review', tokens: 4321, inputBudget: 60_000 });
+    const { status } = monitor.snapshot();
+    assert.equal(status.contextTokens, 150_000); assert.equal(status.inputBudget, 180_000);
+  } finally { monitor.close(); store.close(); }
+});
+
 test('traffic cannot evict the active trigger from the monitor or a connected viewer', () => {
   const store = new Store(':memory:'); const monitor = new Monitor(config(), store); const view = new DisplayModel();
   monitor.subscribe(undefined, packet => view.apply(packet));
