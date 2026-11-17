@@ -519,7 +519,8 @@ export class PiBrain implements Brain {
     this.engaged = new Set(observation.events.filter(event => !ownEvent(event) && !ambientEvent(event)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
-    this.thought = { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: true };
+    // A thought cites what it had in view, not everything the working context has held since it began (ADR-0017).
+    this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: true };
     this.display(monitor => monitor.startRun(this.runId, observation));
     let outcome: 'done' | 'error' | 'interrupted' = 'done';
     try {

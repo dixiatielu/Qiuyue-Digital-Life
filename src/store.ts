@@ -15,6 +15,10 @@ const characters = (value: string): number => [...value].length;
 const id = (prefix: string) => `${prefix}:${randomUUID()}`;
 export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
 /** While the digital life rests, group chat not addressed to it waits instead of starting or steering a thought (ADR-0016). */
+/** Memories and events carry evidence on to what cites them; a plan, pursuit, or the activity cites only what its thought had in view. */
+const carriesEvidence = (recordId: string) => recordId.startsWith('m:') || recordId.startsWith('e:');
+/** A memory and the memories resting on it, through memories alone: what merely had it in view when a plan was set does not rest on it. */
+const restingOn = "dependent(id) AS (SELECT ? UNION SELECT owner_id FROM sources JOIN dependent ON source_id=dependent.id WHERE owner_id LIKE 'm:%')";
 const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND json_extract(source,'$.conversationType') IN ('group','channel','thread') AND addressed=0";
 /** Parameters: whether life wakes may be claimed, then whether the digital life rests. */
 const claimable = `status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') AND (?=0 OR NOT (${restHolds}))`;
@@ -75,7 +79,7 @@ export class Store {
     `);
     this.db.exec('CREATE INDEX IF NOT EXISTS event_conversation ON events(conversation_ref,at); CREATE INDEX IF NOT EXISTS event_actor ON events(actor_ref,at); CREATE INDEX IF NOT EXISTS action_conversation ON actions(conversation,created_at)');
     // sentMessage runs for every quoted message and lifeWakesSince once a minute while idle; without these each scanned its whole table.
-    this.db.exec("CREATE INDEX IF NOT EXISTS action_message ON actions(json_extract(result,'$.message_id')) WHERE status='success'; CREATE INDEX IF NOT EXISTS event_wakes ON events(at) WHERE kind='wake'");
+    this.db.exec("CREATE INDEX IF NOT EXISTS action_message ON actions(json_extract(result,'$.message_id')) WHERE status='success'; CREATE INDEX IF NOT EXISTS event_wakes ON events(at) WHERE kind='wake'; CREATE INDEX IF NOT EXISTS trace_time ON trace(at)");
     for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
     this.db.exec('PRAGMA user_version=2');
   }
@@ -338,8 +342,7 @@ export class Store {
       for (const source of sources) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(memoryId, source);
       if (previous) {
         // A correction invalidates dependent interpretations, while preserving their history.
-        this.db.prepare(`WITH RECURSIVE dependent(id) AS (SELECT ? UNION SELECT owner_id FROM sources JOIN dependent ON source_id=dependent.id)
-          UPDATE memories SET active=0 WHERE id IN (SELECT id FROM dependent) AND id!=?`).run(previous.id, memoryId);
+        this.db.prepare(`WITH RECURSIVE ${restingOn} UPDATE memories SET active=0 WHERE id IN (SELECT id FROM dependent) AND id!=?`).run(previous.id, memoryId);
         this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(memoryId, previous.id);
       }
       this.log('memory_written', { id: memoryId, kind: input.kind, supersedes: input.supersedes, ...(scope ? { scope } : {}) });
@@ -357,8 +360,9 @@ export class Store {
   activeMemories(memoryIds: string[]): Set<string> { return new Set(this.db.prepare('SELECT id FROM memories WHERE active=1 AND id IN (SELECT value FROM json_each(?))').all(json(memoryIds)).map(row => String(row.id))); }
   /** What revising a memory reaches: the memories resting on it, which leave everyday recall with it, and the plans, pursuits, and activity under way that cite any of them. */
   revisionReach(memoryId: string): RevisionReach {
-    const reached = new Set(this.db.prepare('WITH RECURSIVE dependent(id) AS (SELECT ? UNION SELECT owner_id FROM sources JOIN dependent ON source_id=dependent.id) SELECT id FROM dependent').all(memoryId).map(row => String(row.id)));
-    const withdrawn = this.db.prepare('SELECT id, kind, title FROM memories WHERE active=1 AND id!=? AND id IN (SELECT value FROM json_each(?))').all(memoryId, json([...reached])).map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title) }));
+    const resting = json(this.db.prepare(`WITH RECURSIVE ${restingOn} SELECT id FROM dependent`).all(memoryId).map(row => String(row.id)));
+    const withdrawn = this.db.prepare('SELECT id, kind, title FROM memories WHERE active=1 AND id!=? AND id IN (SELECT value FROM json_each(?))').all(memoryId, resting).map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title) }));
+    const reached = new Set(this.db.prepare('SELECT DISTINCT owner_id FROM sources WHERE source_id IN (SELECT value FROM json_each(?))').all(resting).map(row => String(row.owner_id)));
     const activity = this.settings().activity;
     const cites = [
       ...this.wakes().filter(wake => reached.has(wake.id)).map(wake => ({ id: wake.id, kind: wake.kind, title: wake.title })),
@@ -448,20 +452,29 @@ export class Store {
       return true;
     });
   }
+  /** What forgetting a record takes with it: the evidence it rests on, every memory resting on any of that, and what was set with any of it in view.
+   * Memories and events carry evidence. A plan, pursuit, or the activity only cites what its thought had in view (ADR-0017), so one is taken when something forgotten was in its view, with its own wake event, but nothing is reached through the rest of what it had in view. */
   forgetPlan(root: string): string[] {
     if (!this.memory(root) && !this.event(root)) throw new Error('Record does not exist.');
     const selected = new Set<string>([root]);
-    // Explicit forgetting includes original evidence, preventing re-extraction from it.
+    const sourcesOf = this.db.prepare('SELECT source_id FROM sources WHERE owner_id=?'); const ownersOf = this.db.prepare('SELECT owner_id FROM sources WHERE source_id=?');
+    // Explicit forgetting includes original evidence, preventing re-extraction from it. A wake event leads to its plan and stops there.
     const ancestors = [root];
-    while (ancestors.length) for (const row of this.db.prepare('SELECT source_id FROM sources WHERE owner_id=?').all(ancestors.pop()!)) {
-      const source = String(row.source_id);
-      if (!selected.has(source)) { selected.add(source); ancestors.push(source); }
+    while (ancestors.length) {
+      const owner = ancestors.pop()!; if (!carriesEvidence(owner)) continue;
+      for (const row of sourcesOf.all(owner)) { const source = String(row.source_id); if (!selected.has(source)) { selected.add(source); ancestors.push(source); } }
     }
-    const dependents = [...selected];
-    while (dependents.length) for (const row of this.db.prepare('SELECT owner_id FROM sources WHERE source_id=?').all(dependents.pop()!)) {
-      const child = String(row.owner_id);
-      if (!selected.has(child)) { selected.add(child); dependents.push(child); }
-    }
+    const resting = (from: string[]) => {
+      const dependents = [...from];
+      while (dependents.length) for (const row of ownersOf.all(dependents.pop()!)) {
+        const child = String(row.owner_id);
+        if (carriesEvidence(child) && !selected.has(child)) { selected.add(child); dependents.push(child); }
+      }
+    };
+    resting([...selected]);
+    const inView = [...new Set([...selected].flatMap(item => ownersOf.all(item).map(row => String(row.owner_id))))].filter(owner => !selected.has(owner));
+    for (const owner of inView) selected.add(owner);
+    resting(inView);
     return [...selected];
   }
   forget(root: string): string[] {
@@ -490,6 +503,15 @@ export class Store {
     const before = now - days * 86_400_000;
     this.db.prepare('DELETE FROM working_context WHERE updated_at<?').run(before);
     this.db.prepare("DELETE FROM context_records WHERE at<? AND id NOT IN (SELECT j.value FROM working_context,json_each(json_extract(data,'$.messageIds')) j)").run(before);
+    // A plan or pursuit that ended before the period leaves with what it had in view, so only memories and what is still under way keep a raw event (ADR-0006).
+    this.transaction(() => {
+      const ended = "SELECT id FROM wakes WHERE status IN ('done','cancelled') AND due_at<?1 UNION ALL SELECT id FROM pursuits WHERE status!='active' AND updated_at<?1";
+      this.db.prepare(`DELETE FROM sources WHERE owner_id IN (${ended}) OR source_id IN (${ended})`).run(before);
+      this.db.prepare("DELETE FROM wakes WHERE status IN ('done','cancelled') AND due_at<?").run(before);
+      this.db.prepare("DELETE FROM pursuits WHERE status!='active' AND updated_at<?").run(before);
+    });
+    // The diagnostic trace and the per-call ledger are raw records too; the daily budget reads only today's calls.
+    this.db.prepare('DELETE FROM trace WHERE at<?').run(before); this.db.prepare('DELETE FROM calls WHERE at<?').run(before);
     // What an unresolved action cites stays (ADR-0008). Such actions are few, so their sources are read once here;
     // asking per event scanned every action row, with its whole source list, for each expired event.
     const unresolved = this.db.prepare("SELECT rowid FROM actions WHERE status IN ('pending','unknown')").all();

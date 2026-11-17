@@ -75,6 +75,40 @@ test('forgetting removes source, derived memories, state, scheduled work and FTS
   } finally { store.close(); }
 });
 
+test('forgetting and revising reach what rests on a record, and a plan that had it in view, but nothing through the rest of what that plan had in view', () => {
+  const store = new Store(':memory:');
+  try {
+    const note = (title: string, sources: string[]) => store.writeMemory({ kind: 'note', title, content: title, importance: 5, sources }, false);
+    const due = (wakeId: string) => { store.enqueueDue(); return store.db.prepare("SELECT id FROM events WHERE kind='wake' AND source_key=?").get(wakeId)!.id as string; };
+    const [secret, bystander] = [event(store, 'Secret'), event(store, 'Something else said at the time')];
+    const unrelated = note('Unrelated', [bystander.id]);
+    // The first plan was set with the secret, the bystander, and an unrelated memory in view; the second with only the first plan's wake event.
+    const first = store.schedule('Morning walk', 'commitment', Date.now() - 2, [secret.id, bystander.id, unrelated.id]); const firstDue = due(first.id);
+    const diary = note('Walked this morning', [firstDue]);
+    const second = store.schedule('Evening reading', 'commitment', Date.now() - 1, [firstDue, diary.id]); const secondDue = due(second.id);
+    const later = note('Read in the evening', [secondDue]);
+
+    // The diary rests on the first plan's wake event: forgetting it takes that event and its plan, not what the plan had in view.
+    const fromDiary = store.forgetPlan(diary.id);
+    for (const taken of [diary.id, firstDue, first.id, second.id, secondDue, later.id]) assert.ok(fromDiary.includes(taken));
+    for (const kept of [secret.id, bystander.id, unrelated.id]) assert.ok(!fromDiary.includes(kept));
+    // Forgetting the secret takes the plan that had it in view and what rests on that plan's wake event; the chain of later plans stops there.
+    const fromSecret = store.forgetPlan(secret.id);
+    for (const taken of [secret.id, first.id, firstDue, diary.id]) assert.ok(fromSecret.includes(taken));
+    for (const kept of [bystander.id, unrelated.id, second.id, secondDue, later.id]) assert.ok(!fromSecret.includes(kept));
+
+    // Revising the unrelated memory names the plan that cites it; the diary, which only rests on that plan's wake event, stays in everyday recall.
+    const reach = store.revisionReach(unrelated.id);
+    assert.deepEqual(reach.withdrawn, []); assert.deepEqual(reach.cites.map(item => item.id), [first.id]);
+    store.writeMemory({ kind: 'note', title: 'Unrelated', content: 'Revised', importance: 5, sources: [bystander.id], supersedes: unrelated.id }, false);
+    assert.equal(store.memory(diary.id)!.active, true); assert.equal(store.memory(later.id)!.active, true);
+
+    store.forget(secret.id);
+    assert.equal(store.memory(diary.id), undefined); assert.ok(store.memory(later.id)); assert.ok(store.event(bystander.id));
+    assert.deepEqual(store.wakes().map(wake => wake.id), [second.id]);
+  } finally { store.close(); }
+});
+
 test('retention preserves pending events and required evidence; processed watermark is monotonic', () => {
   const store = new Store(':memory:');
   try {
@@ -130,6 +164,32 @@ test('a diary entry about a fictional day is kept as fiction and needs no actual
     assert.throws(() => store.writeMemory(input, false), /Fictional daily life is disabled/);
     assert.equal(store.writeMemory(input, true).fictional, true);
     assert.throws(() => store.writeMemory({ ...input, fictional: false }, true), /must reference IDs/);
+  } finally { store.close(); }
+});
+
+test('a plan or pursuit that ended before the period leaves with what it had in view; what is under way keeps its events', () => {
+  const store = new Store(':memory:');
+  try {
+    const now = Date.now(); const long = now - 100 * 86_400_000;
+    const old = { kind: 'message', at: long, text: 'Old experience', payload: {} };
+    const [planned, pursued, underWay, remembered] = ['planned', 'pursued', 'under way', 'remembered'].map(key => store.receive(qqEvent({ ...old, key }, store))!);
+    store.acknowledge(store.claim(10)!.batchId);
+    const ended = store.schedule('Finished long ago', 'life', long, [planned!.id]); store.finishWake(ended.id, 'done');
+    const open = store.schedule('Still to come', 'commitment', long, [underWay!.id]);
+    const recent = store.schedule('Finished yesterday', 'life', now - 86_400_000, [underWay!.id]); store.finishWake(recent.id, 'done');
+    const pursuit = store.updatePursuit({ title: 'Learning the koto', progress: 'Dropped', fictional: false }, [pursued!.id], false); store.finishPursuit(pursuit.id, 'dropped');
+    store.db.prepare('UPDATE pursuits SET updated_at=? WHERE id=?').run(long, pursuit.id);
+    store.writeMemory({ kind: 'experience', title: 'Kept', content: 'Old experience', importance: 8, sources: [remembered!.id] }, false);
+    store.db.prepare('INSERT INTO trace(at,kind,data) VALUES (?,?,?)').run(long, 'old', '{}'); store.log('new', {});
+    store.db.prepare('INSERT INTO calls VALUES (?,?,?)').run('call:old', long, 'run'); store.chargeCall('run', null);
+    assert.equal(store.retain(90, now), 2);
+    assert.equal(store.event(planned!.id), undefined); assert.equal(store.event(pursued!.id), undefined);
+    assert.ok(store.event(underWay!.id)); assert.ok(store.event(remembered!.id));
+    assert.deepEqual(store.wakes().map(wake => wake.id), [open.id]); assert.deepEqual(store.pastLifePlans(8).map(wake => wake.id), [recent.id]);
+    assert.equal(Number(store.db.prepare('SELECT count(*) AS n FROM pursuits').get()!.n), 0);
+    assert.equal(Number(store.db.prepare('SELECT count(*) AS n FROM sources WHERE owner_id IN (?,?)').get(ended.id, pursuit.id)!.n), 0);
+    assert.ok(!store.logs().some(log => log.kind === 'old')); assert.ok(store.logs().some(log => log.kind === 'new')); assert.equal(store.dailyCalls(now), 1);
+    assert.equal(Number(store.db.prepare('SELECT count(*) AS n FROM calls').get()!.n), 1);
   } finally { store.close(); }
 });
 

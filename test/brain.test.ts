@@ -557,3 +557,24 @@ test('when a rest ends, the group chat it held comes in one observation as a cha
     assert.doesNotMatch(record.text, /Night 0\b/); assert.match(record.text, /Night 39\b/);
   } finally { f.store.close(); }
 });
+
+test('a thought cites what it had in view, not what earlier thoughts in the same working context saw', async () => {
+  const f = fixture();
+  try {
+    f.cfg.memory.recentEvents = 0; // Recent events are in view of every thought; leave only what each one observed.
+    const first = event(f.store, 'First message');
+    f.faux.setResponses([answer(call('qq_main__send_group_msg', { group_id: 100, message: 'One' }))]);
+    await f.brain.run(f.store.claim(10)!);
+    const second = event(f.store, 'Second message');
+    f.faux.setResponses([
+      context => { assert.ok(JSON.stringify(context).includes('First message')); return answer([call('schedule_activity', { title: 'Follow up', kind: 'commitment', at: new Date(Date.now() + 86_400_000).toISOString() }), call('qq_main__send_group_msg', { group_id: 100, message: 'Two' })]); },
+      answer('Rest'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    const sources = (message: string) => f.store.actions().find(action => action.args.message === message)!.sources;
+    assert.deepEqual(sources('One'), [first.id]); assert.deepEqual(sources('Two'), [second.id]);
+    // Forgetting the first message reaches what was done with it in view, not the plan a later thought set.
+    const plan = f.store.wakes()[0]!;
+    assert.ok(!f.store.forgetPlan(first.id).includes(plan.id)); assert.ok(f.store.forgetPlan(second.id).includes(plan.id));
+  } finally { f.store.close(); }
+});
