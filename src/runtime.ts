@@ -83,6 +83,9 @@ export class LifeRuntime {
       } else {
         const timeout = this.config.limits.runTimeoutMs === null ? undefined : setTimeout(() => this.brain.abort(), this.config.limits.runTimeoutMs);
         this.work = this.brain.run(observation).catch(error => {
+          // A thought the operator's change ended did not fail: its events are observed again at once, with nothing to wait out.
+          const now = this.store.settings();
+          if (now.paused || now.generation !== settings.generation) { this.store.log('thought_interrupted', { message: errorText(error) }); return; }
           this.store.log('thought_error', { message: errorText(error) }); this.retryAfter = Date.now() + 30_000;
         }).finally(() => {
           if (timeout !== undefined) clearTimeout(timeout);
@@ -179,7 +182,7 @@ export class LifeRuntime {
       if (command === 'pause' || command === 'resume') this.store.setSetting('paused', command === 'pause');
       else if (command === 'life' && typeof value === 'boolean') this.store.setSetting('lifeEnabled', value);
       else throw new Error('Unknown control command.');
-      this.store.bumpGeneration();
+      this.store.bumpGeneration(true);
     });
     this.brain.abort(); this.reviewer?.abort();
     if (command === 'resume') this.retryAfter = 0;

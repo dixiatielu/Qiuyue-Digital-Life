@@ -138,7 +138,12 @@ export class Store {
     });
   }
   settings(): LifeSettings { return { paused: this.setting('paused'), lifeEnabled: this.setting('lifeEnabled'), generation: this.setting('generation'), activity: this.setting('activity') }; }
-  bumpGeneration() { this.setSetting('generation', this.setting<number>('generation') + 1); }
+  /** A new management generation ends whatever is in flight. The saved working context ends with the old one too, unless the change leaves what it holds untouched, as pausing, resuming, and the life switch do (ADR-0004). */
+  bumpGeneration(carryContext = false) {
+    const next = this.setting<number>('generation') + 1;
+    if (carryContext) this.db.prepare('UPDATE working_context SET generation=? WHERE id=1 AND generation=?').run(next, next - 1);
+    this.setSetting('generation', next);
+  }
   log(kind: string, data: unknown) { const at = Date.now(); const row = this.db.prepare('INSERT INTO trace(at,kind,data) VALUES (?,?,?)').run(at, kind, json(data)); this.notify({ kind: 'trace', at, id: Number(row.lastInsertRowid), name: kind, data }); }
   logs(limit = 30) { return this.db.prepare('SELECT * FROM trace ORDER BY id DESC LIMIT ?').all(limit).map(row => ({ id: Number(row.id), at: Number(row.at), kind: String(row.kind), data: parse(row.data) })); }
   visibleHistory() {

@@ -23,7 +23,7 @@ export function handleControl(store: Store, request: ControlRequest, runtime?: L
   if (command === 'pause' || command === 'resume' || command === 'life') {
     if (command === 'life' && !['on', 'off'].includes(sub ?? '')) throw new Error('Usage: life on|off');
     if (runtime) return runtime.control(command, sub === 'on');
-    store.transaction(() => { store.setSetting(command === 'life' ? 'lifeEnabled' : 'paused', command === 'life' ? sub === 'on' : command === 'pause'); store.bumpGeneration(); });
+    store.transaction(() => { store.setSetting(command === 'life' ? 'lifeEnabled' : 'paused', command === 'life' ? sub === 'on' : command === 'pause'); store.bumpGeneration(true); });
     return store.status();
   }
   if (command === 'memory') {

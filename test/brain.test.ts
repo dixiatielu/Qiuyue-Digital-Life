@@ -8,6 +8,7 @@ import { LifeRuntime } from '../src/runtime.js';
 import { ActionNotDispatchedError } from '../src/platform.js';
 import { eventRef, type Store } from '../src/store.js';
 import { ChatRecord } from '../src/record.js';
+import { handleControl } from '../src/control.js';
 
 /** A private message from person 7. */
 const say = (store: Store, text: string) => store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: Date.now(), text, actorId: 7, payload: { message_type: 'private', message: [{ type: 'text', data: { text } }] } }, store))!;
@@ -86,6 +87,20 @@ test('operator pause aborts current generation but leaves newly received events 
     f.faux.setResponses([answer('Read the backlog and stay quiet')]); runtime.control('resume'); await runtime.tick(); await runtime.idle();
     assert.equal(f.store.processedCount(), 2);
   } finally { release.resolve(); await runtime.stop(); f.store.close(); }
+});
+
+test('a thought the operator interrupts is observed again at once and is not recorded as an error', async () => {
+  const entered = deferred(); const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
+  try {
+    event(f.store); f.faux.setResponses([deciding(entered, 'unused')]);
+    runtime.start(); await entered.promise;
+    runtime.control('life', false); await runtime.idle();
+    assert.equal(f.store.pending(), 1);
+    f.faux.setResponses([answer('Seen again')]); await runtime.tick(); await runtime.idle();
+    assert.equal(f.store.pending(), 0);
+    const kinds = f.store.logs(100).map(log => log.kind);
+    assert.ok(kinds.includes('thought_interrupted')); assert.ok(!kinds.includes('thought_error'));
+  } finally { await runtime.stop(); f.store.close(); }
 });
 
 test('daily budget stops additional model calls while ingestion remains available', async () => {
@@ -605,4 +620,25 @@ test('a thought cites what it had in view, not what earlier thoughts in the same
     const plan = f.store.wakes()[0]!;
     assert.ok(!f.store.forgetPlan(first.id).includes(plan.id)); assert.ok(f.store.forgetPlan(second.id).includes(plan.id));
   } finally { f.store.close(); }
+});
+
+test('pausing, resuming, and the life switch keep the working context; a change to what it holds still starts a fresh one', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
+  try {
+    event(f.store, 'Do you know this tune?'); f.faux.setResponses([answer('Humming it quietly to herself')]);
+    await f.brain.run(f.store.claim(10)!);
+    runtime.control('pause'); runtime.control('resume'); runtime.control('life', true); runtime.control('life', false);
+    event(f.store, 'Still there?');
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /Humming it quietly to herself/); return answer('Yes'); }]);
+    await f.brain.run(f.store.claim(10)!);
+    // A restart after a pause continues it as well.
+    runtime.control('pause'); f.restart(); handleControl(f.store, { args: ['resume'] });
+    event(f.store, 'And after a restart?');
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /Humming it quietly to herself/); return answer('Yes'); }]);
+    await f.brain.run(f.store.claim(10)!);
+    f.store.bumpGeneration(); // As forgetting or correcting a memory does.
+    event(f.store, 'And now?');
+    f.faux.setResponses([context => { assert.doesNotMatch(JSON.stringify(context.messages), /Humming it quietly to herself/); return answer('Starting afresh'); }]);
+    await f.brain.run(f.store.claim(10)!);
+  } finally { await runtime.stop(); f.store.close(); }
 });

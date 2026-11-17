@@ -43,7 +43,7 @@ const labels = () => ({
   context_summary_completed: t('Working context summarized', '工作上下文已整理'), context_compacted: t('Working context organized', '工作上下文已整理'), context_pruned: t('Older results condensed', '较早的结果已精简'), context_folded: t('Older content folded', '较早的内容已收起'), context_compaction_skipped: t('Context summarization skipped', '本次跳过上下文整理'),
   review_started: t('Looking back on recent experiences', '开始整理最近的记忆'), review_finished: t('Memory review completed', '记忆整理完成'), review_stopped: t('Memory review stopped', '记忆整理已中止'),
   connection_opened: t('Connected again', '连接已恢复'), connection_closed: t('Connection interrupted', '连接已断开'), connection_error: t('Connection needs attention', '连接出现异常'),
-  runtime_error: t('Something needs attention', '运行出现异常'), thought_error: t('This thought ran into a problem', '这轮思考遇到了问题'), thought_preempted: t('New information changed her attention', '新消息打断了当前思考'),
+  runtime_error: t('Something needs attention', '运行出现异常'), thought_error: t('This thought ran into a problem', '这轮思考遇到了问题'), thought_interrupted: t('A management change ended this thought', '管理操作中止了这轮思考'), thought_preempted: t('New information changed her attention', '新消息打断了当前思考'),
   memory_forgotten: t('Memory removed', '已遗忘指定记忆'), control: t('Runtime settings changed', '运行状态已调整'),
 });
 
