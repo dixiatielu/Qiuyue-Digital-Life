@@ -58,11 +58,13 @@ export class SnowLumaAdapter implements SocialAdapter {
   private connectedOnce = false;
   private closing = false;
   private recovery?: Promise<void>;
+  /** Counts connection drops, so a recovery can tell that the connection it was verifying is gone. */
+  private drops = 0;
   private anchors = new Map<number, number | undefined>();
   constructor(private config: AdapterConfig, private store: Store, private notify: () => void, credential: CredentialReader = environmentCredential) {
     this.client = new SnowLumaWebSocketClient({ url: config.url ?? 'ws://127.0.0.1:3001', accessToken: credential(config.tokenEnv), reconnect: true, requestTimeoutMs: 20_000 });
     this.client.onEvent(raw => { if (this.closing) return; const event = normalizeEvent(raw as Record<string, unknown>, config, id => store.sentMessage(id, { platform: 'qq', accountId: config.accountId })); if (event && this.receive(event)?.status === 'pending') notify(); });
-    this.client.on('close', () => { this.verified = false; if (!this.closing) { this.captureAnchors(); store.log('connection_closed', {}); } });
+    this.client.on('close', () => { this.verified = false; this.drops++; if (!this.closing) { this.captureAnchors(); store.log('connection_closed', {}); } });
     this.client.on('error', error => { if (!this.closing) store.log('connection_error', { message: errorText(error) }); });
     this.client.on('open', () => { if (this.connectedOnce && !this.closing) void this.recover().catch(error => { if (!this.closing) store.log('recovery_error', { message: errorText(error) }); }); });
   }
@@ -71,12 +73,17 @@ export class SnowLumaAdapter implements SocialAdapter {
   async connect() { this.captureAnchors(); await this.client.connect(); this.connectedOnce = true; await this.recover(); }
   async close() { this.closing = true; this.client.close(); await this.recovery?.catch(() => {}); }
   private recover() {
-    this.recovery ??= this.verifyAndRecover().finally(() => { this.recovery = undefined; });
+    this.recovery ??= (async () => {
+      // A request made after a drop waits for the SDK to reconnect, so a recovery can outlast the connection it verified.
+      // That one stops, and the connection that returned is verified and recovered afresh; until then nothing is dispatched.
+      let drops: number;
+      do { drops = this.drops; await this.verifyAndRecover(() => this.closing || drops !== this.drops); } while (drops !== this.drops && !this.closing && this.client.isConnected);
+    })().finally(() => { this.recovery = undefined; });
     return this.recovery;
   }
-  private async verifyAndRecover() {
+  private async verifyAndRecover(stale: () => boolean) {
     const login = await this.client.getLoginInfo();
-    if (this.closing) return;
+    if (stale()) return;
     if (login.user_id !== Number(this.config.accountId)) { this.client.close(); throw new Error('The SnowLuma account does not match the configured account.'); }
     this.verified = true;
     this.store.log('connection_opened', {});
@@ -87,7 +94,7 @@ export class SnowLumaAdapter implements SocialAdapter {
         let messageId = anchor;
         for (let page = 0; page < 10; page++) {
           const history = await this.client.raw('get_group_msg_history', { group_id: groupId, message_id: messageId, count: 100, reverse_order: !anchor });
-          if (this.closing) return;
+          if (stale()) return;
           const messages = history.messages ?? [];
           for (const message of messages) {
             const event = normalizeEvent({ ...message, post_type: 'message', self_id: Number(this.config.accountId), group_id: groupId }, this.config, id => this.store.sentMessage(id, { platform: 'qq', accountId: this.config.accountId }));
@@ -97,7 +104,7 @@ export class SnowLumaAdapter implements SocialAdapter {
           if (!anchor || messages.length < 100 || next === messageId || next == null) break;
           messageId = Number(next);
         }
-      } catch (error) { if (this.closing) return; this.store.log('history_unavailable', { groupId, message: errorText(error) }); }
+      } catch (error) { if (stale()) return; this.store.log('history_unavailable', { groupId, message: errorText(error) }); }
       this.receive({ key: `gap:qq:${this.config.accountId}:${groupId}:${Date.now()}`, kind: 'perception_gap', at: Date.now(), source: { platform: 'qq', accountId: this.config.accountId, instance: this.config.id, conversation: conversationRef({ platform: 'qq', accountId: this.config.accountId }, 'group', String(groupId)), conversationType: 'group', own: true, addressed: false, attention: 'normal' }, text: 'Connection established or restored: message history recovery was attempted. Notices and messages outside the recovery scope during the offline period may be incomplete.', payload: { anchor: anchor ?? null } });
     }
     this.notify();

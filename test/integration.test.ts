@@ -69,6 +69,36 @@ test('SnowLuma adapter uses the official SDK, stores notices and history, and pa
   }
 });
 
+test('a connection that drops while history is being recovered is verified again once it returns', async () => {
+  const cfg = config(); const store = new Store(':memory:');
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
+  const addr = server.address(); assert.ok(typeof addr === 'object' && addr);
+  cfg.adapters[0]!.url = `ws://127.0.0.1:${addr.port}`;
+  let connections = 0;
+  server.on('connection', socket => {
+    const nth = ++connections;
+    socket.on('message', data => {
+      const request = JSON.parse(data.toString());
+      // The second connection is lost while the first of the two groups is being read.
+      if (nth === 2 && request.action === 'get_group_msg_history') { socket.terminate(); return; }
+      const result = request.action === 'get_login_info' ? { user_id: 900, nickname: 'Qiuyue' } : request.action === 'get_group_msg_history' ? { messages: [] } : { message_id: -55 };
+      socket.send(JSON.stringify({ status: 'ok', retcode: 0, data: result, echo: request.echo }));
+    });
+  });
+  const recovered = [deferred(), deferred()]; let finished = 0;
+  const adapter = new SnowLumaAdapter(cfg.adapters[0]!, store, () => recovered[finished++]?.resolve());
+  try {
+    await adapter.connect(); await recovered[0]!.promise;
+    [...server.clients][0]!.terminate();
+    await recovered[1]!.promise;
+    assert.equal(connections, 3);
+    assert.deepEqual(await adapter.execute('send_group_msg', { group_id: 100, message: 'Here' }), { message_id: -55 });
+  } finally {
+    await adapter.close(); for (const client of server.clients) client.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve())); store.close();
+  }
+});
+
 test('every exposed action reaches the protocol unchanged, including multi-frame streams', async () => {
   const cfg = config(); const store = new Store(':memory:');
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
