@@ -323,6 +323,22 @@ test('the working context identity follows the persona, prompt, model, and tools
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a restart keeps waiting when her state cannot be read, instead of failing the page process', async () => {
+  const state = { broken: true };
+  const mirror = { status: {} } as unknown as LiveMirror;
+  const reader = { activity: () => { if (state.broken) throw new Error('database is locked'); return { reviewing: undefined, lastTrace: undefined, callStarting: false }; } } as unknown as LifeReader;
+  const commands: string[] = [];
+  const jobs = new ServiceJobs(mirror, reader, 5, async (unit, action) => { commands.push(`${action} ${unit}`); });
+  try {
+    const job = jobs.start('life.service', 'restart', true);
+    await new Promise(done => setTimeout(done, 30));
+    assert.equal(job.state, 'waiting'); assert.deepEqual(job.waitingFor, ['unknown']); assert.deepEqual(commands, []);
+    state.broken = false;
+    await new Promise(done => setTimeout(done, 30));
+    assert.deepEqual(commands, ['restart life.service']);
+  } finally { jobs.close(); }
+});
+
 test('a restart waits until no thought or review is under way, and gives up at its deadline', async () => {
   const state = { busy: true, reviewing: undefined as number | undefined };
   const mirror = { get status() { return state.busy ? { busy: { stage: 'thinking', since: 0 } } : {}; } } as unknown as LiveMirror;

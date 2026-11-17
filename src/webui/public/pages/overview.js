@@ -2,7 +2,7 @@ import { ago, api, Badge, Card, ContextNote, duration, failed, html, Loading, Mo
 
 import { ActivityFeed } from '../activity-feed.js';
 
-const reasonLabel = reason => ({ thinking: t('a thought is under way', '正在思考'), reviewing: t('a memory review is under way', '正在整理记忆（review）'), calling: t('a model call is starting', '正在发起模型调用') })[reason] ?? reason;
+const reasonLabel = reason => ({ thinking: t('a thought is under way', '正在思考'), reviewing: t('a memory review is under way', '正在整理记忆（review）'), calling: t('a model call is starting', '正在发起模型调用'), unknown: t('her state could not be read', '暂时读不到她的状态') })[reason] ?? reason;
 const fileLabel = name => ({ config: 'config.json', persona: t('persona file', '人格文件'), prompt: t('system prompt file', '系统提示词文件'), credentials: t('credentials', '凭据文件') })[name] ?? name;
 
 function recentActions(actions, liveItems) {

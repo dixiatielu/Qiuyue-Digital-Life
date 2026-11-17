@@ -114,7 +114,8 @@ export class ServiceJobs {
   private poll(whenIdle: boolean) {
     const job = this.job!;
     if (job.state !== 'waiting') return;
-    job.waitingFor = whenIdle ? busyReasons(this.mirror, this.reader) : [];
+    // A database that cannot be read just now says nothing either way: wait on, rather than let the error escape the timer and end this process.
+    try { job.waitingFor = whenIdle ? busyReasons(this.mirror, this.reader) : []; } catch { job.waitingFor = ['unknown']; }
     if (job.waitingFor.length) {
       if (Date.now() >= job.deadline) { job.state = 'failed'; job.message = 'The daemon stayed busy until the deadline; nothing was restarted.'; return; }
       this.timer = setTimeout(() => this.poll(whenIdle), this.pollMs);

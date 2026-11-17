@@ -87,11 +87,6 @@ export class WebUi {
     const raw = this.files.raw();
     try { return { raw, config: loadConfig(this.files.configPath) }; } catch (error) { return { raw, error: errorText(error) }; }
   }
-  private config() {
-    const { config, error } = this.current();
-    if (!config) throw new HttpError(409, `The configuration does not load: ${error}`);
-    return config;
-  }
   private control(args: string[], yes = false) {
     const { config } = this.current();
     return config ? requestControl(config, { args, yes }) : callControl(this.paths.socket, { args, yes });
@@ -141,7 +136,7 @@ export class WebUi {
       return this.jobs.start(unit, body.action, body.whenIdle !== false);
     });
     this.on('DELETE', '/api/service/job', () => this.jobs.cancel() ?? null);
-    this.on('GET', '/api/logs', ({ url }) => ({ text: tail(this.paths.log, Math.min(Number(url.searchParams.get('lines')) || 200, 2000)), trace: this.reader.trace(Math.min(Number(url.searchParams.get('trace')) || 50, 500)) }));
+    this.on('GET', '/api/logs', ({ url }) => ({ text: tail(this.paths.log, Math.min(Math.max(1, Number(url.searchParams.get('lines')) || 200), 2000)), trace: this.reader.trace(Math.min(Math.max(1, Number(url.searchParams.get('trace')) || 50), 500)) }));
     this.on('GET', '/api/model-usage', () => this.reader.modelUsage());
     this.on('POST', '/api/models/resolve', ({ body }) => {
       const config = this.files.check(body.raw);

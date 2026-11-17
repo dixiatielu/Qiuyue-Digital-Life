@@ -33,12 +33,12 @@ const routine = new Set(['model_request_started', 'model_request_finished', 'con
 const alerts = new Set(['error', 'failed', 'unknown', 'interrupted', 'aborted']);
 const labels = () => ({
   remember: t('Keeping a memory', '留下一段记忆'), recall: t('Looking back', '回想过往'), read_event: t('Reading an earlier event', '查看先前的经历'), read_chat_record: t('Catching up on a conversation', '翻看聊天记录'),
-  set_activity: t('Updating her activity', '更新当前活动'), schedule_wake: t('Making a plan', '安排之后的事'), cancel_wake: t('Adjusting a plan', '调整之后的安排'),
+  set_activity: t('Updating her activity', '更新当前活动'),
   schedule_activity: t('Making a plan', '安排之后的事'), finish_activity: t('Wrapping up a plan', '结束一项安排'), update_pursuit: t('Progress on something she cares about', '给持续在做的事记下新进展'), finish_pursuit: t('Closing a pursuit', '结束一件持续在做的事'), retire_memory: t('Setting an old understanding aside', '放下一条不再适用的理解'), inspect_actions: t('Checking what happened', '确认行动的结果'), read_context: t('Revisiting an earlier exchange', '回看之前的思考记录'),
   imagen: t('Creating an image', '创作一张图片'), view_drawing: t('Looking at a drawing', '查看自己的作品'), view_event_image: t('Looking at a picture', '查看聊天图片'),
   send_group_msg: t('Sending a message', '发送消息'), send_private_msg: t('Sending a message', '发送消息'), send_msg: t('Sending a message', '发送消息'), sendMessage: t('Sending a message', '发送消息'),
   set_msg_emoji_like: t('Reacting to a message', '用表情回应消息'), send_poke: t('Poking someone', '戳一戳'), group_poke: t('Poking someone', '戳一戳'), friend_poke: t('Poking someone', '戳一戳'),
-  delete_msg: t('Recalling a message', '撤回消息'), web_search: t('Searching the web', '查找网上的信息'), web_fetch: t('Reading a page', '阅读网页'),
+  delete_msg: t('Recalling a message', '撤回消息'), search_web: t('Searching the web', '查找网上的信息'), read_webpage: t('Reading a page', '阅读网页'),
   model_request_started: t('Waiting for the model', '正在等待模型'), model_request_finished: t('Model request finished', '模型调用结束'),
   context_summary_completed: t('Working context summarized', '工作上下文已整理'), context_compacted: t('Working context organized', '工作上下文已整理'), context_pruned: t('Older results condensed', '较早的结果已精简'), context_folded: t('Older content folded', '较早的内容已收起'), context_compaction_skipped: t('Context summarization skipped', '本次跳过上下文整理'),
   review_started: t('Looking back on recent experiences', '开始整理最近的记忆'), review_finished: t('Memory review completed', '记忆整理完成'), review_stopped: t('Memory review stopped', '记忆整理已中止'),

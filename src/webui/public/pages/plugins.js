@@ -48,7 +48,7 @@ function Permissions({ form, account }) {
   };
   const needle = query.trim().toLowerCase();
   const shown = actions.filter(action => (!category || action.category === category) && (!needle || action.name.toLowerCase().includes(needle) || (action.summary ?? '').toLowerCase().includes(needle))
-    && (view === 'all' || (view === 'allowed') === allowed(action.name) || (view === 'readonly' && action.readOnly)));
+    && (view === 'all' || (view === 'readonly' ? action.readOnly : (view === 'allowed') === allowed(action.name))));
   const count = actions.filter(action => allowed(action.name)).length;
   return html`<${Card} title=${`${account.id} · ${t('QQ interface permissions', 'QQ 接口权限')}`} actions=${html`<span class="muted small">${t(`${count} of ${actions.length} allowed`, `已允许 ${count} / ${actions.length}`)}</span>`}>
     <p class="muted small">${t('Native SnowLuma interfaces she may call, by their original names. Read-only queries and actions are both subject to these. A plugin switch never grants an interface.', '她可以按原名调用的 SnowLuma 原生接口。只读查询和行动都受这里限制。插件开关不会授予接口权限。')}
