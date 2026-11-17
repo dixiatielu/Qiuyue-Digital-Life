@@ -164,14 +164,22 @@ export class DrawingLibrary {
     this.removeFiles(item);
     return { id, deleted: true };
   }
-  usage(id: string) {
+  /** Where each of these pictures was sent, found in one pass over the actions rather than one pass per picture. */
+  private usages(ids: string[]) {
+    const found = new Map<string, { id: string; kind: string; status: string; at: number; target: string }[]>(ids.map(id => [id, []]));
     // Inspect only media fields, so mentioning an ID in a text message is not counted as sharing the picture.
-    const uses = (value: any, key = ''): boolean => typeof value === 'string' ? ['file', 'images'].includes(key) && value === id
-      : Array.isArray(value) ? value.some(item => uses(item, key)) : value && typeof value === 'object' ? Object.entries(value).some(([key, child]) => uses(child, key)) : false;
-    return this.db.prepare('SELECT id,kind,args,status,created_at,conversation FROM actions WHERE instr(args,?)>0 ORDER BY created_at DESC').all(id)
-      .flatMap(row => { const args = parse<Record<string, any>>(row.args); return uses(args) ? [{ id: String(row.id), kind: String(row.kind), status: String(row.status), at: Number(row.created_at),
-        target: row.conversation ? String(row.conversation) : String(row.kind) }] : []; });
+    const media = (value: any, key: string, into: Set<string>): void => {
+      if (typeof value === 'string') { if (['file', 'images'].includes(key) && found.has(value)) into.add(value); }
+      else if (Array.isArray(value)) for (const item of value) media(item, key, into);
+      else if (value && typeof value === 'object') for (const [name, child] of Object.entries(value)) media(child, name, into);
+    };
+    if (ids.length) for (const row of this.db.prepare("SELECT id,kind,args,status,created_at,conversation FROM actions WHERE instr(args,'drawing:')>0 ORDER BY created_at DESC").iterate()) {
+      const sent = new Set<string>(); media(parse<Record<string, any>>(String(row.args)), '', sent);
+      for (const id of sent) found.get(id)!.push({ id: String(row.id), kind: String(row.kind), status: String(row.status), at: Number(row.created_at), target: row.conversation ? String(row.conversation) : String(row.kind) });
+    }
+    return found;
   }
+  usage(id: string) { return this.usages([id]).get(id)!; }
   detail(id: string) {
     const item = this.get(id); return item ? { ...item, available: this.available(item), uses: this.usage(id) } : undefined;
   }
@@ -197,8 +205,9 @@ export class DrawingLibrary {
     for (const list of [lexical, meanings]) list.forEach((row, rank) => { row.score += 1 / (60 + rank); });
     const ranked = scored.filter(row => !query || row.score > 0).sort((a, b) => b.score - a.score || b.item.createdAt - a.item.createdAt || a.item.id.localeCompare(b.item.id));
     const offset = options.offset ?? 0, limit = options.limit ?? 5;
-    const items = ranked.slice(offset, offset + limit).map(({ item, matches, semantic }) => {
-      const uses = this.usage(item.id); const shared = uses.filter(use => use.status === 'success');
+    const page = ranked.slice(offset, offset + limit); const used = this.usages(page.map(({ item }) => item.id));
+    const items = page.map(({ item, matches, semantic }) => {
+      const shared = used.get(item.id)!.filter(use => use.status === 'success');
       return { id: item.id, title: item.title, description: item.description.slice(0, 300), prompt: item.prompt.slice(0, 200), tags: item.tags, createdAt: item.createdAt, timeSource: item.timeSource,
         favorite: item.favorite, archived: item.archived, deletedAt: item.deletedAt, available: this.available(item), needsDescription: !item.description.trim(), revision: item.revision,
         width: item.width, height: item.height, bytes: item.bytes, matches: [...matches, ...(semantic ? ['meaning'] : [])],
