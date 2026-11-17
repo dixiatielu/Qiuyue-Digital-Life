@@ -12,7 +12,7 @@ A locally hosted digital life with a persistent persona and memory:
 - **Autonomous socializing:** Treats incoming messages as environmental perceptions, deciding on its own when to chime in, react, send images, or stay silent—and preempts unfinished thoughts when new replies arrive.
 - **Grounded growth:** Builds on the operator's core persona through independent reviews, learning group norms, expression habits, and impressions from real interaction evidence without self-reinforcing loops.
 - **Personal life:** Carries pursuits across days, spends quiet stretches browsing online feeds, communities, and the web or curating its own drawing gallery, and schedules its own sleep and rest.
-- **Native interaction:** Exposes complete permitted native APIs to the same Agent through platform adapters, paired with hot-reloadable plugins for system faces, semantic sticker recall, and card sharing to use platform features like a real user.
+- **Native interaction:** Exposes complete permitted native APIs to the same Agent through platform adapters, paired with plugins for system faces, semantic sticker recall, and card sharing, plus capability and user plugins that reload without a restart, to use platform features like a real user.
 - **Local control:** Separates social requests from runtime management, with a live TUI and standalone WebUI for status, separate thinking/review/compaction models, and provenance-aware memory editing.
 
 ## Quick start

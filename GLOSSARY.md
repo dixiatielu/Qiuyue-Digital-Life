@@ -28,6 +28,10 @@ _Avoid_: a request that must be answered
 A group of environment events that the digital life reads and understands together; it may include several occurrences over a period of time.
 _Avoid_: one event necessarily requiring one independent thought
 
+**Working Context**:
+What the model reads in a thought: the instructions, the observations and exchanges since the last compaction, and a summary of what came before. It is saved between thoughts and continued after a restart, and begins afresh when the instructions, model, accounts, or tools change.
+_Avoid_: long-term memory, chat history, model session
+
 **Ambient Event**:
 An environment event that carries little information on its own, such as a notice that someone is typing or an emoji reaction to a message. It is still perceived and read together with the next observation that other events bring about, but it does not start or steer thinking by itself; if nothing else arrives, it is eventually observed on its own.
 _Avoid_: discarded noise, a connection heartbeat, an event that demands attention
@@ -55,6 +59,10 @@ _Avoid_: usefulness to the operator
 **Memory Consolidation**:
 The digital life's own activity of reviewing experiences, selecting what merits long-term retention, and forming or revising long-term understanding.
 _Avoid_: life judgments written by another subject
+
+**Memory Review**:
+The part of memory consolidation that reads back the chat record of each setting since its last review and revises personal habits, practices, and impressions. It runs apart from the conversations, in a working context of its own.
+_Avoid_: compaction, a summary of the working context
 
 **Spontaneous Recall**:
 The emergence of relevant past experiences and understanding prompted by current people, topics, or activities.
@@ -136,6 +144,10 @@ _Avoid_: completed real action
 A later time chosen by the digital life to reconsider or continue an activity.
 _Avoid_: mechanical replies at a fixed frequency
 
+**Life Wake**:
+A thought started for the digital life's own life rather than by anything in its chats: at a self-directed wake-up it arranged, or as a free-time wake. It comes only while autonomous life mode is on.
+_Avoid_: a reply trigger, a scheduled message
+
 **Free-time Wake**:
 A life wake the program offers when the digital life's chats have been quiet for a while and it is not resting. It says only that the time is free; the digital life may use it or rest.
 _Avoid_: a fixed-frequency timer, a reminder to do a particular activity
@@ -183,6 +195,14 @@ _Avoid_: an automatically effective management command
 **Platform Account**:
 An identity through which the Agent participates in a platform. One Agent may use several platform accounts while retaining one persona, memory, and continuing state.
 _Avoid_: a separate Agent per account, transport identity
+
+**Platform Adapter**:
+The part of the program through which a platform account is reached. It offers the platform's native operations as tools and publishes its events; replacing one does not change who the Agent or its contacts are.
+_Avoid_: platform account, a plugin for one feature
+
+**Plugin**:
+A capability added to the digital life as one unit: its tools, what it adds to observations, and its background work. Built-in plugins ship with the program; user plugins live in the operator's plugin directory and reload between thoughts.
+_Avoid_: a model tool, platform adapter
 
 **Conversation**:
 A social setting in which messages and other interactions take place, identified within a platform account. A conversation can be a private chat, group, channel, or thread; changing the program used to access it does not create a new social setting.

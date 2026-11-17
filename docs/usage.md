@@ -75,6 +75,19 @@ To let the digital life generate images with `imagen`, including photorealistic 
 
 `enabled` turns autonomous life on at first start, and `allowFiction` permits fictional daily life. While autonomous life is on, `freeTime` offers a life wake when the chats have been quiet for a stretch between `quietMinMs` and `quietMaxMs`, at least `gapMs` from any other life wake and at most `perDay` a day. The digital life holds it back by marking rest on the activity it will wake for.
 
+### Limits (`limits`)
+
+Four budgets are off (`null`) in the example; a positive integer turns one on.
+
+| Key | When set |
+| --- | --- |
+| `modelCallsPerDay` | Thinking stops for the rest of the day (from 00:00 +08:00) after this many model calls, counting compaction and memory review. Events are still received and wait. |
+| `actionsPerHour` | A further external action within the hour is refused, and the digital life is told so. |
+| `runTimeoutMs` | A thought is aborted after this long. |
+| `maxTurnsPerRun` | A thought ends after this many model calls. |
+
+`debounceMs` (default 1200) is how long the chats must be quiet before a thought starts; 0 starts at once. `maxPreemptions` (default 2) is how many times in a row a newer message addressed to the digital life may make it decide again; 0 turns that off.
+
 ## Persona and system prompt
 
 In `persona.md`, describe the digital life's identity, world, personality, and initial preferences. The [example persona](../persona.example.md) is a complete, editable character with examples of expression and social habits. These are starting preferences that can develop through experience, not a universal style template. Plugins supply platform activities and usage guidance separately.
@@ -120,6 +133,7 @@ A web page for the same work: live status and timeline, pause and life switches,
 - **Saving:** every save checks the configuration the way the daemon loads it, refuses a file changed elsewhere since the page read it, and keeps earlier configuration, persona, and prompt versions under `data/webui/history`. Credentials have no value history; only the names, times, and kinds of the latest 100 changes are recorded in the credential file. Plugin settings can be applied with Reload on the capabilities page; core settings take effect when the daemon restarts. The page reports the running plugin versions and whether a reload renews working context; changing the persona, system prompt, model, or tool set starts a fresh one.
 - **System prompt:** saving it writes `system-prompt.md` beside `config.json` (outside git) and sets `systemPromptFile`; without that setting the built-in prompt is used. The page warns when the built-in prompt has changed since your file was saved.
 - **Restarts:** set `webui.service` to the daemon's systemd user unit, such as `qiuyue-digital-life.service`, to start, stop, and restart it from the page. A restart can wait until no thought or memory review is under way.
+- **Logs:** the Overview's log card shows the daemon's own output only when that output is written to `runtime.log` beside the database, for example `npm start -- run --config config.json >> data/runtime.log 2>&1`, or the equivalent in the service unit. The trace beneath it comes from the database and needs nothing.
 - **Credentials:** the page shows masked values and their sources, refuses edits to externally injected values, and saves new values only to `credentialsFile`. Connection tests read the latest files with the same precedence as the daemon. Reload the affected plugins to apply their credentials; core consumers still require a daemon restart, and changing the login token requires a management-page restart.
 - **Providers:** the page keeps provider endpoints in `data/webui/providers.json`; choosing one copies its address, API, and key variable into the selected thinking/review/compaction model, `embedding`, or `drawing`. The daemon reads only `config.json`.
 
