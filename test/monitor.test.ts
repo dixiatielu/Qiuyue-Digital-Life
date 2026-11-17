@@ -326,3 +326,19 @@ test('display subscription failures preserve the endpoint error', async () => {
   try { await waitFor(() => message === 'Unknown command. Use help to view management commands.', 'endpoint error'); }
   finally { stop(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a replay larger than the slow-viewer limit still reaches the viewer that asked for it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'life-replay-')); const path = join(dir, 'control.sock');
+  const cursor = { instanceId: 'test', seq: 0 };
+  const replay = { subscribe(_cursor: unknown, listener: (packet: unknown) => void) { for (let n = 0; n < 4; n++) listener({ type: 'event', cursor, change: 'x'.repeat(600_000) }); listener({ type: 'ready', cursor }); return () => {}; } } as unknown as Monitor;
+  const server = await serveControl(path, () => ({}), replay);
+  try {
+    const ready = await new Promise<boolean>(resolve => {
+      const socket = createConnection(path); let received = '';
+      socket.setEncoding('utf8'); socket.on('connect', () => socket.write(JSON.stringify({ args: ['subscribe'] }) + '\n'));
+      socket.on('data', chunk => { received += chunk; if (received.includes('"type":"ready"')) { socket.destroy(); resolve(true); } });
+      socket.on('close', () => resolve(false)); socket.on('error', () => resolve(false));
+    });
+    assert.equal(ready, true);
+  } finally { server.closeClients(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); }
+});

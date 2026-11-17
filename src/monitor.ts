@@ -72,6 +72,7 @@ export class Monitor {
   private runId?: string;
   private runActions = new Map<string, Action['status']>();
   private generation = 0;
+  private groupNames = new Map<string, { name: string | undefined; until: number }>();
   private assistantId?: string;
   private contextTokens?: number;
   private inputBudget?: number;
@@ -177,11 +178,20 @@ export class Monitor {
       text: event.text, state: event.status === 'processing' && previous?.state === 'accepted' ? 'accepted' : event.status,
       runId: event.status === 'pending' ? undefined : previous?.runId,
       eventKind: event.kind, receivedAt: event.receivedAt ?? event.at,
-      sourceName: payload.group_name || nativeMessage?.chat?.title || (event.source?.conversationType === 'group' ? this.store.groupName(source) : undefined),
+      sourceName: payload.group_name || nativeMessage?.chat?.title || (event.source?.conversationType === 'group' ? this.groupName(source) : undefined),
       message: parts ? { direction: event.source?.own ? 'outgoing' : 'incoming', parts } : undefined,
       eventData: Object.keys(eventData).length ? eventData : undefined,
       quiet: event.kind.includes('heartbeat'), details: this.describe({ id: event.id, kind: event.kind, status: event.status }),
     }, live);
+  }
+  /** A group's name is looked up from its latest event that carries one, which reads back through the whole chat when none does; it is kept for ten minutes. */
+  private groupName(conversation: string) {
+    if (!conversation.includes(':group:')) return undefined;
+    const kept = this.groupNames.get(conversation);
+    if (kept && kept.until > Date.now()) return kept.name;
+    const name = this.store.groupName(conversation);
+    this.groupNames.set(conversation, { name, until: Date.now() + 600_000 });
+    return name;
   }
   private action(action: Action, live = true) {
     const runId = this.items.get(action.id)?.runId ?? (this.runningTools.size ? this.runId : undefined);
@@ -189,7 +199,7 @@ export class Monitor {
     this.put({ id: action.id, at: action.createdAt, type: 'action', title: ui(`Action · ${action.kind}`, `行动 · ${action.kind}`), state: action.status,
       runId, actionKind: action.kind,
       message: outgoingMessage(action.kind, action.args),
-      sourceName: action.conversation ? this.store.groupName(action.conversation) : undefined,
+      sourceName: action.conversation ? this.groupName(action.conversation) : undefined,
       text: this.describe(action.args), details: this.describe({ id: action.id, status: action.status, result: action.result }),
       source: action.args.group_id ? ui(`Group ${action.args.group_id}`, `群 ${action.args.group_id}`) : action.args.user_id ? ui(`Private chat ${action.args.user_id}`, `私聊 ${action.args.user_id}`) : action.conversation ?? (action.args.chat_id ? String(action.args.chat_id) : undefined),
     }, live);

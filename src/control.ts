@@ -79,11 +79,14 @@ export async function serveControl(path: string, handler: (request: ControlReque
           if (!monitor) throw new Error('Live display is unavailable on this control endpoint.');
           if (request.cursor !== undefined && (typeof request.cursor?.instanceId !== 'string' || !Number.isSafeInteger(request.cursor?.seq) || request.cursor.seq < 0)) throw new Error('Invalid subscription cursor format.');
           socket.setTimeout(0);
+          // A slow viewer must never block perception or grow an unbounded write queue. The replay it asked for is written at once
+          // and bounded by the monitor; counting it against the limit cut off every viewer whose replay exceeded it, each time it reconnected.
+          let allowance = Number.POSITIVE_INFINITY;
           unsubscribe = monitor.subscribe(request.cursor, packet => {
-            // A slow viewer must never block perception or grow an unbounded write queue.
-            if (socket.destroyed || socket.writableLength > 1_000_000) { socket.destroy(); return; }
+            if (socket.destroyed || socket.writableLength > allowance) { socket.destroy(); return; }
             socket.write(JSON.stringify(packet) + '\n');
           });
+          allowance = socket.writableLength + 1_000_000; socket.once('drain', () => { allowance = 1_000_000; });
           return;
         }
         Promise.resolve(handler(request)).then(
