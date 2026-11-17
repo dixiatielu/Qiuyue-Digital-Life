@@ -1,6 +1,7 @@
 import { parseConversationRef, parsePersonRef } from '../identity.js';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { alive } from './daemon.js';
 import type { Memory } from '../domain.js';
 import { developmentKinds } from '../domain.js';
 import { DrawingLibrary, type DrawingQuery } from '../plugins/gallery-store.js';
@@ -60,8 +61,10 @@ export class LifeReader {
     return this.read(db => {
       const review = db.prepare("SELECT kind, at FROM trace WHERE kind IN ('review_started','review_finished','review_stopped') ORDER BY id DESC LIMIT 1").get();
       const last = db.prepare('SELECT kind, at FROM trace ORDER BY id DESC LIMIT 1').get();
+      // A daemon that died in the middle of a review left it open in the trace; with no daemon alive, no review is under way.
+      const daemon = this.setting(db, 'daemon') as { pid: number } | undefined;
       return {
-        reviewing: review?.kind === 'review_started' ? Number(review.at) : undefined,
+        reviewing: review?.kind === 'review_started' && daemon && alive(daemon.pid) ? Number(review.at) : undefined,
         lastTrace: last ? { kind: String(last.kind), at: Number(last.at) } : undefined,
         callStarting: Boolean(last && inFlight(String(last.kind)) && now - Number(last.at) < 20_000),
       };

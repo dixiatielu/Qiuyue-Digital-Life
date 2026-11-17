@@ -12,7 +12,7 @@ import { WebUi } from '../src/webui/server.js';
 import { Credentials, credentialPaths, credentialNames } from '../src/credentials.js';
 import { inspectConfig } from '../src/webui/inspect.js';
 import { ServiceJobs, type LiveMirror } from '../src/webui/daemon.js';
-import type { LifeReader } from '../src/webui/reader.js';
+import { LifeReader as LifeReaderClass, type LifeReader } from '../src/webui/reader.js';
 import { PluginManager } from '../src/plugin-manager.js';
 import { createPlugins } from './helpers.js';
 import { createTools } from './helpers.js';
@@ -514,3 +514,19 @@ test('a configuration that is not JSON still opens the page, so its editor can r
   const editor = await call('/api/config');
   assert.equal(editor.status, 200); assert.equal(editor.body.text, '{ "model": '); assert.equal(editor.body.raw, null);
 }));
+
+test('a review left open by a daemon that died is not under way, and the next start closes it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-review-')); const path = join(dir, 'life.sqlite');
+  try {
+    const store = new Store(path);
+    const release = store.acquireDaemon(); store.log('review_started', { runId: 'r' });
+    const reader = new LifeReaderClass(path);
+    assert.notEqual(reader.activity().reviewing, undefined);
+    // The lease of a process that no longer exists is what a crash leaves behind.
+    store.setSetting('daemon', { pid: 2 ** 22 - 1, owner: 'gone' });
+    assert.equal(reader.activity().reviewing, undefined);
+    store.recover(); store.recover();
+    assert.deepEqual(store.logs(10).filter(log => log.kind.startsWith('review_')).map(log => log.kind), ['review_stopped', 'review_started']);
+    release(); store.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

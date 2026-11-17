@@ -257,6 +257,8 @@ export class Store {
       const pending = this.db.prepare("SELECT id FROM actions WHERE status='pending'").all();
       this.db.prepare("UPDATE actions SET status='unknown',result=? WHERE status='pending'").run(json({ reason: 'Process interrupted; the remote outcome is unconfirmed' }));
       for (const row of pending) this.notify({ kind: 'action', action: this.actionById(String(row.id))! });
+      // A review the last process never finished is over; left open, it reads as still under way.
+      if (this.db.prepare("SELECT kind FROM trace WHERE kind IN ('review_started','review_finished','review_stopped') ORDER BY id DESC LIMIT 1").get()?.kind === 'review_started') this.log('review_stopped', { message: 'Process interrupted' });
       this.notify({ kind: 'state' });
     });
   }
