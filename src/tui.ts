@@ -337,7 +337,8 @@ export function createTui(path: string, terminal: Terminal = new ProcessTerminal
     const s = model.status;
     const parts = s && !input.suggestions.length ? [
       ...(model.filter ? [accent(ui(`Filter ${model.filter}`, `筛选 ${model.filter}`))] : []),
-      dim(`${ui('Context', '上下文')} ${humanTokens(s.contextTokens)}/${humanTokens(s.contextLimit)}${s.contextTokens !== undefined && Number.isFinite(s.contextTokens) && s.contextLimit > 0 ? ` · ${Math.round(s.contextTokens / s.contextLimit * 100)}%` : ''}`),
+      // Against the input budget the brain enforces, as the management page shows it; the configured ceiling can exceed the model's window.
+      dim(`${ui('Context', '上下文')} ${humanTokens(s.contextTokens)}/${humanTokens(s.inputBudget ?? s.contextLimit)}${s.contextTokens !== undefined && Number.isFinite(s.contextTokens) && (s.inputBudget ?? s.contextLimit) > 0 ? ` · ${Math.round(s.contextTokens / (s.inputBudget ?? s.contextLimit) * 100)}%` : ''}`),
     ] : [];
     const available = Math.max(0, width - 2 * gutter(width));
     const hints = input.suggestions.length ? [ui('↑↓ select · Tab complete · Esc close', '↑↓ 选择 · Tab 补全 · Esc 关闭'), ui('Tab complete', 'Tab 补全')]
