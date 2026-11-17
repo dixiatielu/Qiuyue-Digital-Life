@@ -41,6 +41,10 @@ test('development holds everywhere unless it belongs to one group, with one impr
     const wake = store.receive(qqEvent({ key: 'wake:1', kind: 'wake', at: Date.now(), text: 'Plan the day', payload: {} }, store))!;
     const ownNote = store.writeMemory({ ...base, kind: 'note', sources: [mine.id] }, false);
     assert.throws(() => store.writeMemory({ ...base, kind: 'habit', sources: [ownNote.id, wake.id] }, false), /cannot rest only on your own messages/);
+    // A plan cites what was in view when it was set; its wake event does not pass that on as evidence.
+    const plan = store.schedule('Check in', 'commitment', 0, [other.id]); store.enqueueDue();
+    const due = String(store.db.prepare('SELECT id FROM events WHERE source_key=?').get(plan.id)!.id);
+    assert.throws(() => store.writeMemory({ ...base, kind: 'habit', sources: [due] }, false), /cannot rest only on your own messages/);
     assert.ok(store.writeMemory({ ...base, kind: 'habit', sources: [store.writeMemory({ ...base, kind: 'note', sources: [other.id] }, false).id] }, false));
     const habit = store.writeMemory({ ...base, kind: 'habit', sources: [mine.id, other.id] }, false);
     assert.equal(habit.scope, 'global');

@@ -386,9 +386,9 @@ export class Store {
     const event = this.event(source); if (!event) return false;
     return event.source?.own === true || event.payload.origin === 'self';
   }
-  /** Whether the sources, or the memories they cite in turn, reach something it did not produce itself (ADR-0012): recalling its own judgment is not new evidence. */
+  /** Whether the sources, or the memories they cite in turn, reach something it did not produce itself (ADR-0012): recalling its own judgment is not new evidence. Only memories pass on what they cite; a wake event leads to its plan, which cites whatever was in view when it was set. */
   private restsOnOthers(sources: string[]): boolean {
-    const reached = this.db.prepare('WITH RECURSIVE reach(id) AS (SELECT value FROM json_each(?) UNION SELECT source_id FROM sources JOIN reach ON owner_id=reach.id) SELECT id FROM reach').all(json(sources)).map(row => String(row.id));
+    const reached = this.db.prepare("WITH RECURSIVE reach(id) AS (SELECT value FROM json_each(?) UNION SELECT source_id FROM sources JOIN reach ON owner_id=reach.id WHERE owner_id LIKE 'm:%') SELECT id FROM reach").all(json(sources)).map(row => String(row.id));
     return reached.some(source => { const event = this.event(source); return event !== undefined && event.payload.origin !== 'self' && !programEvents.has(event.kind) && !this.ownMessage(source); });
   }
   /** Development that applies in any of the given scopes, oldest first. */
