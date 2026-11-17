@@ -491,6 +491,34 @@ test('a message that arrives while tools run skips sends to that chat not yet ma
   } finally { release.resolve(); f.store.close(); }
 });
 
+test('a message whose observation is still being prepared when the tools finish stops the call that decides without it', async () => {
+  const poked = deferred(); const release = deferred(); const preparing = deferred(); const prepared = deferred(); const deciding = deferred(); const giveUp = deferred(); const sent: string[] = [];
+  // Preparing an observation can take seconds while its images download; here a plugin hook stands in for the download.
+  const slow = { id: 'slow', tools: () => [], emojiNames: async (events?: { text: string }[]) => { if (events?.some(event => event.text === 'It was hotpot') && !f.store.logs().some(log => log.kind === 'thought_preempted' && (log.data as { phase: string }).phase !== 'acting')) { preparing.resolve(); await prepared.promise; } return {}; } };
+  const f = fixture({ execute: async (kind, args) => { sent.push(String(args.message ?? kind)); if (kind === 'send_poke') { poked.resolve(); await release.promise; } return { message_id: -42 }; } }, undefined, undefined, () => [slow]);
+  try {
+    say(f.store, 'Guess what I had');
+    f.faux.setResponses([
+      answer([call("qq_main__send_poke", { user_id: 7 }), call("qq_main__send_private_msg", { user_id: 7, message: 'Stale guess' })]),
+      async (context, options) => {
+        assert.doesNotMatch(JSON.stringify(context.messages), /It was hotpot/); deciding.resolve();
+        await Promise.race([new Promise(resolve => options?.signal?.addEventListener('abort', resolve)), giveUp.promise]);
+        return answer(call("qq_main__send_private_msg", { user_id: 7, message: 'Stale guess again' }));
+      },
+    ]);
+    const work = f.brain.run(f.store.claim(10)!); await poked.promise;
+    say(f.store, 'It was hotpot'); const arrived = f.store.claim(10)!;
+    const steering = f.brain.steer(arrived); await preparing.promise;
+    release.resolve(); await deciding.promise; prepared.resolve();
+    assert.equal(await steering, false); f.store.releaseBatch(arrived.batchId); await work;
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /It was hotpot/); return answer(call("qq_main__send_private_msg", { user_id: 7, message: 'Hotpot, nice' })); }]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.deepEqual(sent, ['send_poke', 'Hotpot, nice']);
+    // The send it made stale and the call stopped afterwards are one preemption.
+    assert.deepEqual(f.store.logs().filter(log => log.kind === 'thought_preempted').map(log => (log.data as { phase: string }).phase).sort(), ['acting', 'calling']);
+  } finally { release.resolve(); prepared.resolve(); giveUp.resolve(); f.store.close(); }
+});
+
 test('after maxPreemptions in a row the next decision is carried out as made', async () => {
   const f = fixture(); f.cfg.limits.maxPreemptions = 1; const cancelled = deferred(); const calling = deferred(); const release = deferred();
   try {

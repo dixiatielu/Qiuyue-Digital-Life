@@ -571,9 +571,11 @@ export class PiBrain implements Brain {
     return event.kind === 'message' && chat !== undefined && this.engaged.has(chat) && event.source?.addressed === true;
   }
   /** Stop a thought whose model is deciding without a newer addressed message; a call already answered is left to its tools. */
-  private preempt(event: EnvironmentEvent): boolean {
-    if ((this.phase !== 'preparing' && this.phase !== 'calling') || this.preemptions >= this.config.limits.maxPreemptions) return false;
-    this.preempted = true; this.preemptions++;
+  private preempt(event: EnvironmentEvent, counted = false): boolean {
+    if (this.phase !== 'preparing' && this.phase !== 'calling') return false;
+    // A preemption already counted for this arrival, by a send it made stale, is carried through rather than counted or limited again.
+    if (!counted) { if (this.preemptions >= this.config.limits.maxPreemptions) return false; this.preemptions++; }
+    this.preempted = true;
     this.store.log('thought_preempted', { runId: this.runId, phase: this.phase, eventId: event.id, ...(this.phase === 'calling' ? { callMs: Date.now() - this.callStartedAt } : {}) });
     // Preparation, such as compaction, finishes first; prepareRequest then ends the thought.
     if (this.phase === 'calling') this.agent.abort();
@@ -670,10 +672,16 @@ export class PiBrain implements Brain {
     const addressed = observation.events.filter(event => this.addressed(event));
     // Declined here, the observation returns to pending and starts the next thought.
     if (addressed.length && this.preempt(addressed[0]!)) return false;
-    if (this.preemptions < this.config.limits.maxPreemptions) for (const event of addressed) this.stale.add(eventChat(event)!);
+    const before = this.preemptions;
+    const stale = () => { if (this.preemptions < this.config.limits.maxPreemptions) for (const event of addressed) this.stale.add(eventChat(event)!); };
+    stale();
     const message = await this.message(observation);
     // The run may have ended, or another begun, while images were downloading.
     if (!this.streaming || this.runId !== runId) return false;
+    // The tools may also have finished meanwhile and the model begun deciding again without this message, which is not yet in its view.
+    // That call is stopped as an arrival now would stop it (ADR-0002); otherwise sends decided since are stale again until the message enters.
+    if (addressed.length && this.preempt(addressed[0]!, this.preemptions > before)) return false;
+    stale();
     this.observations.push(...observation.events);
     this.display(monitor => monitor.observation(observation));
     this.agent.steer(message); return true;
