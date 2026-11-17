@@ -79,7 +79,7 @@ To let the digital life generate images with `imagen`, including photorealistic 
 
 In `persona.md`, describe the digital life's identity, world, personality, and initial preferences. The [example persona](../persona.example.md) is a complete, editable character with examples of expression and social habits. These are starting preferences that can develop through experience, not a universal style template. Plugins supply platform activities and usage guidance separately.
 
-System instructions use [`src/prompts/system.md`](../src/prompts/system.md), maintained with the runtime and separate from the operator's `personaFile`. They are read once at startup; `npm run build` copies them into `dist`. After editing them, rebuild and restart the daemon (development runs only need a restart).
+The built-in system instructions are [`src/prompts/system.md`](../src/prompts/system.md), maintained with the runtime and separate from the operator's `personaFile`. They are read once at startup; `npm run build` copies them into `dist`. After editing them, rebuild and restart the daemon (development runs only need a restart). To change the instructions without editing the checkout, set `systemPromptFile` to a copy of your own, which the [management page](#management-page) can create and edit. That file replaces the built-in one, must keep the `{{persona}}` placeholder and the `<!-- current-context -->` line, and also takes effect at restart.
 
 ## Terminal management
 

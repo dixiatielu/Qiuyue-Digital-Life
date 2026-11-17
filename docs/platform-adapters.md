@@ -78,10 +78,14 @@ Reusing an instance ID for another account is rejected. Keep the same database, 
 Stop the daemon and management page, including any service that would restart them, then run the new code:
 
 ```sh
+npm ci
+npm run sync:snowluma   # SnowLuma adapters only; see THIRD_PARTY_NOTICES.md
 npm run dev -- identities migrate --config config.json
 npm run build
 npm start -- validate --config config.json
 ```
+
+The migration imports the adapter code, so the new dependencies must be installed first. `validate` does not load the SnowLuma catalog; without the synchronized catalog the daemon stops at startup instead.
 
 The command accepts the previous database schema, including installations already using named adapters. An unnamed QQ connection becomes `qq_main`; its `selfId` becomes the string `accountId`, connection settings move into `adapters`, and its QQ plugin switches become `qq-main-<capability>`. It needs the original QQ account configuration to resolve old records. Ambiguous or conflicting account bindings fail without committing the database conversion.
 

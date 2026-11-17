@@ -79,7 +79,7 @@ Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 to
 
 在 `persona.md` 中描述数字生命的身份、世界观、性格和初始偏好。[示例人设](../persona.example.md) 提供可逐段删改的完整角色，以及常见表达和相处习惯的写法。这些是可发展的初始倾向，不是所有人物都必须遵守的表达模板；平台活动和使用说明由插件提供，不必写进人设。
 
-系统提示词统一使用 [`src/prompts/system.md`](../src/prompts/system.md)，随运行时代码维护，与运营者的 `personaFile` 分开。提示词在启动时读取一次，`npm run build` 会将它复制到 `dist`。修改后重新构建并重启常驻进程；开发模式只需重启。
+内置系统提示词位于 [`src/prompts/system.md`](../src/prompts/system.md)，随运行时代码维护，与运营者的 `personaFile` 分开。提示词在启动时读取一次，`npm run build` 会将它复制到 `dist`。修改后重新构建并重启常驻进程；开发模式只需重启。如需修改提示词而不改动仓库文件，可将 `systemPromptFile` 指向自己的副本（可在[管理网页](#管理网页)中创建和编辑）。该文件会替代内置提示词，必须保留 `{{persona}}` 占位符和 `<!-- current-context -->` 一行，同样在重启后生效。
 
 ## 终端管理
 
