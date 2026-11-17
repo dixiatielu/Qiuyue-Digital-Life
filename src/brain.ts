@@ -393,7 +393,10 @@ export class PiBrain implements Brain {
     // A review looks at the chats it lists, so their groups and the people who spoke there count as present.
     const chats = this.observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
     const present = this.observations.filter(event => !ownEvent(event)).flatMap(event => event.source?.actor ? [event.source.actor] : []).reverse();
-    const people = [...new Set([...present, ...this.store.impressionsIn(chats, this.config.development.people)])].slice(0, this.config.development.people);
+    // The limit is on impressions supplied, so those present who have none do not take a place from someone who has.
+    const candidates = [...new Set([...present, ...this.store.impressionsIn(chats, this.config.development.people)])];
+    const known = new Set(this.store.development(candidates.map(person => `person:${person}`)).map(memory => memory.scope));
+    const people = candidates.filter(person => known.has(`person:${person}`)).slice(0, this.config.development.people);
     const conversations = [...new Set([...this.observations.flatMap(event => event.source?.conversation ? [event.source.conversation] : []), ...chats.map(chat => chat.conversation)])];
     const development = this.store.development(['global', ...conversations.map(chat => `conversation:${chat}`), ...people.map(person => `person:${person}`)]);
     // When each was formed, so a judgment from last night's review reads as that rather than as settled.
@@ -433,12 +436,13 @@ export class PiBrain implements Brain {
       if (!fits()) {
         content.push({ type: 'text', text: `Image ${index} from ${ref}${saved} was not loaded due to the context limit; use view_event_image to view it${from}` }); continue;
       }
-      if (typeof url !== 'string') { content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} has no readable URL; the original event is retained.` }); continue; }
+      // As with plugin pictures, an image that could not be shown gives its place to the next.
+      if (typeof url !== 'string') { count--; content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} has no readable URL; the original event is retained.` }); continue; }
       try {
         const image = await fetchImage(url, this.controller.signal);
         // The label outlives the image, which is folded when the thought ends.
         content.push({ type: 'text', text: `The following is image ${index} from ${ref}${saved}${from}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
-      } catch { content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} could not be read${from}` }); }
+      } catch { count--; content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} could not be read${from}` }); }
     }
     // Supplementary plugin pictures follow the images in the chat and use the same budget.
     for (const image of this.tools.plugins.supplementalImages(observation.events, this.thought)) {

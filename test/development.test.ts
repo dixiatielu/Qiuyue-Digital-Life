@@ -426,3 +426,19 @@ test('her own revision reports what it reached in its result and starts no thoug
     assert.match(revision!.text, new RegExp(`revised outside your thoughts: m:\\S+ replaces ${result.id}\\.`));
   } finally { f.store.close(); }
 });
+
+test('the limit on impressions counts people who have one, not everyone who spoke', async () => {
+  const f = fixture();
+  try {
+    f.cfg.development.people = 1;
+    const known = say(f.store, 8, 'I only drink oolong');
+    f.store.acknowledge(f.store.claim(20)!.batchId);
+    f.store.writeMemory({ kind: 'impression', title: 'P8', content: 'Drinks only oolong', importance: 5, scope: 'person:qq:user:8', sources: [known.id] }, false);
+    // The most recent speaker has no impression yet; the one before has.
+    say(f.store, 8, 'Tea, anyone?'); say(f.store, 7, 'Hello');
+    let seen = '';
+    f.faux.setResponses([context => { seen = JSON.stringify(context.messages); return answer('Quiet'); }]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.match(seen, /Drinks only oolong/);
+  } finally { f.store.close(); }
+});
