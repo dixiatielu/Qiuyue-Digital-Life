@@ -16,12 +16,17 @@ import { snowlumaToolsPlugin as rawSnowTools } from '../src/plugins/snowluma-too
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+const scratch = join(tmpdir(), `qiuyue-fixture-${process.pid}-${crypto.randomUUID()}`);
 export function config() {
   const value = loadConfig(new URL('../config.example.json', import.meta.url).pathname);
   // Prompt-pressure fixtures must not depend on the length of the editable example persona.
   value.persona = 'Qiuyue, a virtual singer with her own interests and daily life.';
   value.adapters[0]!.accountId = '900'; value.adapters[0]!.groups = [100, 200]; value.web.enabled = false;
   value.limits.tickMs = 10000; value.limits.debounceMs = 0;
+  // The example's paths resolve into the checkout, where an operator's own database, socket, credentials and plugins may live.
+  // A fixture must neither read nor reach them; nothing is created here until a test writes to it.
+  value.database = join(scratch, 'life.sqlite'); value.socket = join(scratch, 'control.sock'); value.credentialsFile = join(scratch, 'credentials.json');
+  value.extensions.directory = join(scratch, 'plugins'); value.extensions.dataDirectory = join(scratch, 'plugin-data'); value.drawing.dir = join(scratch, 'drawings');
   return value;
 }
 export function event(store: Store, text = 'Hello', groupId = 100, key = crypto.randomUUID()) {
