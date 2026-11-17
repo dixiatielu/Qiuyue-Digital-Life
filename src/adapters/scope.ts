@@ -16,7 +16,8 @@ export function scopePlugin(plugin: LifePlugin, instance: string, actions: reado
     ...(plugin.images ? { images: event => matches(event) ? plugin.images!(event) : [] } : {}),
     ...(plugin.supplementalImages ? { supplementalImages: (events, thought) => plugin.supplementalImages!(events.filter(matches), thought) } : {}),
     ...(plugin.imageViewer ? { imageViewer: label => { const name = plugin.imageViewer!(label); return name ? qualify(name) : undefined; } } : {}),
-    ...(plugin.emojiNames ? { emojiNames: (events, signal) => plugin.emojiNames!(events?.filter(matches), signal) } : {}),
+    // The program's own events, such as a rest backlog, belong to no account; the faces in their records still need names.
+    ...(plugin.emojiNames ? { emojiNames: (events, signal) => plugin.emojiNames!(events?.filter(event => !event.source || matches(event)), signal) } : {}),
     id: `${instance.replaceAll('_', '-')}-${plugin.id}`,
     contextVersion: `${plugin.contextVersion ?? '1'}:${instance}`,
     tools: runtime => { const tools = plugin.tools(runtime.scoped(instance)); tools.forEach(tool => qualify(tool.name)); return tools.map(tool => ({ ...tool, name: qualify(tool.name), label: qualify(tool.name), description: `${instructions(tool.description)} Native operation names in catalog results use the ${instance}__ tool prefix for this account.`, ...(tool.insertBefore ? { insertBefore: qualify(tool.insertBefore) } : {}) })); },

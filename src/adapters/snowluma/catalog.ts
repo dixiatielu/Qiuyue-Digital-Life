@@ -1,5 +1,6 @@
 import { conversationRef } from '../../identity.js';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { TSchema } from 'typebox';
 
 export interface SnowLumaActionDefinition {
@@ -18,7 +19,7 @@ export interface SnowLumaPermissions { allow: '*' | string[]; deny: string[] }
 // Upstream definitions are local dependencies under their own license, not project source.
 // Both src/ and dist/ resolve this default to the checkout's ignored cache directory.
 const catalogs = new Map<string, { source: Record<string, any>; actions: SnowLumaActionDefinition[] }>();
-export function getSnowLumaCatalog(file = process.env.QIUYUE_SNOWLUMA_CATALOG || new URL('../../../.qiuyue-cache/snowluma/catalog.json', import.meta.url).pathname) {
+export function getSnowLumaCatalog(file = process.env.QIUYUE_SNOWLUMA_CATALOG || fileURLToPath(new URL('../../../.qiuyue-cache/snowluma/catalog.json', import.meta.url))) {
   let catalog = catalogs.get(file);
   if (catalog) return catalog;
   try { catalog = JSON.parse(readFileSync(file, 'utf8')); }

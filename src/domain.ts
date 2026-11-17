@@ -1,5 +1,4 @@
 import type { EventSource } from './identity.js';
-export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface EnvironmentEvent {
   id: string;
   key: string;

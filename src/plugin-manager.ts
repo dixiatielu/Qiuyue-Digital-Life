@@ -202,7 +202,7 @@ export class PluginManager {
           for (const plugin of retiring) if (plugin.quiesce) resume.push(plugin.quiesce());
           await waitFor(Promise.all(retiring.map(plugin => plugin.idle?.())), signal);
           signal.throwIfAborted(); job.state = 'applying';
-          for (const { plugin } of candidates.values()) { if (plugin.enabled?.() ?? true) await plugin.start?.(); signal.throwIfAborted(); }
+          for (const { plugin } of candidates.values()) { if (plugin.enabled?.() ?? true) await waitFor(Promise.resolve(plugin.start?.()), signal); signal.throwIfAborted(); }
           const oldConfig = structuredClone(this.config);
           try {
             this.applyConfig(next); this.host.install(replacement);
