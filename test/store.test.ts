@@ -2,12 +2,13 @@ import { beginAction } from './helpers.js';
 import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
-import { handleControl } from '../src/control.js';
+import { handleControl, requestControl } from '../src/control.js';
+import { config } from './helpers.js';
 import { event } from './helpers.js';
 
 test('persistence recovers claimed observations, commitments and uncertain side effects', () => {
@@ -268,4 +269,17 @@ test('while the digital life rests, group chat not addressed to it is neither cl
     // A rest belongs to autonomous life; with life mode off, nothing is held.
     store.setSetting('lifeEnabled', false); assert.equal(store.resting(), false);
   } finally { store.close(); }
+});
+
+test('with no daemon a management command answers from the life that exists and never creates one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-control-'));
+  try {
+    const cfg = config(); cfg.database = join(dir, 'data/life.sqlite'); cfg.socket = join(dir, 'data/control.sock'); cfg.life.enabled = true;
+    await assert.rejects(requestControl(cfg, { args: ['status'] }), /start the daemon first/);
+    assert.equal(existsSync(cfg.database), false);
+    new Store(cfg.database, cfg.life.enabled).close();
+    await requestControl(cfg, { args: ['pause'] });
+    const store = new Store(cfg.database);
+    try { assert.equal(store.settings().paused, true); assert.equal(store.settings().lifeEnabled, true); } finally { store.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

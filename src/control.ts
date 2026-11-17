@@ -9,6 +9,8 @@ import { errorText } from './domain.js';
 import type { DisplayCursor, Monitor } from './monitor.js';
 
 export interface ControlRequest { args: string[]; yes?: boolean; cursor?: DisplayCursor }
+/** The management commands the daemon, or the store without one, answers. */
+export const controlCommands = ['status', 'logs', 'pause', 'resume', 'life', 'memory', 'plugins'];
 export type ControlServer = Server & { closeClients(): void };
 export function handleControl(store: Store, request: ControlRequest, runtime?: LifeRuntime, plugins?: { request(args: string[]): unknown }): unknown {
   const [command, sub, ...rest] = request.args;
@@ -94,6 +96,8 @@ export async function serveControl(path: string, handler: (request: ControlReque
 export async function requestControl(config: Config, request: ControlRequest): Promise<unknown> {
   try { return await callControl(config.socket, request); }
   catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  // Only a life that already exists answers: opening the store would otherwise create one and use up its first-start settings.
+  if (!existsSync(config.database)) throw new Error(ui('No daemon is running and no life database exists yet; start the daemon first.', '没有运行中的常驻进程，也还没有数字生命的数据库；请先启动常驻进程。'));
   const store = new Store(config.database, config.life.enabled);
   try { const release = store.acquireDaemon(); try { return handleControl(store, request); } finally { release(); } }
   finally { store.close(); }
