@@ -498,3 +498,19 @@ test('model assignments round-trip through the page with readiness, inheritance 
   const usage = (await call('/api/model-usage')).body;
   assert.equal(usage.total, 0); assert.equal(usage.cost, null);
 }));
+
+test('with no daemon the page refuses control and memory changes instead of opening the life database', () => page(async (call, dir) => {
+  for (const [path, body] of [['/api/control', { args: ['pause'] }], ['/api/memory/m%3A1/forget', { yes: true }], ['/api/memory/m%3A1/correct', { content: 'Corrected' }]] as const) {
+    const refused = await call(path, { method: 'POST', body });
+    assert.equal(refused.status, 409); assert.match(JSON.stringify(refused.body), /daemon is not running/);
+  }
+  assert.equal(existsSync(join(dir, 'data/life.sqlite')), false);
+}));
+
+test('a configuration that is not JSON still opens the page, so its editor can repair it', () => page(async (call, dir) => {
+  writeFileSync(join(dir, 'config.json'), '{ "model": ');
+  const overview = await call('/api/overview');
+  assert.equal(overview.status, 200); assert.equal(overview.body.config.valid, false); assert.ok(overview.body.config.error);
+  const editor = await call('/api/config');
+  assert.equal(editor.status, 200); assert.equal(editor.body.text, '{ "model": '); assert.equal(editor.body.raw, null);
+}));

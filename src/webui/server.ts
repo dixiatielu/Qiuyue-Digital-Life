@@ -7,7 +7,7 @@ import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, webuiSettings, type Config } from '../config.js';
 import { modelReadiness, modelUse } from '../model.js';
-import { callControl, requestControl } from '../control.js';
+import { callControl } from '../control.js';
 import { errorText } from '../domain.js';
 import { configuredPluginIds, pluginIds } from '../plugins/index.js';
 import { discoverPlugins } from '../plugin-loader.js';
@@ -84,12 +84,17 @@ export class WebUi {
     return { database, socket: resolve(base, raw.socket ?? 'data/control.sock'), log: resolve(dirname(database), 'runtime.log') };
   }
   private current(): { raw: Record<string, any>; config?: Config; error?: string } {
-    const raw = this.files.raw();
-    try { return { raw, config: loadConfig(this.files.configPath) }; } catch (error) { return { raw, error: errorText(error) }; }
+    // A file that is not even JSON still opens the page, whose editor is where it gets repaired.
+    let raw: Record<string, any> = {};
+    try { raw = this.files.raw(); return { raw, config: loadConfig(this.files.configPath) }; } catch (error) { return { raw, error: errorText(error) }; }
   }
-  private control(args: string[], yes = false) {
-    const { config } = this.current();
-    return config ? requestControl(config, { args, yes }) : callControl(this.paths.socket, { args, yes });
+  /** Only the daemon changes her state (ADR-0020): with none running the page refuses rather than open the life database itself. */
+  private async control(args: string[], yes = false) {
+    try { return await callControl(this.paths.socket, { args, yes }); }
+    catch (error) {
+      if (['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) throw new HttpError(409, 'The daemon is not running. Start it first; the page does not change the life database itself.');
+      throw error;
+    }
   }
   /** Whether a start with this configuration would continue the working context saved now. */
   private continuity(config: Config) {
