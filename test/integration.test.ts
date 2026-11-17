@@ -178,10 +178,22 @@ test('the digital life\'s own pokes come back as ambient notices attributed to i
     const privateEcho = poke({ user_id: 7, target_id: 7, sender_id: 900 }); const groupEcho = poke({ group_id: 100, user_id: 900, target_id: 7 });
     const incoming = poke({ user_id: 7, target_id: 900, sender_id: 7 });
     assert.deepEqual([privateEcho.source?.actor, groupEcho.source?.actor, incoming.source?.actor], ['qq:user:900', 'qq:user:900', 'qq:user:7']);
+    // Either way a private poke belongs to the chat with the other person.
+    assert.deepEqual([privateEcho.source?.conversation, incoming.source?.conversation], ['qq:900:private:7', 'qq:900:private:7']);
     store.receive(qqEvent(privateEcho, store)); store.receive(qqEvent(groupEcho, store));
     assert.equal(store.pendingTiming().first, undefined); assert.notEqual(store.pendingTiming().ambient, undefined);
     store.receive(qqEvent(incoming, store)); assert.notEqual(store.pendingTiming().first, undefined);
   } finally { store.close(); }
+});
+
+test('what someone else does to the digital life is theirs, addressed to it, and not its own act', () => {
+  const cfg = config().adapters[0]!;
+  const notice = (fields: Record<string, unknown>) => normalizeEvent({ post_type: 'notice', self_id: 900, group_id: 100, time: 100, ...fields }, cfg)!.source!;
+  const recalledByAdmin = notice({ notice_type: 'group_recall', user_id: 900, operator_id: 7, message_id: 5 });
+  const muted = notice({ notice_type: 'group_ban', sub_type: 'ban', user_id: 900, operator_id: 7, duration: 60 });
+  const recalledItself = notice({ notice_type: 'group_recall', user_id: 900, operator_id: 900, message_id: 5 });
+  assert.deepEqual([recalledByAdmin.own, recalledByAdmin.addressed, muted.own, muted.addressed], [false, true, false, true]);
+  assert.deepEqual([recalledItself.own, recalledItself.addressed], [true, false]);
 });
 
 test('private message keys separate peers and groups, preserve direction, and deduplicate redelivery', () => {

@@ -40,9 +40,13 @@ export function normalizeEvent(raw: Record<string, any>, config: AdapterConfig, 
 /** QQ-native addressing and attention are settled once, at ingestion. */
 function qqSource(raw: Record<string, any>, account: AdapterConfig, kind: string, groupId: number | undefined, actorId: number | undefined, segments: any[], sent: (id: number) => boolean): import('../../identity.js').EventSource {
   const self = (value: unknown) => value != null && String(value) === account.accountId;
-  const own = self(actorId) || raw.post_type === 'message_sent';
+  // A notice names whom it is about as user_id. When someone else did it, such as recalling its message or muting it, it is not the account's own act.
+  const byAnother = raw.operator_id != null && Number(raw.operator_id) > 0 && !self(raw.operator_id);
+  const own = self(actorId) && !byAnother || raw.post_type === 'message_sent';
   const type = groupId !== undefined && raw.message_type !== 'private' ? 'group' : 'private';
-  const target = type === 'group' ? groupId : raw.post_type === 'message_sent' ? raw.target_id ?? actorId : actorId;
+  // A private poke belongs to the chat with the other person, whichever of the two poked.
+  const peer = type === 'private' && kind === 'notice:notify:poke' ? [raw.user_id, raw.target_id, raw.sender_id].find(id => id != null && Number(id) > 0 && !self(id)) : undefined;
+  const target = type === 'group' ? groupId : raw.post_type === 'message_sent' ? raw.target_id ?? actorId : peer ?? actorId;
   const addressed = kind.startsWith('notice:') ? (self(raw.target_id) && !own) || (self(raw.user_id) && raw.operator_id != null && !self(raw.operator_id))
     : kind === 'message' && !own && (type === 'private' || segments.some(segment => segment.type === 'at' && self(segment.data?.qq) || segment.type === 'reply' && sent(Number(segment.data?.id))));
   const ambient = kind === 'notice:notify:input_status' || kind.startsWith('notice:group_msg_emoji_like:') || kind === 'notice:notify:poke' && own;
