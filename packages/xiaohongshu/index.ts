@@ -72,7 +72,8 @@ export class XiaohongshuReader implements OnlineReader {
       if (result.success !== true || result.feed_id !== item.id) throw new Error('Xiaohongshu did not confirm the requested favorite action.');
       return { id: item.id, saved, platform: 'xiaohongshu' };
     });
-    return { confirmed: action.outcome.status === 'success', saved, action };
+    // As with likes, a reused success receipt may predate a later removal.
+    return { confirmed: action.outcome.status === 'success' && !action.reused, saved, action };
   }
   async like(item: ReadingEntry, liked: boolean, call: PluginCall) {
     const token = item.locator?.token;

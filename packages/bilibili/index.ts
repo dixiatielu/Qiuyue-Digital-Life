@@ -129,7 +129,8 @@ export class BilibiliReader implements OnlineReader {
       if (confirmed.id !== folder.id || Boolean(confirmed.fav_state) !== saved) throw new Error('Bilibili favorite state could not be confirmed after dispatch.');
       return { id: item.id, saved, collectionId: folder.id, platform: 'bilibili' };
     });
-    return { confirmed: action.outcome.status === 'success', saved, collectionId: folder.id, action };
+    // As with likes, a reused success receipt may predate a later removal.
+    return { confirmed: action.outcome.status === 'success' && !action.reused, saved, collectionId: folder.id, action };
   }
   async read(input: string, previous: ReadingEntry | undefined, restart: boolean, signal?: AbortSignal) {
     let reference = bilibiliReference(input);

@@ -40,6 +40,9 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
     if (!Check(action.inputSchema, args)) throw new ActionNotDispatchedError(`Invalid native parameters for ${name}.`);
     return adapter.execute(action.name, args, AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]));
   };
+  // The host also stops a plugin whose start failed, so the adapter is stopped once however often this is asked.
+  let stopped: Promise<void> | undefined;
+  const stop = () => stopped ??= (async () => { active = false; controller.abort(); await adapter.stop?.(); })();
   return {
     id: `adapter-${adapter.instance.replaceAll('_', '-')}`, contextVersion: adapter.version,
     nativeActions: { accounts: [identity], definition: name => actions.get(name), allowed, execute },
@@ -73,8 +76,8 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
           },
           storage: { get: (key, fallback) => store.setting(`adapter:${adapter.platform}:${adapter.accountId}:${key}`, fallback), set: (key, value) => { if (!active) throw new Error('Adapter stopped.'); store.setSetting(`adapter:${adapter.platform}:${adapter.accountId}:${key}`, value); } },
         });
-      } catch (error) { active = false; controller.abort(); await adapter.stop?.(); throw error; }
+      } catch (error) { await stop(); throw error; }
     },
-    stop: async () => { active = false; controller.abort(); await adapter.stop?.(); },
+    stop,
   };
 }
