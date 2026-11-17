@@ -68,7 +68,7 @@ export class SemanticRecall implements SemanticSource {
    * which embeddings rarely place first. Text search alone answers when the endpoint cannot be reached.
    */
   async search(query: string, limit: number, subjects: string[] = [], historical = false, signal?: AbortSignal): Promise<(Memory & { matchedLine?: string })[]> {
-    const lexical = this.store.search(query, limit, subjects, [], historical);
+    const lexical = this.store.search(query, limit, subjects, historical);
     let semantic: Recollection[] = [];
     if (query.trim() && Date.now() >= this.pausedUntil) {
       try {

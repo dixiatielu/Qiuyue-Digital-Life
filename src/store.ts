@@ -74,6 +74,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS working_context(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
     `);
     this.db.exec('CREATE INDEX IF NOT EXISTS event_conversation ON events(conversation_ref,at); CREATE INDEX IF NOT EXISTS event_actor ON events(actor_ref,at); CREATE INDEX IF NOT EXISTS action_conversation ON actions(conversation,created_at)');
+    // sentMessage runs for every quoted message and lifeWakesSince once a minute while idle; without these each scanned its whole table.
+    this.db.exec("CREATE INDEX IF NOT EXISTS action_message ON actions(json_extract(result,'$.message_id')) WHERE status='success'; CREATE INDEX IF NOT EXISTS event_wakes ON events(at) WHERE kind='wake'");
     for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
     this.db.exec('PRAGMA user_version=2');
   }
@@ -146,9 +148,10 @@ export class Store {
   archiveContext(messages: AgentMessage[], sources: string[]): string[] {
     const write = () => {
       const insert = this.db.prepare('INSERT OR IGNORE INTO context_records VALUES (?,?,?,?)');
+      const cited = json(sources);
       return messages.map(message => {
         const saved = persistableMessage(message); const recordId = contextRecordId(saved);
-        insert.run(recordId, Date.now(), json(saved), json(sources));
+        insert.run(recordId, Date.now(), json(saved), cited);
         return recordId;
       });
     };
@@ -172,12 +175,7 @@ export class Store {
       const messageIds = this.archiveContext(checkpoint.messages, checkpoint.sources);
       const { messages: _messages, ...data } = checkpoint;
       this.db.prepare('INSERT INTO working_context VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET identity=excluded.identity,generation=excluded.generation,data=excluded.data,updated_at=excluded.updated_at').run(checkpoint.identity, checkpoint.generation, json({ ...data, messageIds }), Date.now());
-      for (const batch of batches) {
-        const ids = this.db.prepare('SELECT id FROM events WHERE batch_id=?').all(batch).map(row => String(row.id));
-        const count = Number(this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE batch_id=?").run(batch).changes);
-        this.setSetting('processedTotal', this.processedCount() + count);
-        this.notifyEvents(ids);
-      }
+      for (const batch of batches) this.markObserved(batch);
       for (const compacted of compactions) this.log('context_compacted', compacted);
     });
   }
@@ -230,21 +228,22 @@ export class Store {
       return { batchId, events: rows.map(row => this.eventRow(row)) };
     });
   }
-  acknowledge(batchId: string) {
-    this.transaction(() => {
-      const ids = this.db.prepare('SELECT id FROM events WHERE batch_id=?').all(batchId).map(row => String(row.id));
-      const count = Number(this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE batch_id=?").run(batchId).changes);
-      this.setSetting('processedTotal', this.processedCount() + count);
-      this.notifyEvents(ids);
-    });
+  acknowledge(batchId: string) { this.transaction(() => this.markObserved(batchId)); }
+  /** A claimed batch always has status 'processing', which the pending index finds without scanning every event. */
+  private batch(batchId: string): string[] { return this.db.prepare("SELECT id FROM events WHERE status='processing' AND batch_id=?").all(batchId).map(row => String(row.id)); }
+  private markObserved(batchId: string) {
+    const ids = this.batch(batchId);
+    const count = Number(this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE status='processing' AND batch_id=?").run(batchId).changes);
+    this.setSetting('processedTotal', this.processedCount() + count);
+    this.notifyEvents(ids);
   }
   private notifyEvents(ids: string[]) { for (const id of ids) { const event = this.event(id); if (event) this.notify({ kind: 'environment', event }); } }
-  releaseBatch(batchId: string) { const ids = this.db.prepare('SELECT id FROM events WHERE batch_id=?').all(batchId).map(row => String(row.id)); this.db.prepare("UPDATE events SET status='pending',batch_id=NULL WHERE batch_id=?").run(batchId); this.notifyEvents(ids); }
+  releaseBatch(batchId: string) { const ids = this.batch(batchId); this.db.prepare("UPDATE events SET status='pending',batch_id=NULL WHERE status='processing' AND batch_id=?").run(batchId); this.notifyEvents(ids); }
   releaseClaims() { const ids = this.db.prepare("SELECT id FROM events WHERE status='processing'").all().map(row => String(row.id)); this.db.prepare("UPDATE events SET status='pending',batch_id=NULL WHERE status='processing'").run(); this.notifyEvents(ids); }
   recover() {
     this.transaction(() => {
       // Heartbeats queued by older versions must not wake the model or advance reflection counters.
-      this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE status!='processed' AND (kind='meta_event:heartbeat' OR kind LIKE 'meta_event:heartbeat:%')").run();
+      this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE status IN ('pending','processing') AND (kind='meta_event:heartbeat' OR kind LIKE 'meta_event:heartbeat:%')").run();
       this.releaseClaims();
       const pending = this.db.prepare("SELECT id FROM actions WHERE status='pending'").all();
       this.db.prepare("UPDATE actions SET status='unknown',result=? WHERE status='pending'").run(json({ reason: 'Process interrupted; the remote outcome is unconfirmed' }));
@@ -404,7 +403,7 @@ export class Store {
     this.transaction(() => { this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(memoryId); this.log('memory_retired', { id: memoryId, kind: memory.kind, scope: memory.scope }); });
     return { ...memory, active: false };
   }
-  search(query: string, limit = 8, subjects: string[] = [], conversations: string[] = [], historical = false, exclude: readonly MemoryKind[] = []): Memory[] {
+  search(query: string, limit = 8, subjects: string[] = [], historical = false): Memory[] {
     const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])].slice(0, 30);
     const candidates = new Map<string, Record<string, any>>();
     const active = historical ? '' : ' AND active=1';
@@ -421,10 +420,9 @@ export class Store {
       const text = `${memory.title} ${memory.content}`.toLowerCase();
       const matches = terms.filter(term => text.includes(term) || memory.subjects.some(subject => subject.toLowerCase().includes(term))).length;
       const person = memory.subjects.some(x => subjects.includes(x)) ? 8 : 0;
-      const place = memory.conversations.some(x => conversations.includes(x)) ? 2 : 0;
       const recency = Math.exp(-(now - memory.createdAt) / (30 * 86_400_000));
-      return { memory, score: matches * 5 + person + place + memory.importance / 3 + recency, relevant: !query.trim() || matches > 0 || person > 0 || place > 0 };
-    }).filter(x => x.relevant && !exclude.includes(x.memory.kind)).sort((a, b) => b.score - a.score).slice(0, limit).map(x => x.memory);
+      return { memory, score: matches * 5 + person + memory.importance / 3 + recency, relevant: !query.trim() || matches > 0 || person > 0 };
+    }).filter(x => x.relevant).sort((a, b) => b.score - a.score).slice(0, limit).map(x => x.memory);
   }
   recallableIds(): Set<string> { return new Set(this.db.prepare(`SELECT id FROM memories WHERE ${recallable}`).all().map(row => String(row.id))); }
   /** Memories a deliberate search may find: current ones of every kind, and with historical their earlier versions too. */
@@ -480,16 +478,23 @@ export class Store {
         if (selectedId === 'state:activity') this.setSetting('activity', '');
       }
       // Action results can contain the original message text; retain only outcome metadata.
-      for (const row of this.db.prepare('SELECT * FROM actions').all()) if (parse<string[]>(row.source_ids).some(x => selected.includes(x))) this.db.prepare("UPDATE actions SET args='{}',result=?,source_ids='[]' WHERE id=?").run(json({ redacted: true }), String(row.id));
+      const chosen = new Set(selected); const citing: string[] = [];
+      for (const row of this.db.prepare('SELECT id,source_ids FROM actions').iterate()) if (parse<string[]>(row.source_ids).some(x => chosen.has(x))) citing.push(String(row.id));
+      for (const actionId of citing) this.db.prepare("UPDATE actions SET args='{}',result=?,source_ids='[]' WHERE id=?").run(json({ redacted: true }), actionId);
       this.db.exec('DELETE FROM working_context; DELETE FROM context_records;');
       this.bumpGeneration(); this.log('memory_forgotten', { ids: selected });
     });
     return selected;
   }
   retain(days: number, now = Date.now()): number {
-    this.db.prepare('DELETE FROM working_context WHERE updated_at<?').run(now - days * 86_400_000);
-    this.db.prepare("DELETE FROM context_records WHERE at<? AND id NOT IN (SELECT j.value FROM working_context,json_each(json_extract(data,'$.messageIds')) j)").run(now - days * 86_400_000);
-    return Number(this.db.prepare(`DELETE FROM events WHERE status='processed' AND at<? AND NOT EXISTS (SELECT 1 FROM sources WHERE source_id=events.id) AND NOT EXISTS (SELECT 1 FROM actions,json_each(actions.source_ids) j WHERE j.value=events.id AND actions.status IN ('pending','unknown'))`).run(now - days * 86_400_000).changes);
+    const before = now - days * 86_400_000;
+    this.db.prepare('DELETE FROM working_context WHERE updated_at<?').run(before);
+    this.db.prepare("DELETE FROM context_records WHERE at<? AND id NOT IN (SELECT j.value FROM working_context,json_each(json_extract(data,'$.messageIds')) j)").run(before);
+    // What an unresolved action cites stays (ADR-0008). Such actions are few, so their sources are read once here;
+    // asking per event scanned every action row, with its whole source list, for each expired event.
+    const unresolved = this.db.prepare("SELECT rowid FROM actions WHERE status IN ('pending','unknown')").all();
+    const guarded = new Set(unresolved.flatMap(row => parse<unknown[]>(this.db.prepare('SELECT source_ids FROM actions WHERE rowid=?').get(Number(row.rowid))!.source_ids)).filter(source => typeof source === 'string'));
+    return Number(this.db.prepare("DELETE FROM events WHERE status='processed' AND at<? AND NOT EXISTS (SELECT 1 FROM sources WHERE source_id=events.id) AND id NOT IN (SELECT value FROM json_each(?))").run(before, json([...guarded])).changes);
   }
   schedule(title: string, kind: Wake['kind'], dueAt: number, sources: string[] = [], rest = false): Wake {
     if (!Number.isFinite(dueAt)) throw new Error('Invalid wake time.');
@@ -558,8 +563,9 @@ export class Store {
   }
   /** When someone other than the digital life last did something that can start a thought. */
   lastHeard(): number | undefined {
-    const row = this.db.prepare("SELECT max(coalesce(received_at,at)) AS at FROM events WHERE (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND json_extract(source,'$.own')=0 AND NOT ambient_flag").get()!;
-    return row.at == null ? undefined : Number(row.at);
+    // Events are stored in the order they were received, so the newest match is the latest one; a maximum would read every event.
+    const row = this.db.prepare("SELECT coalesce(received_at,at) AS at FROM events WHERE (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND json_extract(source,'$.own')=0 AND NOT ambient_flag ORDER BY rowid DESC LIMIT 1").get();
+    return row ? Number(row.at) : undefined;
   }
   /** Life wakes since the given time, scheduled or offered as free time. */
   lifeWakesSince(since: number): { at: number; freeTime: boolean }[] {

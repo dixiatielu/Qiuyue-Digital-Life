@@ -42,13 +42,13 @@ test('Chinese memories recall the same person across groups, and correction reti
     const memory = store.writeMemory({ kind: 'understanding', title: 'Tea preference', content: '小明说喜欢乌龙茶', importance: 8, subjects: ['7', '小明'], sources: [source.id] }, false);
     const derived = store.writeMemory({ kind: 'understanding', title: 'Conversation topic', content: 'We can talk about tea', importance: 5, sources: [memory.id] }, false);
     assert.equal(store.search('小明')[0]?.id, memory.id);
-    assert.equal(store.search('What to drink today', 5, ['7'], [200])[0]?.id, memory.id);
+    assert.equal(store.search('What to drink today', 5, ['7'])[0]?.id, memory.id);
     const corrected = handleControl(store, { args: ['memory', 'correct', memory.id, 'Correction: now prefers coffee'] }) as { id: string };
     assert.equal(store.memory(derived.id)?.active, false);
     assert.equal(store.memory(memory.id)?.active, false);
     assert.equal(store.search('coffee')[0]?.id, corrected.id);
     assert.equal(store.search('乌龙茶').length, 0);
-    assert.equal(store.search('乌龙茶', 10, [], [], true)[0]?.id, memory.id);
+    assert.equal(store.search('乌龙茶', 10, [], true)[0]?.id, memory.id);
     assert.throws(() => store.writeMemory({ kind: 'understanding', title: 'Old understanding', content: 'Tea', importance: 1, sources: [derived.id] }, false), /has been revised/);
     const next = handleControl(store, { args: ['memory', 'correct', corrected.id, 'Latest correction: prefers plain water'] }) as { id: string };
     assert.ok(store.memory(next.id)?.active);
@@ -66,7 +66,7 @@ test('forgetting removes source, derived memories, state, scheduled work and FTS
     const affected = store.forget(memory.id);
     assert.ok(affected.includes(derived.id)); assert.ok(affected.includes(source.id));
     assert.equal(store.settings().activity, ''); assert.equal(store.wakes().length, 0);
-    assert.equal(store.search('mooncake', 10, [], [], true).length, 0);
+    assert.equal(store.search('mooncake', 10, [], true).length, 0);
     assert.equal(store.pending(), 0);
     assert.equal(store.receive(qqEvent({ ...source, key: 'original-event' }, store)), undefined);
     store.finishAction(action.action.id, 'success', { text: source.text });
@@ -86,6 +86,23 @@ test('retention preserves pending events and required evidence; processed waterm
     const pending = store.receive(qqEvent({ ...old, key: 'pending' }, store))!;
     assert.equal(store.processedCount(), 2); assert.equal(store.retain(90), 1);
     assert.equal(store.processedCount(), 2); assert.ok(store.event(retained.id)); assert.ok(store.event(pending.id));
+  } finally { store.close(); }
+});
+
+test('retention keeps what an unresolved action cites until its outcome is known', () => {
+  const store = new Store(':memory:');
+  try {
+    const old = { kind: 'message', at: 1, text: 'Old experience', payload: {} };
+    const [waiting, unconfirmed, settled] = ['waiting', 'unconfirmed', 'settled'].map(key => store.receive(qqEvent({ ...old, key }, store))!);
+    store.acknowledge(store.claim(10)!.batchId);
+    const pending = store.beginAction('k:waiting', 'send', { n: 1 }, [waiting!.id]).action;
+    store.finishAction(store.beginAction('k:unconfirmed', 'send', { n: 2 }, [unconfirmed!.id]).action.id, 'unknown', { reason: 'timeout' });
+    store.finishAction(store.beginAction('k:settled', 'send', { n: 3 }, [settled!.id]).action.id, 'success', {});
+    assert.equal(store.retain(90), 1);
+    assert.ok(store.event(waiting!.id)); assert.ok(store.event(unconfirmed!.id)); assert.equal(store.event(settled!.id), undefined);
+    store.finishAction(pending.id, 'success', {});
+    assert.equal(store.retain(90), 1);
+    assert.equal(store.event(waiting!.id), undefined); assert.ok(store.event(unconfirmed!.id));
   } finally { store.close(); }
 });
 

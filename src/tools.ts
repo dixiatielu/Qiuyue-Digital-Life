@@ -84,7 +84,7 @@ export function createTools(config: Config, store: Store, context: () => Thought
       return { id: event.id, text: text.slice(offset, offset + 8000), nextOffset: offset + 8000 < text.length ? offset + 8000 : null };
     }),
     tool('recall', `Search for long-term understandings, important experiences, or personal notes${recall ? ', by meaning and by exact words such as names or QQ numbers' : ''}; historical versions are available.`, Type.Object({ query: Type.String({ maxLength: 500 }), subjects: Type.Optional(Type.Array(Type.String())), historical: Type.Optional(Type.Boolean()) }), async (args, signal) => {
-      const memories = recall ? await recall.search(args.query, config.memory.recallLimit, args.subjects ?? [], args.historical ?? false, signal) : store.search(args.query, config.memory.recallLimit, args.subjects ?? [], [], args.historical ?? false);
+      const memories = recall ? await recall.search(args.query, config.memory.recallLimit, args.subjects ?? [], args.historical ?? false, signal) : store.search(args.query, config.memory.recallLimit, args.subjects ?? [], args.historical ?? false);
       ensureCurrent(store, context(), signal);
       for (const memory of memories) context().sources.add(memory.id);
       return memories;
