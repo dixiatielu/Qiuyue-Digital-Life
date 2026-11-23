@@ -26,9 +26,13 @@ test('generated native tools expose canonical native names and schemas directly'
       // add_custom_face also takes the description it is saved with.
       if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, desc: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, desc: undefined } });
       else assert.deepEqual(tool.parameters, action.inputSchema);
-      if (!['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name)) assert.ok(tool.description.replaceAll('qq_main__', '').startsWith(action.summary ?? action.name));
+      const common = ['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name);
+      // A seldom-used interface says what it is and no more.
+      if (!common) assert.equal(tool.description.replaceAll('qq_main__', ''), action.summary ?? action.name);
       assert.equal(findSnowLumaAction(action.name), action);
     }
+    // Only a tool that returns catalog names says how they map to the account's tool names.
+    assert.match(f.tools.current().find(tool => tool.name === 'qq_main__search_snowluma_tools')!.description, /use the qq_main__ tool prefix for this account\.$/);
   } finally { f.store.close(); }
 });
 

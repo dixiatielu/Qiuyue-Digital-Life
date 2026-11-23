@@ -6,6 +6,7 @@ import type { NativeActionDefinition } from '../platform.js';
 /** Scope a plugin without altering the native declarations its implementation works with. */
 export function scopePlugin(plugin: LifePlugin, instance: string, actions: readonly NativeActionDefinition[], adapter: SocialAdapter): LifePlugin {
   const names = new Map(actions.map(action => [nativeToolName(instance, action.name), action.name]));
+  const native = new Set(actions.map(action => action.name));
   const qualify = (name: string) => { const qualified = nativeToolName(instance, name); names.set(qualified, name); return qualified; };
   const local = (name: string) => names.get(name);
   const instructions = (text: string) => text.replace(/\b[a-zA-Z][a-zA-Z0-9_]*\b/g, name => names.has(nativeToolName(instance, name)) ? qualify(name) : name);
@@ -20,7 +21,8 @@ export function scopePlugin(plugin: LifePlugin, instance: string, actions: reado
     ...(plugin.emojiNames ? { emojiNames: (events, signal) => plugin.emojiNames!(events?.filter(event => !event.source || matches(event)), signal) } : {}),
     id: `${instance.replaceAll('_', '-')}-${plugin.id}`,
     contextVersion: `${plugin.contextVersion ?? '1'}:${instance}`,
-    tools: runtime => { const tools = plugin.tools(runtime.scoped(instance)); tools.forEach(tool => qualify(tool.name)); return tools.map(tool => ({ ...tool, name: qualify(tool.name), label: qualify(tool.name), description: `${instructions(tool.description)} Native operation names in catalog results use the ${instance}__ tool prefix for this account.`, ...(tool.insertBefore ? { insertBefore: qualify(tool.insertBefore) } : {}) })); },
+    // A native operation returns no catalog names, and saying so on each of some two hundred of them cost about 4,000 tokens in every model call.
+    tools: runtime => { const tools = plugin.tools(runtime.scoped(instance)); tools.forEach(tool => qualify(tool.name)); return tools.map(tool => ({ ...tool, name: qualify(tool.name), label: qualify(tool.name), description: native.has(tool.name) ? instructions(tool.description) : `${instructions(tool.description)} Native operation names in catalog results use the ${instance}__ tool prefix for this account.`, ...(tool.insertBefore ? { insertBefore: qualify(tool.insertBefore) } : {}) })); },
     ...(plugin.nativeActions ? { nativeActions: {
       accounts: plugin.nativeActions.accounts,
       definition: (name: string) => { const raw = local(name); return raw ? plugin.nativeActions!.definition(raw) : undefined; },
