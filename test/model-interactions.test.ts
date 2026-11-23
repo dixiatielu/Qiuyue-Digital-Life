@@ -42,11 +42,11 @@ function serverEvents(steps: Step[], status = 'completed', usage: Record<string,
 const signature = (name: string) => Buffer.from(`opaque-${name}`).toString('base64');
 const lookup: Step[] = [
   { type: 'thought', signature: signature('one') },
-  { type: 'tool_search_call', id: 'call_search', signature: signature('two'), arguments: { function_names: ['qq_main__set_group_sign'] } },
+  { type: 'tool_search_call', id: 'call_search', signature: signature('two'), arguments: { function_names: ['qq_main__get_group_honor_info'] } },
   { type: 'thought', signature: signature('three') },
-  { type: 'tool_search_result', call_id: 'call_search', signature: signature('four'), result: [{ type: 'function', name: 'default_api:qq_main__set_group_sign', description: '群签到', parameters: { type: 'object' } }] },
+  { type: 'tool_search_result', call_id: 'call_search', signature: signature('four'), result: [{ type: 'function', name: 'default_api:qq_main__get_group_honor_info', description: '获取群荣誉信息', parameters: { type: 'object' } }] },
   { type: 'thought', signature: signature('five') },
-  { type: 'function_call', id: 'call_sign', name: 'qq_main__set_group_sign', arguments: { group_id: 100 } },
+  { type: 'function_call', id: 'call_sign', name: 'qq_main__get_group_honor_info', arguments: { group_id: 100 } },
 ];
 
 test('a tool cycle defers seldom-used tools, replays the steps of the current turn as they came, and survives a restart without them', async () => {
@@ -57,7 +57,7 @@ test('a tool cycle defers seldom-used tools, replays the steps of the current tu
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     const body = requests.length === 1
       ? serverEvents(lookup, 'requires_action', { total_input_tokens: 1000, total_cached_tokens: 1900, total_output_tokens: 20, total_thought_tokens: 30, total_tool_use_tokens: 1010, total_tokens: 2060 })
-      : serverEvents([{ type: 'thought', signature: signature('six') }, { type: 'model_output', content: [{ type: 'text', text: 'Signed in' }] }]);
+      : serverEvents([{ type: 'thought', signature: signature('six') }, { type: 'model_output', content: [{ type: 'text', text: 'User 7 does' }] }]);
     // Events do not arrive one to a packet.
     response.write(body.slice(0, 137)); response.end(body.slice(137));
   });
@@ -68,14 +68,14 @@ test('a tool cycle defers seldom-used tools, replays the steps of the current tu
   const store = new Store(':memory:');
   const sent: string[] = [];
   let brain: PiBrain;
-  const tools = createTools(cfg, store, { execute: async kind => { sent.push(kind); return { signed: true }; } }, () => brain.thought);
+  const tools = createTools(cfg, store, { execute: async kind => { sent.push(kind); return { talkative: 7 }; } }, () => brain.thought);
   const credential = (name: string) => name === hydrogen.apiKeyEnv ? 'interactions-test-key' : undefined;
   const restart = () => new PiBrain(cfg, store, tools, undefined, undefined, undefined, credential);
   try {
     brain = restart();
-    event(store, 'Sign in to the group');
+    event(store, 'Who holds the group honors?');
     await brain.run(store.claim(10)!);
-    assert.deepEqual(sent, ['set_group_sign']);
+    assert.deepEqual(sent, ['get_group_honor_info']);
     assert.equal(requests.length, 2);
     const declared = (request: typeof requests[number], name: string) => request.body.tools.find((tool: any) => tool.name === name);
     for (const request of requests) {
@@ -88,17 +88,21 @@ test('a tool cycle defers seldom-used tools, replays the steps of the current tu
       assert.ok(request.body.system_instruction.length > 100);
       assert.deepEqual(request.body.generation_config, { thinking_level: 'medium', thinking_summaries: 'auto', max_output_tokens: 8192 });
       assert.deepEqual(request.body.tools[0], { type: 'tool_search' });
-      assert.equal(declared(request, 'qq_main__set_group_sign').defer_loading, true);
+      assert.equal(declared(request, 'qq_main__get_group_honor_info').defer_loading, true);
       // A deferred tool is still declared whole, so the model can load and call it by its own name.
-      assert.equal(declared(request, 'qq_main__set_group_sign').parameters.properties.group_id.type, 'integer');
+      assert.equal(declared(request, 'qq_main__get_group_honor_info').parameters.properties.group_id.type, 'integer');
       for (const name of ['qq_main__send_group_msg', 'set_activity', 'remember', 'qq_main__search_snowluma_tools']) assert.equal('defer_loading' in declared(request, name), false, name);
+      // The instructions name an activity's tools, and a model calls what it is told of by name without loading it, so those are declared in full.
+      assert.match(request.body.system_instruction, /Available tools: qq_main__set_group_sign/);
+      assert.equal('defer_loading' in declared(request, 'qq_main__set_group_sign'), false);
+      assert.match(request.body.system_instruction, /loaded on demand\. To load one, pass its identifier exactly as listed/);
       assert.equal(request.body.input[0].type, 'user_input');
     }
     const replayed: Step[] = requests[1]!.body.input;
     const from = replayed.findIndex(step => step.type === 'thought');
     assert.deepEqual(replayed.slice(from, from + lookup.length), lookup);
-    assert.deepEqual(replayed[from + lookup.length], { type: 'function_result', name: 'qq_main__set_group_sign', call_id: 'call_sign', result: replayed[from + lookup.length]!.result });
-    assert.match(replayed[from + lookup.length]!.result, /signed/);
+    assert.deepEqual(replayed[from + lookup.length], { type: 'function_result', name: 'qq_main__get_group_honor_info', call_id: 'call_sign', result: replayed[from + lookup.length]!.result });
+    assert.match(replayed[from + lookup.length]!.result, /talkative/);
     const first = brain.agent.state.messages.find((message): message is AssistantMessage => message.role === 'assistant')!;
     assert.equal(first.stopReason, 'toolUse');
     // The context is measured from one reading of the prompt; the further reading that loading a tool costs, and what of it was cached, are kept apart.
@@ -111,13 +115,13 @@ test('a tool cycle defers seldom-used tools, replays the steps of the current tu
     const restored: Step[] = requests[2]!.body.input;
     // The saved context keeps no thinking, so the earlier turn returns as the call, its result and the reply.
     assert.equal(restored.some(step => ['thought', 'tool_search_call', 'tool_search_result'].includes(step.type)), false);
-    assert.deepEqual(restored.find(step => step.type === 'function_call'), { type: 'function_call', id: 'call_sign', name: 'qq_main__set_group_sign', arguments: { group_id: 100 } });
+    assert.deepEqual(restored.find(step => step.type === 'function_call'), { type: 'function_call', id: 'call_sign', name: 'qq_main__get_group_honor_info', arguments: { group_id: 100 } });
     assert.ok(restored.some(step => step.type === 'function_result' && step.call_id === 'call_sign'));
-    assert.ok(restored.some(step => step.type === 'model_output' && step.content[0].text === 'Signed in'));
+    assert.ok(restored.some(step => step.type === 'model_output' && step.content[0].text === 'User 7 does'));
     assert.equal(restored.at(-1)!.type, 'user_input');
     // The model has seen itself call the tool and will not search again, and the API refuses a deferred call it holds no search for.
-    assert.equal('defer_loading' in declared(requests[2]!, 'qq_main__set_group_sign'), false);
-    assert.equal(declared(requests[2]!, 'qq_main__get_group_honor_info').defer_loading, true);
+    assert.equal('defer_loading' in declared(requests[2]!, 'qq_main__get_group_honor_info'), false);
+    assert.equal(declared(requests[2]!, 'qq_main__get_group_info').defer_loading, true);
   } finally {
     store.close(); server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -147,7 +151,7 @@ test('requests carry images, tool errors and histories written by another model 
   ];
   const context = normalizeContext({ systemPrompt: 'Persona', tools: [tool('view', 'View an image.'), tool('rare', '[qq account 1] 群签到\nNative operation: set_group_sign. Parameters follow the native API.')], messages });
   const request = interactionRequest(model, context, { thinkingLevel: 'low', maxTokens: 500, deferredTools: ['rare', 'not-declared'] });
-  assert.equal(request.system_instruction, 'Persona');
+  assert.match(request.system_instruction!, /^Persona\n\nTools listed with only a name and description are loaded on demand\./);
   assert.deepEqual(request.generation_config, { thinking_level: 'low', thinking_summaries: 'auto', max_output_tokens: 500 });
   assert.deepEqual(request.tools!.map((item: any) => [item.type, item.name, item.defer_loading, item.short_description]), [['tool_search', undefined, undefined, undefined], ['function', 'view', undefined, undefined], ['function', 'rare', true, '[qq account 1] 群签到']]);
   assert.deepEqual(request.input, [
@@ -172,6 +176,7 @@ test('requests carry images, tool errors and histories written by another model 
   assert.equal(deferral([rareCall, loaded]), false);
   // Nothing is deferred unless the caller names it, and then there is no search tool to pay for.
   assert.deepEqual(interactionRequest(model, context).tools!.map((item: any) => item.type), ['function', 'function']);
+  assert.equal(interactionRequest(model, context).system_instruction, 'Persona');
   assert.equal('thinking_level' in interactionRequest({ ...model, reasoning: false }, context).generation_config, false);
 });
 
@@ -202,8 +207,8 @@ test('an output cut off, an error in the stream, a refusal and an answer that wa
   assert.equal(whole.stopReason, 'toolUse');
   assert.deepEqual(whole.content.map(block => block.type), ['thinking', 'thinking', 'text', 'toolCall']);
   const search = whole.content[1]!;
-  assert.equal(search.type === 'thinking' && search.thinking, 'Looked up tools: qq_main__set_group_sign');
-  assert.deepEqual(whole.content[3], { type: 'toolCall', id: 'call_sign', name: 'qq_main__set_group_sign', arguments: { group_id: 100 } });
+  assert.equal(search.type === 'thinking' && search.thinking, 'Looked up tools: qq_main__get_group_honor_info');
+  assert.deepEqual(whole.content[3], { type: 'toolCall', id: 'call_sign', name: 'qq_main__get_group_honor_info', arguments: { group_id: 100 } });
   assert.deepEqual(interactionRequest(model, normalizeContext({ messages: [whole] })).input.slice(0, 4), [...lookup.slice(0, 2), { type: 'model_output', content: [{ type: 'text', text: 'One moment' }] }, lookup[5]]);
 });
 

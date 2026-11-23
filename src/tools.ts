@@ -27,10 +27,9 @@ export interface ToolSet {
 }
 /** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
 const reviewTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity']);
-const deferredNames = (tools: AgentTool[]) => tools.filter(tool => (tool as PluginTool).defer).map(tool => tool.name);
 export function forReview(tools: ToolSet): ToolSet {
   const current = () => tools.current().filter(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name));
-  return { plugins: tools.plugins, current, deferred: () => deferredNames(current()) };
+  return { plugins: tools.plugins, current, deferred: () => { const held = new Set(current().map(tool => tool.name)); return tools.deferred().filter(name => held.has(name)); } };
 }
 
 export function createTools(config: Config, store: Store, context: () => ThoughtContext, recall?: SemanticRecall, plugins = createPlugins(config, store, recall)): ToolSet {
@@ -143,5 +142,9 @@ export function createTools(config: Config, store: Store, context: () => Thought
     }),
     tool('finish_pursuit', 'End a pursuit: done when it is finished, dropped when you have given it up.', Type.Object({ id: string('Pursuit ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('dropped')]) }), args => { store.finishPursuit(args.id, args.status); return store.pursuits(); }),
   ];
-  return { plugins, current: () => withPlugins(result), deferred: () => deferredNames(withPlugins(result)) };
+  return { plugins, current: () => withPlugins(result), deferred: () => {
+    // The system instructions name each activity's tools, and a model calls a tool it has been told of by name without loading it first, which the API refuses.
+    const named = new Set(plugins.activities().flatMap(activity => activity.tools));
+    return withPlugins(result).filter(tool => (tool as PluginTool).defer && !named.has(tool.name)).map(tool => tool.name);
+  } };
 }

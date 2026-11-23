@@ -99,21 +99,31 @@ function calledUnloaded(steps: Step[]): Set<string> {
   return bare;
 }
 
+/**
+ * The API lists a deferred function to the model under a namespace, such as default_api:send_like, and finds nothing
+ * for a name asked for without it. With 194 functions deferred, gemini-4-hydrogen's first search came back empty in
+ * 49 of 60 requests on 2026-11-23: it then searched again, reading the prompt a further time, and in five it gave up
+ * and said it could not do what was asked. With this sentence the first search found the function in 12 of 12. With
+ * five functions deferred it did so without the sentence, in 6 of 6.
+ */
+const LOADING_HINT = 'Tools listed with only a name and description are loaded on demand. To load one, pass its identifier exactly as listed, including any prefix before a colon such as `default_api:`.';
+
 export function interactionRequest(model: Model<Api>, context: TranscriptContext, options: InteractionsOptions = {}) {
   // The API takes one system instruction and one tool list; later system messages are folded into them.
   const transcript = collapseSystemMessages(context);
   const system = getInitialSystemMessage(transcript.messages);
   const tools = getCurrentTools(transcript.messages);
   const conversation = transformMessages(withoutInitialSystemMessage(transcript.messages).filter(message => message.role !== 'system'), model, callId);
-  const instruction = system ? wellFormed(getSystemMessageText(system)) : '';
   const input = inputSteps(conversation, model);
   const deferred = new Set(options.deferredTools ?? []);
   for (const name of calledUnloaded(input)) deferred.delete(name);
+  const declared = declarations(tools, deferred);
+  const instruction = [system ? wellFormed(getSystemMessageText(system)) : '', declared.some(tool => tool.type === 'tool_search') ? LOADING_HINT : ''].filter(Boolean).join('\n\n');
   return {
     model: model.id,
     input,
     ...(instruction ? { system_instruction: instruction } : {}),
-    ...(tools.length ? { tools: declarations(tools, deferred) } : {}),
+    ...(tools.length ? { tools: declared } : {}),
     generation_config: {
       ...(model.reasoning ? { thinking_level: options.thinkingLevel ?? 'low', thinking_summaries: 'auto' } : {}),
       ...(options.maxTokens === undefined ? {} : { max_output_tokens: options.maxTokens }),
