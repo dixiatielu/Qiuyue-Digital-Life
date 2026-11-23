@@ -26,6 +26,8 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
   }
   for (const name of [...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny]) if (!actions.has(nativeToolName(adapter.instance, name))) throw new Error(`Unknown native interface: ${name}`);
   if (actions.has(nativeToolName(adapter.instance, 'describe_api'))) throw new Error('describe_api is reserved for adapter documentation.');
+  if (adapter.frequent !== undefined && (!Array.isArray(adapter.frequent) || adapter.frequent.some(name => typeof name !== 'string' || !actions.has(nativeToolName(adapter.instance, name))))) throw new Error('frequent must list operations of this adapter.');
+  const frequent = adapter.frequent && new Set(adapter.frequent);
   const controller = new AbortController();
   let active = false;
   const allowed = (name: string) => !!actions.get(name) && permits(permissions, actions.get(name)!.name);
@@ -58,7 +60,7 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
         if (!Check(action.inputSchema, args)) throw new ActionNotDispatchedError(`Invalid native parameters for ${name}.`);
         return action.readOnly ? runtime.record(`adapter:${adapter.instance}:${action.name}`, await runtime.query(name, args as Record<string, unknown>, signal))
           : runtime.action(name, args as Record<string, unknown>, dispatch => dispatch(name, runtime.resolveMedia(args) as Record<string, unknown>), signal);
-      }), available: () => allowed(name),
+      }), available: () => allowed(name), ...(frequent && !frequent.has(action.name) ? { defer: true } : {}),
     }))],
     start: async () => {
       store.bindPlatformAccount(adapter.instance, identity); active = true;

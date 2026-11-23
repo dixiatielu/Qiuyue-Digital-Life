@@ -87,6 +87,8 @@ export interface NativeAdapterDefinition {
   /** Exact API/catalog version, not the agent version. */
   version: string;
   actions: { name: string; summary?: string; inputSchema: JsonSchema; readOnly: boolean; invariants?: string[] }[];
+  /** Operations in everyday use. When given, the others are loaded on demand where the model's API can do that; every operation stays callable either way. */
+  frequent?: string[];
   permissions?: { allow: '*' | string[]; deny: string[] };
   execute(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
   conversation?(operation: string, args: Record<string, unknown>): { type: import('./identity.js').ConversationType; id: string } | undefined;

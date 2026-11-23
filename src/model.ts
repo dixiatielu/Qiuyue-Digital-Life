@@ -5,6 +5,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
 import { googleGenerativeAIApi } from '@earendil-works/pi-ai/api/google-generative-ai.lazy';
+import { GEMINI_INTERACTIONS, geminiInteractionsApi } from './gemini-interactions.js';
 import { OpenAICompletionsCompatSchema, OpenAIResponsesCompatSchema, AnthropicMessagesCompatSchema } from '@earendil-works/pi-ai/providers/compat-schema';
 import { Type } from 'typebox';
 import { Check } from 'typebox/value';
@@ -16,6 +17,7 @@ const apis = {
   'openai-responses': { create: openAIResponsesApi, compat: OpenAIResponsesCompatSchema },
   'anthropic-messages': { create: anthropicMessagesApi, compat: AnthropicMessagesCompatSchema },
   'google-generative-ai': { create: googleGenerativeAIApi, compat: Type.Object({}) },
+  [GEMINI_INTERACTIONS]: { create: geminiInteractionsApi, compat: Type.Object({}) },
 };
 type CustomApi = keyof typeof apis;
 const thinkingLevels: ModelThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];

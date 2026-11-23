@@ -8,7 +8,7 @@ import { createModelBackend, validateModelConfig, type ModelConfig } from '../mo
 import { EmbeddingClient } from '../embedding.js';
 import { hash } from './files.js';
 
-export const providerApis = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai'] as const;
+export const providerApis = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai', 'google-interactions'] as const;
 /**
  * A model provider the operator keeps for the page: an endpoint, its API, and where its key lives.
  * The daemon never reads these; choosing one for the model, embedding, or drawing copies its fields into the configuration.
@@ -60,7 +60,7 @@ const trimmed = (url: string) => url.replace(/\/+$/, '');
 export async function remoteModels(profile: ProviderProfile, request: typeof fetch = fetch, credential: CredentialReader = environmentCredential): Promise<string[]> {
   checkProfile(profile);
   const key = credential(profile.apiKeyEnv);
-  if (profile.api === 'google-generative-ai') {
+  if (profile.api === 'google-generative-ai' || profile.api === 'google-interactions') {
     // Match the generation adapter: baseUrl already includes the API version (usually /v1beta).
     const url = new URL(`${trimmed(profile.baseUrl)}/models`);
     const headers = key ? { 'x-goog-api-key': key } : undefined;

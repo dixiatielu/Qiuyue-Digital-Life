@@ -30,7 +30,7 @@ In `credentials.json`, under `credentials`, set `MODEL_API_KEY` and, if required
 
 ### Custom endpoints
 
-Custom endpoints support `openai-completions`, `openai-responses`, `anthropic-messages`, and Gemini's native `google-generative-ai` API. The management page offers **Gemini (native)** for providers and all three model assignments, including model listing and connection tests. For a built-in Gemini model, use provider `google` and a model ID from `npm run dev -- models google` without setting `api`.
+Custom endpoints support `openai-completions`, `openai-responses`, `anthropic-messages`, Gemini's native `google-generative-ai` API, and Gemini's Interactions API as `google-interactions`. The management page offers **Gemini (native)** for providers and all three model assignments, including model listing and connection tests. For a built-in Gemini model, use provider `google` and a model ID from `npm run dev -- models google` without setting `api`.
 
 For a Gemini native custom endpoint, use a complete model object like this, replacing the ID and token limits with those of your model:
 
@@ -48,6 +48,8 @@ For a Gemini native custom endpoint, use a complete model object like this, repl
   "thinkingLevel": "low"
 }
 ```
+
+`google-interactions` takes the same object with `"api": "google-interactions"`; its base URL also ends at the API version, and requests go to `<baseUrl>/interactions`. It is the Gemini API that loads tools on demand: seldom-used native operations reach the model as a name and description, and it reads their parameters when it wants one ([ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)). Every enabled tool stays callable. Each load makes the API read the prompt once more, reported as `toolUse` in the request's usage. The management page offers it as **Gemini (Interactions)**. Changing `api` starts a new working context, like any change of model.
 
 Save `GEMINI_API_KEY` through Credentials or in `credentials.json`. The native adapter sends `x-goog-api-key` and streams `models/{id}:streamGenerateContent`; `baseUrl` must include the API version, usually `/v1beta`, including any gateway prefix. Leave `compat` empty for Gemini; Pi maps `thinkingLevel` to the model's native thinking level or token budget. Model listing follows native pagination and excludes models declared to support only other methods, such as embedding. See Google's [API reference](https://ai.google.dev/api) and [model listing reference](https://aistudio.google.com/api-reference/models/list-models). This native support covers thinking, review, and compaction; embedding and drawing still use their documented OpenAI-compatible endpoints.
 

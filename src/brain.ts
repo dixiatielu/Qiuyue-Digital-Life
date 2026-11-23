@@ -104,9 +104,13 @@ export class PiBrain implements Brain {
   private readonly summaryBackend?: { model: Model<any>; stream: StreamFn };
   constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential, private owner: ModelOwner = 'main', compactionBackend?: { model: Model<any>; stream: StreamFn }) {
     const use = modelUse(config, owner);
-    const { model, stream } = backend ?? createModelBackend(use.thinking, credential);
+    const { model, stream: transport } = backend ?? createModelBackend(use.thinking, credential);
+    // Every request names the tools the model may load on demand; a transport that cannot do that declares them in full (ADR-0023).
+    const deferring = (send: StreamFn): StreamFn => (target, context, options) => send(target, context, { ...options, deferredTools: tools.deferred() } as typeof options);
+    const stream = deferring(transport);
     this.stream = stream;
-    this.summaryBackend = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential) : undefined);
+    const summary = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential) : undefined);
+    this.summaryBackend = summary && { model: summary.model, stream: deferring(summary.stream) };
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
     this.agent = new Agent({

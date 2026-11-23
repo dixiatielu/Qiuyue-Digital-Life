@@ -1,6 +1,6 @@
 # Platform adapters
 
-One Agent owns the persona, memory, pursuits, and action ledger. A platform adapter provides a complete catalog for a declared API revision, executes native operations, and publishes native events with platform context. Every permitted operation is a separate model tool. Catalog search or documentation never unlocks a smaller subset.
+One Agent owns the persona, memory, pursuits, and action ledger. A platform adapter provides a complete catalog for a declared API revision, executes native operations, and publishes native events with platform context. Every permitted operation is a separate model tool. Catalog search or documentation never unlocks a smaller subset. Where the model's API loads tools on demand, seldom-used operations reach the model as a name and description until it wants one ([ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)); they stay declared and callable.
 
 ## Built-in adapters
 
@@ -110,6 +110,7 @@ ctx.adapter({
   accountId: "18446744073709551615",
   version: "example-api-2026-11",
   actions: completeCatalog.actions,
+  frequent: ["sendMessage", "getMessages"], // optional
   permissions: { allow: "*", deny: [] },
   execute: (operation, parameters, signal) => client.call(operation, parameters, signal),
   conversation: (operation, args) => args.channel_id
@@ -122,6 +123,8 @@ ctx.adapter({
   stop: () => client.close()
 });
 ```
+
+`frequent` names the operations in everyday use. When it is given, the other operations are loaded on demand under a model API that can do that, and declared in full under any other; without it nothing is deferred. Loading costs the model a search and the API another reading of the prompt, so list what a normal day uses.
 
 The adapter is trusted local code. Supply a complete catalog with explicit provenance and a version; do not flatten every platform into a shared `send_message` subset. Validate account identity, preserve native payloads, honor cancellation, and retain platform-specific capabilities. `ctx.adapter` registers contributions during setup; reception starts only at activation. Adapter instances need unique tool namespaces. Other plugins can call `call.adapters.query(instance, operation, args)` or `call.adapters.action(instance, operation, args)` under host permissions and action rules. `call.snowluma` is not part of SDK v2.
 

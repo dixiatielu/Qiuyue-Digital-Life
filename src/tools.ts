@@ -6,7 +6,7 @@ import { fetchImage } from './web.js';
 import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
 import type { SemanticRecall } from './recall.js';
-import { PluginHost } from './plugins.js';
+import { PluginHost, type PluginTool } from './plugins.js';
 import { createPlugins } from './plugins/index.js';
 import { ensureCurrent, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
 import { validatedMemoryTool } from './memory-tool.js';
@@ -19,11 +19,18 @@ function urlsIn(value: unknown, found = new Set<string>()): Set<string> {
   else if (value && typeof value === 'object') for (const item of Object.values(value)) urlsIn(item, found);
   return found;
 }
-export interface ToolSet { current(): AgentTool[]; readonly plugins: PluginHost }
+export interface ToolSet {
+  current(): AgentTool[];
+  /** Names among current() that the model may load on demand instead of reading in every call (ADR-0023). */
+  deferred(): string[];
+  readonly plugins: PluginHost;
+}
 /** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
 const reviewTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity']);
+const deferredNames = (tools: AgentTool[]) => tools.filter(tool => (tool as PluginTool).defer).map(tool => tool.name);
 export function forReview(tools: ToolSet): ToolSet {
-  return { plugins: tools.plugins, current: () => tools.current().filter(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name)) };
+  const current = () => tools.current().filter(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name));
+  return { plugins: tools.plugins, current, deferred: () => deferredNames(current()) };
 }
 
 export function createTools(config: Config, store: Store, context: () => ThoughtContext, recall?: SemanticRecall, plugins = createPlugins(config, store, recall)): ToolSet {
@@ -136,5 +143,5 @@ export function createTools(config: Config, store: Store, context: () => Thought
     }),
     tool('finish_pursuit', 'End a pursuit: done when it is finished, dropped when you have given it up.', Type.Object({ id: string('Pursuit ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('dropped')]) }), args => { store.finishPursuit(args.id, args.status); return store.pursuits(); }),
   ];
-  return { plugins, current: () => withPlugins(result) };
+  return { plugins, current: () => withPlugins(result), deferred: () => deferredNames(withPlugins(result)) };
 }

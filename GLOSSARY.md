@@ -200,6 +200,10 @@ _Avoid_: a separate Agent per account, transport identity
 The part of the program through which a platform account is reached. It offers the platform's native operations as tools and publishes its events; replacing one does not change who the Agent or its contacts are.
 _Avoid_: platform account, a plugin for one feature
 
+**Deferred Tool**:
+A tool the model is told of by name and description, and whose parameters it reads when it decides to use it. It is enabled and callable by its own name like any other; deferral changes what each model call carries, not what the Agent may do.
+_Avoid_: disabled tool, unlocked tool, hidden tool
+
 **Plugin**:
 A capability added to the digital life as one unit: its tools, what it adds to observations, and its background work. Built-in plugins ship with the program; user plugins live in the operator's plugin directory and reload between thoughts.
 _Avoid_: a model tool, platform adapter

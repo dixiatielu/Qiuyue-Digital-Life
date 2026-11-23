@@ -14,7 +14,11 @@ export interface ActivityPrompt extends UserActivity { plugin: string; instructi
 function availableActivities(activities: OnlineActivity[], available: ReadonlySet<string>) {
   return activities.map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
 }
-export interface PluginTool extends AgentTool { insertBefore?: string; available?(): boolean }
+export interface PluginTool extends AgentTool {
+  insertBefore?: string; available?(): boolean;
+  /** Seldom used. Where the model's API loads tools on demand, the model sees its name and description and reads the parameters when it wants it (ADR-0023); elsewhere it is declared in full like any other. */
+  defer?: boolean;
+}
 export interface PluginImage {
   label: string;
   unavailable: string;
@@ -139,7 +143,8 @@ export class PluginHost {
         ordered.splice(ordered.findIndex(item => item === tool), 1);
         ordered.splice(ordered.findIndex(item => item.name === tool.insertBefore), 0, tool);
       }
-      return ordered.map(tool => this.decorate(tool, runtime, plugins));
+      // A decorator builds its own tool object; whether the tool is deferred stays with the plugin that offers it.
+      return ordered.map(tool => { const decorated: PluginTool = this.decorate(tool, runtime, plugins); return (tool as PluginTool).defer && !decorated.defer ? { ...decorated, defer: true } : decorated; });
     };
     let base: AgentTool[] = [], after: AgentTool[] = [];
     this.validators.push(plugins => { build(plugins, base, after); });

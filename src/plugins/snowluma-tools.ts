@@ -107,7 +107,7 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
       const toolFor = (action: SnowLumaActionDefinition) => native.get(action.name)!;
       function nativeTool(action: SnowLumaActionDefinition): PluginTool {
         return {
-          name: action.name, label: action.name, available: () => allowed(action),
+          name: action.name, label: action.name, available: () => allowed(action), defer: !common.has(action.name),
           description: common.has(action.name)
             ? nativeToolDescription(action, usage[action.name])
             : action.summary ?? action.name,

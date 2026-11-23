@@ -175,6 +175,21 @@ test('third-party plugins register native catalogs through the public SDK and ob
   } finally { await host.stop(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('an adapter that names its frequent operations has the others loaded on demand; one that names none defers nothing', () => {
+  const store = new Store(':memory:');
+  const adapter = (frequent?: string[]) => new PluginHost([nativeAdapterPlugin({
+    instance: 'discord_main', platform: 'discord', accountId: '1', version: 'fixture-1', ...(frequent ? { frequent } : {}),
+    actions: [{ name: 'sendMessage', inputSchema: { type: 'object' }, readOnly: false }, { name: 'getGuild', inputSchema: { type: 'object' }, readOnly: true }],
+    execute: async () => ({}),
+  }, store)]);
+  const deferred = (host: PluginHost) => bind(store, host).tools.filter(tool => (tool as { defer?: boolean }).defer).map(tool => tool.name);
+  try {
+    assert.deepEqual(deferred(adapter()), []);
+    assert.deepEqual(deferred(adapter(['sendMessage'])), ['discord_main__getGuild']);
+    assert.throws(() => adapter(['sendMesage']), /frequent must list operations/);
+  } finally { store.close(); }
+});
+
 test('Telegram-only config and core inspection do not require SnowLuma credentials or a catalog', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-telegram-config-'));
   const raw = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
