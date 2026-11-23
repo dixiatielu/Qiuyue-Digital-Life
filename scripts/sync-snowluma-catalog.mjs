@@ -5,11 +5,17 @@ import { SNOWLUMA_ACTIONS } from '@snowluma/sdk';
 // Pin the source so catalog changes can be checked together with SDK upgrades.
 const commit = process.argv[2] ?? 'e44e4ced17c5911b9aa9db449ba29f2d9e567d2a';
 if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Provide the full SnowLuma Git commit SHA.');
-const base = `https://raw.githubusercontent.com/SnowLuma/SnowLuma/${commit}/`;
+// The upstream repository has returned 404 since 2026-11-13. These copies still hold the
+// pinned commit, and the commit SHA fixes the file contents, so any of them serves the same bytes.
+const repositories = ['SnowLuma/SnowLuma', 'TomyJan/SnowLuma', 'XingYunStar/snowluma', 'wess09/SnowLuma'];
 async function fetchSource(path) {
-  const response = await fetch(base + path, { signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
-  return response.text();
+  const failures = [];
+  for (const repository of repositories) {
+    const response = await fetch(`https://raw.githubusercontent.com/${repository}/${commit}/${path}`, { signal: AbortSignal.timeout(30_000) }).catch(error => error);
+    if (response.ok) return response.text();
+    failures.push(`${repository}: ${response.status ? `HTTP ${response.status}` : response.message}`);
+  }
+  throw new Error(`${path} at ${commit} is unavailable (${failures.join('; ')})`);
 }
 const catalog = JSON.parse(await fetchSource('packages/mcp/src/generated/catalog.json'));
 const license = await fetchSource('LICENSE');
