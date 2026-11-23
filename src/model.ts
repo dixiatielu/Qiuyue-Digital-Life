@@ -59,6 +59,25 @@ export function modelBudget(model: Model<Api>, contextTokens: number, reserve: n
   return { window, budget: window - reserve - safety };
 }
 
+/**
+ * Whether a tool can be declared to this model partway through a conversation without rewriting what came before it.
+ * Only then are seldom-used tools left out until asked for (ADR-0023): elsewhere a new tool replaces the request's
+ * tool list, and with it the cached prefix of the whole working context. Pi's transports say so through compat
+ * flags, which its catalog sets for capable models and an operator sets for a custom one.
+ */
+export function addsToolsInPlace(model: Model<Api>): boolean {
+  const compat = (model.compat ?? {}) as Record<string, unknown>;
+  if (model.api === GEMINI_INTERACTIONS) return true;
+  if (compat.supportsMidConvoSystemMessages !== true) return false;
+  return model.api === 'anthropic-messages' ? compat.supportsMidConvoToolChanges === true
+    : model.api === 'openai-responses' ? compat.supportsAdditionalTools === true
+    : model.api === 'openai-completions' && compat.supportsMidConvoToolAdditions === true;
+}
+/** False for a configuration whose model cannot be resolved; starting with it fails elsewhere, with the reason. */
+export function loadsToolsOnDemand(config: Config, owner: ModelOwner): boolean {
+  try { return addsToolsInPlace(resolveModel(modelUse(config, owner).thinking)); } catch { return false; }
+}
+
 export function modelRoute(model: Model<Api>) { return JSON.stringify([model.provider, model.id, model.api, model.baseUrl]); }
 
 /** Preserve field paths when the same model validator serves several independent configurations. */

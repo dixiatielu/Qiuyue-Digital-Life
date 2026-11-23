@@ -16,8 +16,10 @@ function availableActivities(activities: OnlineActivity[], available: ReadonlySe
 }
 export interface PluginTool extends AgentTool {
   insertBefore?: string; available?(): boolean;
-  /** Seldom used. Where the model's API loads tools on demand, the model sees its name and description and reads the parameters when it wants it (ADR-0023); elsewhere it is declared in full like any other. */
+  /** Seldom used. Where a tool can be declared to the model mid-conversation, it is listed by name and declared when the model asks for it (ADR-0023); elsewhere it is declared from the start like any other. */
   defer?: boolean;
+  /** What find_tools adds to the declaration when asked about this tool: results, examples, constraints, or parameter prose the declaration leaves out. */
+  documentation?(): unknown;
 }
 export interface PluginImage {
   label: string;
@@ -143,8 +145,11 @@ export class PluginHost {
         ordered.splice(ordered.findIndex(item => item === tool), 1);
         ordered.splice(ordered.findIndex(item => item.name === tool.insertBefore), 0, tool);
       }
-      // A decorator builds its own tool object; whether the tool is deferred stays with the plugin that offers it.
-      return ordered.map(tool => { const decorated: PluginTool = this.decorate(tool, runtime, plugins); return (tool as PluginTool).defer && !decorated.defer ? { ...decorated, defer: true } : decorated; });
+      // A decorator builds its own tool object; whether the tool is deferred and what documents it stay with the plugin that offers it.
+      return ordered.map(tool => {
+        const decorated: PluginTool = this.decorate(tool, runtime, plugins); const { defer, documentation }: PluginTool = tool;
+        return decorated.defer === defer && decorated.documentation === documentation ? decorated : { ...decorated, defer, documentation };
+      });
     };
     let base: AgentTool[] = [], after: AgentTool[] = [];
     this.validators.push(plugins => { build(plugins, base, after); });

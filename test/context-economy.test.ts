@@ -118,7 +118,7 @@ test('obsolete identity checkpoints reset conversation while retaining full acti
     const provenance = Array.from({ length: 200 }, () => `e:${crypto.randomUUID()}`);
     const action = beginAction(f.store, 'legacy', "qq_main__send_group_msg", { group_id: 100, message: 'Original reply' }, provenance).action;
     f.store.finishAction(action.id, 'unknown', { reason: 'Unknown' });
-    f.faux.setResponses([answer(call("qq_main__load_snowluma_tools", { names: ['get_group_member_info'] })), answer('Remember the lunar maria topic after restart')]);
+    f.faux.setResponses([answer(call("find_tools", { names: ['qq_main__get_group_member_info'] })), answer('Remember the lunar maria topic after restart')]);
     await f.brain.run(f.store.claim(20)!);
     const messages = structuredClone(f.brain.agent.state.messages);
     const legacyInstructions = getCurrentSystemPrompt(toModelMessages(messages)).split('\nruntime_data format=')[0]!;

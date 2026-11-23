@@ -63,7 +63,7 @@ test('custom gateway handles real Pi tool cycles and preserves the remote model 
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
     requests.push({ path: request.url, authorization: request.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
     const calls = [
-      { name: 'load_snowluma_tools', arguments: '{"names":["send_custom_face"]}' },
+      { name: 'find_tools', arguments: '{"names":["qq_main__send_custom_face"]}' },
       { name: 'set_activity', arguments: '{"activity":"Gateway integration"}' },
     ];
     const next = calls[requests.length - 1];

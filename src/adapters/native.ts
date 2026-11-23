@@ -1,4 +1,3 @@
-import { Type } from 'typebox';
 import { Check } from 'typebox/value';
 import type { TSchema } from 'typebox';
 import type { LifePlugin } from '../plugins.js';
@@ -25,7 +24,6 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
     actions.set(name, { ...action, invariants: action.invariants ?? [], inputSchema: action.inputSchema as TSchema });
   }
   for (const name of [...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny]) if (!actions.has(nativeToolName(adapter.instance, name))) throw new Error(`Unknown native interface: ${name}`);
-  if (actions.has(nativeToolName(adapter.instance, 'describe_api'))) throw new Error('describe_api is reserved for adapter documentation.');
   if (adapter.frequent !== undefined && (!Array.isArray(adapter.frequent) || adapter.frequent.some(name => typeof name !== 'string' || !actions.has(nativeToolName(adapter.instance, name))))) throw new Error('frequent must list operations of this adapter.');
   const frequent = adapter.frequent && new Set(adapter.frequent);
   const controller = new AbortController();
@@ -48,20 +46,22 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
   return {
     id: `adapter-${adapter.instance.replaceAll('_', '-')}`, contextVersion: adapter.version,
     nativeActions: { accounts: [identity], definition: name => actions.get(name), allowed, execute },
-    reviewTools: [nativeToolName(adapter.instance, 'describe_api'), ...[...actions].filter(([, action]) => action.readOnly).map(([name]) => name)],
+    reviewTools: [...actions].filter(([, action]) => action.readOnly).map(([name]) => name),
     chatActions: [...actions].filter(([, action]) => !action.readOnly).map(([name]) => name),
     chatTarget,
     images: event => event.source?.platform === adapter.platform && event.source.accountId === adapter.accountId ? (adapter.images?.(event) ?? []).map(image => ({
       label: image.label, autoView: image.autoView ?? true, unavailable: 'This platform image is unavailable; its appearance has not been perceived.', deferred: `Use view_event_image with event ${event.id} and its image index to see it.`,
       load: async signal => { if (!active) throw new Error('Adapter is inactive.'); const loaded = await image.load(AbortSignal.any([controller.signal, ...(signal ? [signal] : [])])); return { ...loaded, data: Buffer.from(loaded.data) }; },
     })) : [],
-    tools: runtime => [runtime.jsonTool(nativeToolName(adapter.instance, 'describe_api'), 'Read the original parameter documentation for a native operation. All enabled native tools are already callable; this does not change the tool set.', Type.Object({ operation: Type.String() }), ({ operation }) => { const action = actions.get(nativeToolName(adapter.instance, operation)); if (!action) throw new Error('Unknown native operation.'); return action; }), ...[...actions].map(([name, action]) => ({
-      ...runtime.jsonTool(name, `[${adapter.platform} account ${adapter.accountId}; ${adapter.instance}; API ${adapter.version}] ${(action.summary ?? action.name).split('\n')[0]}\nNative operation: ${action.name}. ${action.invariants.join(' ')} Parameters and results follow the native API. Use ${nativeToolName(adapter.instance, 'describe_api')} for full parameter documentation.`, compactSchema(action.inputSchema), async (args, signal) => {
+    tools: runtime => [...actions].map(([name, action]) => ({
+      ...runtime.jsonTool(name, `[${adapter.platform} account ${adapter.accountId}; ${adapter.instance}; API ${adapter.version}] ${(action.summary ?? action.name).split('\n')[0]}\nNative operation: ${action.name}. ${action.invariants.join(' ')} Parameters and results follow the native API; find_tools returns the full parameter documentation.`, compactSchema(action.inputSchema), async (args, signal) => {
         if (!Check(action.inputSchema, args)) throw new ActionNotDispatchedError(`Invalid native parameters for ${name}.`);
         return action.readOnly ? runtime.record(`adapter:${adapter.instance}:${action.name}`, await runtime.query(name, args as Record<string, unknown>, signal))
           : runtime.action(name, args as Record<string, unknown>, dispatch => dispatch(name, runtime.resolveMedia(args) as Record<string, unknown>), signal);
       }), available: () => allowed(name), ...(frequent && !frequent.has(action.name) ? { defer: true } : {}),
-    }))],
+      // The declaration omits repeated prose; the catalog's own entry has it.
+      documentation: () => action,
+    })),
     start: async () => {
       store.bindPlatformAccount(adapter.instance, identity); active = true;
       try {

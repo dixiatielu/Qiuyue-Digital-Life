@@ -26,8 +26,7 @@ const toolLabel = (name: string) => ({
   remember: ui('Save memory', '保存记忆'), read_context: ui('Read earlier context', '读取历史上下文'),
   send_group_msg: ui('Send group message', '发送群消息'), send_private_msg: ui('Send private message', '发送私聊消息'),
   send_custom_face: ui('Send sticker', '发送表情'), add_custom_face: ui('Save sticker', '收藏表情'),
-  set_group_reaction: ui('React to message', '回应消息'), search_snowluma_tools: ui('Find tools', '查找工具'),
-  load_snowluma_tools: ui('Read tool instructions', '读取工具用法'),
+  set_group_reaction: ui('React to message', '回应消息'), find_tools: ui('Find tools', '查找工具'),
 } as Record<string, string>)[name.split('__').at(-1)!] ?? name;
 const symbol = (item: DisplayItem) => problem(item) ? '!' : ['done', 'success', 'processed', 'stop'].includes(item.state ?? '') ? '✓' : item.state === 'interrupted' || item.state === 'aborted' ? '−' : '·';
 const outcomeStyle = (item: DisplayItem, text: string, theme: TuiTheme) => item.state === 'unknown' || item.state === 'pending' ? theme.warning(text) : problem(item) ? theme.danger(text) : item.state === 'success' ? theme.success(text) : dim(text);

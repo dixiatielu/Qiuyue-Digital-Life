@@ -1,40 +1,9 @@
-import { Type } from 'typebox';
 import type { AdapterConfig, Config } from '../config.js';
 import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
 import { errorResult } from '../tool-runtime.js';
 import { preferJpeg } from '../web.js';
 import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
 
-const string = (description: string, maxLength = 6000) => Type.String({ description, minLength: 1, maxLength });
-// Normalize common ways of describing QQ actions before matching catalog text.
-const toolSearchAliases: [RegExp, string][] = [
-  [/private (?:message|chat)|direct message/giu, '私聊'],
-  [/group members?|group users?/giu, '群成员'],
-  [/delete|recall|revoke/giu, '撤回'],
-  [/send/giu, '发送'],
-  [/get|find|search|read|list/giu, '获取'],
-  [/qzone|space|feed/giu, '空间'],
-  [/groups?/giu, '群'],
-  [/friends?/giu, '好友'],
-  [/messages?/giu, '消息'],
-  [/files?/giu, '文件'],
-  [/emoji|emoticons?/giu, '表情'],
-  [/forward/giu, '转发'],
-  [/images?|pictures?/giu, '图片'],
-  [/voice|audio/giu, '语音'],
-  [/announcements?/giu, '公告'],
-  [/私信|私聊消息|单聊|私发/gu, '私聊'],
-  [/群友|群员/gu, '群成员'],
-  [/撤销|收回/gu, '撤回'],
-  [/发出|发给|发条|发一条|发个|发(?=私聊|消息)|发送/gu, '发送'],
-  [/查看|查找|查询|读取/gu, '获取'],
-  [/好友动态|qq空间|朋友圈/giu, '空间'],
-  [/聊天记录/gu, '消息'],
-];
-const toolSearchConcepts = ['私聊', '群成员', '群', '好友', '消息', '发送', '撤回', '获取', '空间', '文件', '表情', '转发', '图片', '语音', '公告'];
-function normalizeToolSearch(value: string): string {
-  return toolSearchAliases.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value.toLowerCase());
-}
 /** SnowLuma uploads an image segment's bytes as they come, and QQ rejects AVIF (highway error 921), so ask Qzone's CDN for JPEG. */
 function jpegImages(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(jpegImages);
@@ -71,7 +40,6 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
     nativeActions: { accounts: [{ platform: 'qq', accountId: String(account.accountId) }], definition: name => snowlumaCatalog.find(action => action.name === name), allowed: name => allowedSnowLumaAction(findSnowLumaAction(name), account.tools) },
     id: 'snowluma-tools', enabled: () => config.plugins['snowluma-tools'] !== false,
     tools: runtime => {
-      const tool = runtime.jsonTool.bind(runtime);
       const allowed = (action: SnowLumaActionDefinition) => runtime.allowed(action.name);
       const common = new Set([
         'send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg',
@@ -108,6 +76,8 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
       function nativeTool(action: SnowLumaActionDefinition): PluginTool {
         return {
           name: action.name, label: action.name, available: () => allowed(action), defer: !common.has(action.name),
+          // The declaration carries the parameters; find_tools adds what the catalog says of results and use.
+          documentation: () => ({ category: action.category, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }),
           description: common.has(action.name)
             ? nativeToolDescription(action, usage[action.name])
             : action.summary ?? action.name,
@@ -139,27 +109,7 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
           },
         };
       }
-      const discovery: PluginTool[] = [
-        tool('search_snowluma_tools', 'Search SnowLuma interfaces by purpose, synonyms, or category; use an empty query to browse. Interfaces are directly available; use load_snowluma_tools for detailed usage.', Type.Object({ query: Type.Optional(Type.String({ maxLength: 200 })), category: Type.Optional(Type.String()), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }), args => {
-          const query = normalizeToolSearch(String(args.query ?? '').trim());
-          const terms = query.split(/\s+/u).filter(Boolean);
-          const concepts = toolSearchConcepts.filter(concept => query.includes(concept));
-          const pool = snowlumaCatalog.filter(action => !args.category || args.category === action.category);
-          const text = (action: SnowLumaActionDefinition) => normalizeToolSearch([action.name, action.category ?? '', action.summary ?? ''].join(' '));
-          let matches = pool.filter(action => terms.every(term => text(action).includes(term)));
-          if (!matches.length && concepts.length) matches = pool.filter(action => concepts.every(concept => text(action).includes(concept)));
-          const offset = args.offset ?? 0; const limit = args.limit ?? 20;
-          const categories = [...new Set(snowlumaCatalog.map(action => action.category).filter((category): category is string => !!category))];
-          const relatedCategories = !matches.length && concepts.length ? [...new Set(snowlumaCatalog.filter(action => concepts.some(concept => text(action).includes(concept))).map(action => action.category).filter(Boolean))] : [];
-          return { total: matches.length, nextOffset: offset + limit < matches.length ? offset + limit : null, categories, ...(!matches.length ? { relatedCategories, hint: 'Try shorter keywords, or clear query and specify category to browse.' } : {}), actions: matches.slice(offset, offset + limit).map(action => ({ name: action.name, summary: action.summary, category: action.category, readOnly: action.readOnly, stream: action.stream ?? false, allowed: allowed(action) })) };
-        }),
-        tool('load_snowluma_tools', 'View detailed usage, parameters, results, examples, and constraints for enabled SnowLuma tools by original interface name. Tools are already directly available; this query does not change the tool set.', Type.Object({ names: Type.Array(string('Original SnowLuma interface name', 100), { minItems: 1, maxItems: 8 }) }), args => {
-          const actions = [...new Set<string>(args.names)].map(findSnowLumaAction);
-          for (const action of actions) if (!allowed(action)) throw new Error(`The operator has not enabled this SnowLuma interface: ${action.name}`);
-          return actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, inputSchema: runtime.decorate(toolFor(action)).parameters, returns: action.returns, returnsSchema: action.returnsSchema, examples: action.examples, invariants: action.invariants, readOnly: action.readOnly, stream: action.stream ?? false }));
-        }),
-      ];
-      return [...discovery, ...snowlumaCatalog.map(toolFor)];
+      return snowlumaCatalog.map(toolFor);
     },
     activities: activities.map(activity => ({ ...activity, insertBefore: 'Write or reread your diary' })),
     experienceKinds: Object.fromEntries(snowlumaCatalog.map(action => [action.name, `adapter:${account.id}:${action.name}`])),

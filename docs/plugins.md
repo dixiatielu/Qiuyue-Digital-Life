@@ -147,7 +147,7 @@ Sticker suggestions retain `embedding.stickerThreshold` and `embedding.stickerLi
 
 Turning off `qq-faces` removes `view_face`, face-name enhancement, and automatic pictures, without removing native reaction or message tools. The directory remains in the existing `faces` setting. Unknown faces continue to be rendered by ID; Unicode reactions still render as Unicode.
 
-Turning off `snowluma-tools` removes the native catalog's tools, `search_snowluma_tools`, `load_snowluma_tools`, and their platform-specific activity hints. The named plugin owns that account's connection, so disabling it also stops reception and native dispatch for that account. Sticker send suggestions are suppressed while the native send tool is absent.
+Turning off `snowluma-tools` removes the native catalog's tools and their platform-specific activity hints. The named plugin owns that account's connection, so disabling it also stops reception and native dispatch for that account. Sticker send suggestions are suppressed while the native send tool is absent.
 
 ## Internal tools and thought state
 
@@ -174,9 +174,9 @@ The daemon creates one host. The primary thinking process and memory review bind
 
 An enhancement can return no new tools and implement `decorateTool(tool, runtime)`. It must preserve the tool name and call the original tool's executor for the original operation. Additional external actions use `runtime.action`. Discovery reads the decorated schema too. The host rechecks the plugin switch when a held enhanced tool executes. `qq-stickers` demonstrates adding `desc` to `add_custom_face`, stripping it before the native save, and recording the subsequent description separately. Failed or unknown description outcomes leave the successful save standing.
 
-A built-in tool can set `defer: true` when it is seldom used: under a model API that loads tools on demand the model then sees its name and description and reads the parameters when it wants the tool, and under any other API it is declared in full ([ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)). A decorator does not change whether a tool is deferred.
+A built-in tool can set `defer: true` when it is seldom used: under a model that can take a tool mid-conversation it is then listed in the instructions by name and the first line of its description, and declared once the model asks for it with `find_tools`; under any other model it is declared from the start ([ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)). A tool an activity names is never deferred. A tool can also supply `documentation()`, which `find_tools` returns beside the description: results, examples, constraints, or parameter prose the declaration leaves out. A decorator changes neither.
 
-A tool can supply `available()` to narrow its availability within an enabled plugin. The host reevaluates it when constructing the tool set and before executing a held tool. Native tools use this for operator permissions. Register the complete catalog once per thinking process; queries for detailed usage call `runtime.decorate` so enhancements such as the save's `desc` appear without registering a second tool of the same name. `runtime.resolveMedia` expands media references only for outgoing parameters, while action receipts retain the stable references.
+A tool can supply `available()` to narrow its availability within an enabled plugin. The host reevaluates it when constructing the tool set and before executing a held tool. Native tools use this for operator permissions. Register the complete catalog once per thinking process; `runtime.decorate` applies enhancements such as the save's `desc` to a tool without registering a second one of the same name. `runtime.resolveMedia` expands media references only for outgoing parameters, while action receipts retain the stable references.
 
 `runtime.record(kind, result)` stores a tool result as an experience and adds its source ID to the current thought. This is how a webpage or search result remains available to `read_event` and `remember` after its tool output is truncated or leaves working context.
 

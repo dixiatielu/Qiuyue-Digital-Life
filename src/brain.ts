@@ -1,7 +1,7 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend, modelBudget, modelRoute, modelUse, type ModelOwner } from './model.js';
-import { createInitialSystemMessage, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
+import { createInitialSystemMessage, getCurrentTools, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
@@ -9,7 +9,7 @@ import type { EnvironmentEvent, Memory, MemoryKind, Observation } from './domain
 import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
-import { ensureCurrent, type ThoughtContext, type ToolSet } from './tools.js';
+import { ensureCurrent, FIND_TOOLS, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
@@ -67,7 +67,7 @@ export interface Brain {
 export function contextIdentity(config: Config, tools: ToolSet) {
   const contracts = tools.plugins.installed().filter(plugin => plugin.contextVersion !== undefined && (plugin.enabled?.() ?? true)).map(plugin => [plugin.id, plugin.contextVersion]);
   const current = tools.current();
-  const instructions = systemInstructions(config, tools.plugins.activityPrompts(new Set(current.map(tool => tool.name))));
+  const instructions = systemInstructions(config, tools.plugins.activityPrompts(new Set(current.map(tool => tool.name))), tools.deferred());
   return digest({ instructions, model: config.model, accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })), tools: current.map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
 }
 
@@ -105,20 +105,21 @@ export class PiBrain implements Brain {
   constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential, private owner: ModelOwner = 'main', compactionBackend?: { model: Model<any>; stream: StreamFn }) {
     const use = modelUse(config, owner);
     const { model, stream: transport } = backend ?? createModelBackend(use.thinking, credential);
-    // Every request names the tools the model may load on demand; a transport that cannot do that declares them in full (ADR-0023).
-    const deferring = (send: StreamFn): StreamFn => (target, context, options) => send(target, context, { ...options, deferredTools: tools.deferred() } as typeof options);
-    const stream = deferring(transport);
+    // A transport of our own must be told which tool loads the others; Pi's render a transcript's tool additions themselves (ADR-0023).
+    const loading = (send: StreamFn): StreamFn => !tools.loading.enabled ? send : (target, context, options) => send(target, context, { ...options, toolLoader: FIND_TOOLS } as typeof options);
+    const stream = loading(transport);
     this.stream = stream;
     const summary = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential) : undefined);
-    this.summaryBackend = summary && { model: summary.model, stream: deferring(summary.stream) };
+    this.summaryBackend = summary && { model: summary.model, stream: loading(summary.stream) };
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
     this.agent = new Agent({
-      initialState: { model, systemPrompt: this.instructions(), tools: tools.current(), thinkingLevel: use.thinking.thinkingLevel ?? 'off' },
+      initialState: { model, systemPrompt: this.instructions(), tools: tools.declared(), thinkingLevel: use.thinking.thinkingLevel ?? 'off' },
       streamFn: (target, context, options) => stream(target, context, { ...options, maxTokens: Math.min(modelUse(config, owner).limits.outputReserveTokens, target.maxTokens) }),
       getApiKey: () => credential(use.thinking.apiKeyEnv), toolExecution: 'sequential', steeringMode: 'all',
       convertToLlm: toModelMessages,
-      prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.current() } }),
+      // What a thought has loaded is declared from its next turn on; Pi writes the change into the transcript.
+      prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.declared() } }),
       beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
       afterToolCall: async ({ toolCall, isError, result }) => !isError && this.tools.plugins.endsThought(toolCall.name, result.details) ? { terminate: true } : undefined,
       prepareRequest: async ({ context, model: currentModel }, signal) => {
@@ -167,6 +168,8 @@ export class PiBrain implements Brain {
       if (event.type === 'message_end' && event.message.role === 'assistant') { this.finishRequest(event.message); this.phase = 'acting'; }
       if (event.type === 'tool_execution_start') {
         const chat = this.tools.plugins.chatTarget(event.toolName, event.args); if (chat) this.engaged.add(chat);
+        // A call to a tool not yet loaded fails as not found; loading it now lets the next turn make the call.
+        this.tools.loading.add(event.toolName);
       }
       if (event.type === 'turn_end' && event.message.role === 'assistant' && !['error', 'aborted'].includes(event.message.stopReason)) {
         if (!this.skipped) this.preemptions = 0;
@@ -183,7 +186,7 @@ export class PiBrain implements Brain {
   abort() { this.cancelBackground(); this.controller.abort(); this.agent.abort(); }
   private cancelBackground() { this.background?.controller.abort(); this.background = undefined; }
   private instructions() {
-    return systemInstructions(this.config, this.activityPrompts());
+    return systemInstructions(this.config, this.activityPrompts(), this.tools.deferred());
   }
   /** Read-only management preview, using this brain's actual tool permissions. */
   activityPrompts() { return this.tools.plugins.activityPrompts(new Set(this.tools.current().map(tool => tool.name))); }
@@ -358,8 +361,9 @@ export class PiBrain implements Brain {
   }
   private resetContext() {
     this.cancelBackground();
-    this.agent.reset(); this.agent.state.tools = this.tools.current();
-    this.agent.state.messages = [createInitialSystemMessage(this.instructions(), this.tools.current().map(toToolDeclaration))!];
+    this.tools.loading.restore([]);
+    this.agent.reset(); this.agent.state.tools = this.tools.declared();
+    this.agent.state.messages = [createInitialSystemMessage(this.instructions(), this.tools.declared().map(toToolDeclaration))!];
     this.meter.reset(); this.thought.sources.clear(); this.runtimeSnapshot = undefined;
   }
   /** Called only while the runtime has stopped dispatch and drained both brains. */
@@ -368,7 +372,7 @@ export class PiBrain implements Brain {
     const identity = contextIdentity(this.config, this.tools);
     const changed = identity !== this.identity;
     this.identity = identity;
-    this.agent.state.tools = this.tools.current();
+    this.agent.state.tools = this.tools.declared();
     if (changed) { this.resetContext(); this.contextGeneration = -1; }
     return changed;
   }
@@ -376,7 +380,9 @@ export class PiBrain implements Brain {
     return { identity: this.identity, generation: this.contextGeneration, messages: this.agent.state.messages.slice(), sources: [...this.thought.sources], anchor: this.meter.anchor };
   }
   private restore(checkpoint: ContextCheckpoint) {
-    this.agent.reset(); this.agent.state.tools = this.tools.current();
+    // What a saved context declares is what it had loaded.
+    this.tools.loading.restore(getCurrentTools(toModelMessages(checkpoint.messages)).map(tool => tool.name));
+    this.agent.reset(); this.agent.state.tools = this.tools.declared();
     this.runtimeSnapshot = undefined;
     this.agent.state.messages = checkpoint.messages;
     for (const message of checkpoint.messages) {
@@ -512,7 +518,7 @@ export class PiBrain implements Brain {
       const saved = this.store.loadContext(this.identity);
       if (saved) { try { this.restore(saved); } catch { this.resetContext(); } }
     }
-    this.agent.state.tools = this.tools.current();
+    this.agent.state.tools = this.tools.declared();
     this.contextGeneration = generation;
   }
   private revert(checkpoint: ContextCheckpoint, generation: number) {

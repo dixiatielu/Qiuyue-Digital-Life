@@ -1,6 +1,6 @@
 # Platform adapters
 
-One Agent owns the persona, memory, pursuits, and action ledger. A platform adapter provides a complete catalog for a declared API revision, executes native operations, and publishes native events with platform context. Every permitted operation is a separate model tool. Catalog search or documentation never unlocks a smaller subset. Where the model's API loads tools on demand, seldom-used operations reach the model as a name and description until it wants one ([ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)); they stay declared and callable.
+One Agent owns the persona, memory, pursuits, and action ledger. A platform adapter provides a complete catalog for a declared API revision, executes native operations, and publishes native events with platform context. Every permitted operation is a separate model tool. Catalog search or documentation never unlocks a smaller subset. Under a model that can take a tool mid-conversation, seldom-used operations are listed by name and declared when the model asks for them ([ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)); they stay enabled throughout.
 
 ## Built-in adapters
 
@@ -49,7 +49,7 @@ The daemon does not start while a configured account cannot be reached or verifi
 
 ## Native parameters, receipts, and media
 
-Each tool keeps its native object schema, including nested fields, unions, and references. Telegram declarations omit repeated prose to reduce context use; `telegram_main__describe_api({"operation":"sendMessage"})` returns the complete original parameter documentation. It does not change the available tools. A large complete catalog needs a model and provider that accept the tool count and have context space for all declarations plus the conversation. The host never silently reduces that catalog to fit a provider limit.
+Each tool keeps its native object schema, including nested fields, unions, and references. Telegram declarations omit repeated prose to reduce context use; `find_tools({"names":["telegram_main__sendMessage"]})` returns the complete original parameter documentation. A large complete catalog needs a model and provider that accept the tool count and have context space for all declarations plus the conversation. The host never silently reduces that catalog to fit a provider limit.
 
 Queries preserve native results and record their source IDs. External writes go through the same action budget, deduplication, and receipt ledger as other tools. A lost response remains `unknown`; the host never automatically retries a write. Telegram `getUpdates` is an action because its offset can acknowledge pending updates. SnowLuma streaming operations preserve ordered frames and enforce `maxStreamBytes`.
 
@@ -124,7 +124,7 @@ ctx.adapter({
 });
 ```
 
-`frequent` names the operations in everyday use. When it is given, the other operations are loaded on demand under a model API that can do that, and declared in full under any other; without it nothing is deferred. Loading costs the model a search and the API another reading of the prompt, so list what a normal day uses.
+`frequent` names the operations in everyday use. When it is given, the other operations are loaded on demand under a model that can take a tool mid-conversation, and declared from the start under any other; without it nothing is deferred. Loading costs a model call, so list what a normal day uses.
 
 The adapter is trusted local code. Supply a complete catalog with explicit provenance and a version; do not flatten every platform into a shared `send_message` subset. Validate account identity, preserve native payloads, honor cancellation, and retain platform-specific capabilities. `ctx.adapter` registers contributions during setup; reception starts only at activation. Adapter instances need unique tool namespaces. Other plugins can call `call.adapters.query(instance, operation, args)` or `call.adapters.action(instance, operation, args)` under host permissions and action rules. `call.snowluma` is not part of SDK v2.
 

@@ -238,7 +238,7 @@ test('SQLite checkpoints restore the compacted window, source records and tools 
   let f = fixture(undefined, new Store(path));
   try {
     smallWindow(f); event(f.store, 'Observation before restart');
-    f.faux.setResponses([answer(call("qq_main__load_snowluma_tools", { names: ['get_group_member_info'] })), answer(longReply('Judgment only in working history'))]);
+    f.faux.setResponses([answer(call("find_tools", { names: ['qq_main__get_group_member_info'] })), answer(longReply('Judgment only in working history'))]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Trigger compaction');
     f.faux.setResponses([answer('Handoff summary that must survive restart.'), answer('Run completed')]);

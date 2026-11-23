@@ -14,4 +14,4 @@ Revision of 2026-11-02: `add_custom_face` takes an optional `desc` beyond its na
 
 See also: [ADR-0022](0022-expose-complete-native-tools-through-platform-adapters.md) moved SnowLuma behind a named platform adapter. Its account, groups, and tool permissions are now an entry in `adapters`, and each native tool name carries its adapter's prefix, such as `qq_main__send_group_msg`.
 
-See also: [ADR-0023](0023-load-seldom-used-tools-on-demand.md) lets a model API that loads tools on demand show the interfaces outside the common set by name and description until the model wants one. Every enabled interface is still declared and callable by its own name.
+See also: [ADR-0023](0023-load-seldom-used-tools-on-demand.md) lists the interfaces outside the common set by name, under a model that can take a tool mid-conversation, until the model asks for one with `find_tools`; every enabled interface keeps its own name and parameters. `find_tools` also returns the detailed usage that `load_snowluma_tools` did, and replaces it and `search_snowluma_tools`.

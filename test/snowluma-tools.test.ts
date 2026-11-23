@@ -32,8 +32,6 @@ test('generated native tools expose canonical native names and schemas directly'
       assert.equal((tool as { defer?: boolean }).defer ?? false, !common, action.name);
       assert.equal(findSnowLumaAction(action.name), action);
     }
-    // Only a tool that returns catalog names says how they map to the account's tool names.
-    assert.match(f.tools.current().find(tool => tool.name === 'qq_main__search_snowluma_tools')!.description, /use the qq_main__ tool prefix for this account\.$/);
   } finally { f.store.close(); }
 });
 
@@ -41,14 +39,12 @@ test('the native-tool plugin can be switched off while perception, memory, and o
   const f = fixture(); f.brain.thought.lifeOnly = false;
   try {
     const held = f.tools.current().find(tool => tool.name === "qq_main__send_group_msg")!;
-    const discovery = f.tools.current().find(tool => tool.name === "qq_main__search_snowluma_tools")!;
     f.cfg.plugins['qq-main-snowluma-tools'] = false;
     const offered = new Set(f.tools.current().map(tool => tool.name));
     assert.ok(snowlumaCatalog.every(action => !offered.has(`qq_main__${action.name}`)));
-    assert.ok(!offered.has('qq_main__search_snowluma_tools') && !offered.has('qq_main__load_snowluma_tools'));
+    assert.ok(offered.has('find_tools'));
     assert.ok(offered.has('remember') && offered.has('recall') && offered.has('qq_main__view_face') && offered.has('qq_main__share_qzone_feed'));
     await assert.rejects(held.execute('held', { group_id: 100, message: 'stale' }), /Plugin qq-main-snowluma-tools is disabled/);
-    await assert.rejects(discovery.execute('held-discovery', { query: 'send' }), /Plugin qq-main-snowluma-tools is disabled/);
     assert.deepEqual(f.sent, []); assert.equal(f.store.actions().length, 0);
     event(f.store, 'A message still arrives');
     f.faux.setResponses([answer('Observed')]); await f.brain.run(f.store.claim(10)!);
@@ -58,7 +54,7 @@ test('the native-tool plugin can be switched off while perception, memory, and o
       const observation = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations')));
       assert.match(observation, /Write or reread your diary/);
       assert.match(observation, /Share a Qzone post/);
-      assert.doesNotMatch(observation, /Browse friends' Qzone feeds|Change your QQ signature|Collect or organize saved stickers|Use load_snowluma_tools/);
+      assert.doesNotMatch(observation, /Browse friends' Qzone feeds|Change your QQ signature|Collect or organize saved stickers/);
       return answer('Rest');
     }]);
     await f.brain.run(f.store.claim(10)!);
@@ -83,29 +79,27 @@ test('common social tools include guidance for real identifiers and space visibi
   } finally { f.store.close(); }
 });
 
-test('tool discovery supports common wording, category browsing and an empty-result recovery path', async () => {
+test('find_tools documents a tool by its own or its native name, suggests near names, and knows nothing of a denied tool', async () => {
   const f = fixture();
   f.brain.thought.lifeOnly = false;
   try {
-    assert.ok(f.tools.current().some(tool => tool.name === "qq_main__send_private_msg"));
-    const search = f.tools.current().find(tool => tool.name === "qq_main__search_snowluma_tools")!;
-    const find = async (args: Record<string, unknown>) => JSON.parse(((await search.execute('search', args)).content[0] as { text: string }).text);
-    for (const [query, expected] of [['帮我发私信', 'send_private_msg'], ['撤销消息', 'delete_msg'], ['查看群友列表', 'get_group_member_list'], ['get_forward_msg', 'get_forward_msg'], ['send private message', 'send_private_msg'], ['list group members', 'get_group_member_list']]) {
-      assert.ok((await find({ query })).actions.some((action: { name: string }) => action.name === expected), query);
-    }
-    const missing = await find({ query: 'Martian weather' });
-    assert.equal(missing.total, 0);
-    const messageCategory = findSnowLumaAction('send_group_msg').category;
-    assert.ok(messageCategory);
-    assert.ok(missing.categories.includes(messageCategory));
-    assert.match(missing.hint, /category/);
-    const page = await find({ category: messageCategory, limit: 2 });
-    assert.equal(page.actions.length, 2);
-    assert.equal(page.nextOffset, 2);
-    assert.ok(page.actions.every((action: { category: string }) => action.category === messageCategory));
+    const find = async (names: string[]) => JSON.parse(((await f.tools.current().find(tool => tool.name === 'find_tools')!.execute('find', { names })).content[0] as { text: string }).text);
+    const found = await find(['qq_main__get_forward_msg', 'send_private_msg', 'remember']);
+    assert.deepEqual(found.tools.map((tool: { name: string; status: string }) => [tool.name, tool.status]), [['qq_main__get_forward_msg', 'available'], ['qq_main__send_private_msg', 'available'], ['remember', 'available']]);
+    // The declaration has the parameters; what the catalog says of results and use comes from here.
+    const forward = findSnowLumaAction('get_forward_msg');
+    assert.equal(found.tools[0].description, forward.summary);
+    assert.deepEqual(found.tools[0].documentation, JSON.parse(JSON.stringify({ category: forward.category, returns: forward.returns, returnsSchema: forward.returnsSchema, examples: forward.examples, invariants: forward.invariants, readOnly: forward.readOnly, stream: false })));
+    assert.match(found.tools[1].description, /To quote a message/);
+    assert.equal('documentation' in found.tools[2], false);
+    assert.equal('note' in found, false);
+    const missing = await find(['qq_main__get_forward', 'Martian weather']);
+    assert.deepEqual(missing.tools, []);
+    assert.ok(missing.unknown[0].similar.includes('qq_main__get_forward_msg'));
+    assert.deepEqual(missing.unknown[1], { name: 'Martian weather', similar: [] });
     f.cfg.adapters[0]!.tools = { allow: '*', deny: ['send_private_msg'] };
     assert.ok(!f.tools.current().some(tool => tool.name === "qq_main__send_private_msg"));
-    assert.equal((await find({ query: 'send_private_msg' })).actions[0].allowed, false);
+    assert.deepEqual((await find(['qq_main__send_private_msg'])).tools, []);
   } finally { f.store.close(); }
 });
 
@@ -114,10 +108,11 @@ test('names outside the catalog cannot be found or described and canonical schem
   f.brain.thought.lifeOnly = false;
   try {
     const names = new Set(snowlumaCatalog.map(action => action.name));
-    const load = f.tools.current().find(tool => tool.name === "qq_main__load_snowluma_tools")!;
+    const find = f.tools.current().find(tool => tool.name === 'find_tools')!;
     for (const name of unsupportedActions) {
       assert.throws(() => findSnowLumaAction(name), /Unknown/);
-      await assert.rejects(load.execute('load', { names: [name] }), /Unknown/);
+      const answer = JSON.parse(((await find.execute('find', { names: [name, `qq_main__${name}`] })).content[0] as { text: string }).text);
+      assert.deepEqual([answer.tools, answer.unknown.length], [[], 2]);
     }
     assert.doesNotMatch(JSON.stringify(snowlumaCatalog), /"aliases"|兼容/);
     const notice = findSnowLumaAction('_get_group_notice').returnsSchema as any;
@@ -143,15 +138,14 @@ test('all interfaces are callable and detail queries leave the model tool prefix
   try {
     event(f.store, 'Look at Qzone and forwarded messages');
     f.faux.setResponses([
-      context => { prefix = structuredClone(getCurrentTools(context.messages)); assert.ok(prefix.some(tool => tool.name === "qq_main__get_forward_msg")); return answer(call("qq_main__search_snowluma_tools", { query: 'get_forward_msg' })); },
-      context => { assert.ok(JSON.stringify(context).includes(findSnowLumaAction('get_forward_msg').summary!)); return answer(call("qq_main__load_snowluma_tools", { names: ['get_forward_msg', 'get_qzone_msg_list'] })); },
+      context => { prefix = structuredClone(getCurrentTools(context.messages)); assert.ok(prefix.some(tool => tool.name === "qq_main__get_forward_msg")); return answer(call("find_tools", { names: ['get_forward_msg', 'qq_main__get_qzone_msg_list'] })); },
       context => {
         assert.deepEqual(getCurrentTools(context.messages), prefix);
-        assert.match(JSON.stringify(context.messages.at(-1)), /inputSchema/);
+        assert.match(JSON.stringify(context.messages.at(-1)), /returnsSchema/);
         assert.ok(context.messages.length && JSON.stringify(context).length < f.cfg.limits.contextTokens * 8);
         return answer([call("qq_main__get_forward_msg", { id: 'forward:1' }), call("qq_main__get_qzone_msg_list", { target_uin: 7, num: 5 })]);
       },
-      answer(call("qq_main__load_snowluma_tools", { names: ['get_group_member_info'] })),
+      answer(call("find_tools", { names: ['qq_main__get_group_member_info'] })),
       context => {
         assert.deepEqual(getCurrentTools(context.messages), prefix);
         return answer('Observe first');
@@ -181,7 +175,7 @@ test('native sends preserve rich messages, optional fields, private targets and 
         const result = context.messages.filter(item => item.role === 'toolResult').at(-1)!;
         assert.equal(result.content[0]?.type, 'text');
         assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), { message_id: -42 });
-        return answer(call("qq_main__load_snowluma_tools", { names: ['send_private_msg'] }));
+        return answer(call("find_tools", { names: ['qq_main__send_private_msg'] }));
       },
       answer(call("qq_main__send_private_msg", { user_id: 7, message: 'Private greeting' })),
     ]);
@@ -223,8 +217,8 @@ test('permissions use exact action names, hide denied tools and block detail que
     assert.ok(!f.tools.current().some(tool => tool.name === "qq_main__send_group_msg"));
     assert.equal(allowedSnowLumaAction(findSnowLumaAction('fetch_ptt_text'), f.cfg.adapters[0]!.tools), false);
     assert.equal(allowedSnowLumaAction(findSnowLumaAction('send_packet'), f.cfg.adapters[0]!.tools), false);
-    const load = f.tools.current().find(tool => tool.name === "qq_main__load_snowluma_tools")!;
-    await assert.rejects(load.execute('load', { names: ['fetch_ptt_text'] }), /not enabled/);
+    const denied = JSON.parse(((await f.tools.current().find(tool => tool.name === 'find_tools')!.execute('find', { names: ['qq_main__fetch_ptt_text'] })).content[0] as { text: string }).text);
+    assert.deepEqual(denied.tools, []); assert.match(denied.hint, /not enabled/);
     f.cfg.adapters[0]!.tools = { allow: [], deny: [] };
     assert.ok(!f.tools.current().some(tool => snowlumaCatalog.some(action => action.name === tool.name)));
     event(f.store); f.faux.setResponses([answer(call("qq_main__send_group_msg", { group_id: 100, message: 'Must not run' })), answer('Rest')]);

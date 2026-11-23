@@ -10,6 +10,7 @@ import { PluginHost, type PluginTool } from './plugins.js';
 import { createPlugins } from './plugins/index.js';
 import { ensureCurrent, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
 import { validatedMemoryTool } from './memory-tool.js';
+import { loadsToolsOnDemand, type ModelOwner } from './model.js';
 export { ensureCurrent, type ThoughtContext } from './tool-runtime.js';
 
 const string = (description: string, maxLength = 6000) => Type.String({ description, minLength: 1, maxLength });
@@ -19,24 +20,37 @@ function urlsIn(value: unknown, found = new Set<string>()): Set<string> {
   else if (value && typeof value === 'object') for (const item of Object.values(value)) urlsIn(item, found);
   return found;
 }
+export const FIND_TOOLS = 'find_tools';
 export interface ToolSet {
+  /** Every enabled tool: what the digital life may do. */
   current(): AgentTool[];
-  /** Names among current() that the model may load on demand instead of reading in every call (ADR-0023). */
-  deferred(): string[];
+  /** What a model call declares. Where a tool can be declared mid-conversation, the deferred tools not yet loaded are left out (ADR-0023); elsewhere this is current(). */
+  declared(): AgentTool[];
+  /** The deferred tools, loaded or not, as the instructions list them. Empty where nothing is deferred. */
+  deferred(): { name: string; summary: string }[];
+  readonly loading: {
+    /** Whether seldom-used tools wait to be asked for. */
+    readonly enabled: boolean;
+    /** Take what a working context declares as what is loaded: nothing for a new one, its declared tools for a restored one. */
+    restore(declared: Iterable<string>): void;
+    /** Load one deferred tool; false when it is not one or is loaded already. */
+    add(name: string): boolean;
+  };
+  /** The same tools narrowed to those a filter keeps, loading on their own for the model that will use them. */
+  only(keep: (tool: AgentTool) => boolean, owner: ModelOwner): ToolSet;
   readonly plugins: PluginHost;
 }
 /** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
-const reviewTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity']);
+const reviewTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity', FIND_TOOLS]);
 export function forReview(tools: ToolSet): ToolSet {
-  const current = () => tools.current().filter(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name));
-  return { plugins: tools.plugins, current, deferred: () => { const held = new Set(current().map(tool => tool.name)); return tools.deferred().filter(name => held.has(name)); } };
+  return tools.only(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name), 'review');
 }
 
 export function createTools(config: Config, store: Store, context: () => ThoughtContext, recall?: SemanticRecall, plugins = createPlugins(config, store, recall)): ToolSet {
   const runtime = new ToolRuntime(config, store, context, plugins);
   const tool = runtime.jsonTool.bind(runtime);
   const withPlugins = plugins.bind(runtime);
-  const result: AgentTool[] = [
+  const builtins: AgentTool[] = [
     {
       name: 'view_event_image', label: 'view_event_image', description: 'View an image in an original event. Use index (starting at 0) for an image in a message, or index 0 for a generated image in a drawing event; use url for an image URL in any other event, such as a Qzone post in a tool result. Specify exactly one. Only read an image URL actually present in that event.',
       parameters: Type.Object({ id: string('Event ID', 100), index: Type.Optional(Type.Integer({ minimum: 0 })), url: Type.Optional(string('Image URL as it appears in the event', 2000)) }), replay: 'never', executionMode: 'sequential',
@@ -142,9 +156,53 @@ export function createTools(config: Config, store: Store, context: () => Thought
     }),
     tool('finish_pursuit', 'End a pursuit: done when it is finished, dropped when you have given it up.', Type.Object({ id: string('Pursuit ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('dropped')]) }), args => { store.finishPursuit(args.id, args.status); return store.pursuits(); }),
   ];
-  return { plugins, current: () => withPlugins(result), deferred: () => {
-    // The system instructions name each activity's tools, and a model calls a tool it has been told of by name without loading it first, which the API refuses.
-    const named = new Set(plugins.activities().flatMap(activity => activity.tools));
-    return withPlugins(result).filter(tool => (tool as PluginTool).defer && !named.has(tool.name)).map(tool => tool.name);
-  } };
+  return view(() => true, 'main');
+
+  /** One thinking process's hold on the tools: what it may use, and which of the deferred ones it has loaded. */
+  function view(visible: (tool: AgentTool) => boolean, owner: ModelOwner): ToolSet {
+    const enabled = loadsToolsOnDemand(config, owner);
+    const loaded = new Set<string>();
+    const all = () => withPlugins(builtins, [finder]).filter(visible);
+    /** The instructions name each activity's tools, and a model calls a tool it has been told of by name without asking for it first, so those are never deferred. */
+    const deferrable = (tools: AgentTool[]) => {
+      if (!enabled) return new Set<string>();
+      const named = new Set(plugins.activities().flatMap(activity => activity.tools));
+      return new Set(tools.filter(tool => (tool as PluginTool).defer && !named.has(tool.name)).map(tool => tool.name));
+    };
+    const add = (name: string) => enabled && !loaded.has(name) && deferrable(all()).has(name) && !!loaded.add(name);
+    const finder = tool(FIND_TOOLS, enabled
+      ? 'Make tools listed in your instructions as loaded on demand callable, and read any tool\'s detailed documentation: results, examples, and constraints. Pass every name you need at once. A tool loaded here is callable from your next step and stays available.'
+      : 'Read a tool\'s detailed documentation by name: results, examples, and constraints. Every tool is already callable.',
+    Type.Object({ names: Type.Array(string('Tool name', 100), { minItems: 1, maxItems: 8 }) }), args => {
+      const tools = all();
+      const found: Record<string, unknown>[] = []; const unknown: { name: string; similar: string[] }[] = [];
+      for (const asked of new Set<string>(args.names)) {
+        // A native operation may be asked for without its account's prefix where only one account offers it.
+        const bare = tools.filter(item => item.name.endsWith(`__${asked}`));
+        const match = tools.find(item => item.name === asked) ?? (bare.length === 1 ? bare[0] : undefined);
+        if (!match) {
+          const word = asked.toLowerCase().replace(/^.*__/, '');
+          unknown.push({ name: asked, similar: tools.filter(item => item.name.toLowerCase().includes(word)).slice(0, 5).map(item => item.name) });
+          continue;
+        }
+        const documentation = (match as PluginTool).documentation?.();
+        found.push({ name: match.name, status: add(match.name) ? 'loaded' : 'available', description: match.description, ...(documentation === undefined ? {} : { documentation }) });
+      }
+      return {
+        tools: found,
+        ...(unknown.length ? { unknown, hint: 'An unknown tool does not exist or the operator has not enabled it.' } : {}),
+        ...(found.some(item => item.status === 'loaded') ? { note: 'Loaded tools are callable from your next step and stay available.' } : {}),
+      };
+    });
+    return {
+      plugins, current: all,
+      declared: () => { const tools = all(); const waiting = deferrable(tools); return tools.filter(item => !waiting.has(item.name) || loaded.has(item.name)); },
+      deferred: () => { const tools = all(); const waiting = deferrable(tools); return tools.filter(item => waiting.has(item.name)).map(item => ({ name: item.name, summary: item.description.split('\n', 1)[0]!.slice(0, 120) })); },
+      loading: {
+        enabled, add,
+        restore: declared => { const waiting = deferrable(all()); loaded.clear(); for (const name of declared) if (waiting.has(name)) loaded.add(name); },
+      },
+      only: (keep, reviewer) => view(item => visible(item) && keep(item), reviewer),
+    };
+  }
 }

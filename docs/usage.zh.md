@@ -49,7 +49,11 @@ Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 to
 }
 ```
 
-`google-interactions` 使用同样的配置，只需把 `api` 改为 `"google-interactions"`；接口地址同样写到 API 版本为止，请求发往 `<baseUrl>/interactions`。这是支持按需加载工具的 Gemini 接口：不常用的原生操作只以名称和描述呈现给模型，模型要用时再读取参数（[ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)）。所有已启用的工具始终可以调用。每次加载会让接口多读一遍提示，记在该次请求用量的 `toolUse` 中。管理页中对应的选项是 **Gemini (Interactions)**。修改 `api` 与更换模型一样，会开始新的工作上下文。
+`google-interactions` 使用同样的配置，只需把 `api` 改为 `"google-interactions"`；接口地址同样写到 API 版本为止，请求发往 `<baseUrl>/interactions`。管理页中对应的选项是 **Gemini (Interactions)**。修改 `api` 与更换模型一样，会开始新的工作上下文。
+
+### 按需加载工具
+
+模型接口支持在对话中途接收新工具时，不常用的原生操作只在指令里按名称列出，模型用 `find_tools` 要求后才声明（[ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)）。所有已启用的工具始终可用，操作员的允许和拒绝规则不变。适用于 `google-interactions`，以及 `compat` 声明支持的 `anthropic-messages`、`openai-responses`、`openai-completions` 模型：`supportsMidConvoSystemMessages` 分别配合 `supportsMidConvoToolChanges`、`supportsAdditionalTools`、`supportsMidConvoToolAdditions`。Pi 的内置目录已为支持的模型设置这些选项；自定义模型请在确认端点确实支持后再设置。其它模型（包括 `google-generative-ai`）仍从一开始就声明全部工具。
 
 在管理页「凭据」或 `credentials.json` 中保存 `GEMINI_API_KEY`。原生适配器使用 `x-goog-api-key` 鉴权，调用 `models/{id}:streamGenerateContent`；`baseUrl` 必须包含 API 版本路径（通常为 `/v1beta`），也可包含网关的路径前缀。Gemini 的 `compat` 请留空，Pi 会将 `thinkingLevel` 映射为模型原生的思考等级或 token 预算。模型列表按原生格式翻页，并排除明确只支持 embedding 等其他方法的模型。参见 Google 的 [API 参考](https://ai.google.dev/api)和[模型列表参考](https://aistudio.google.com/api-reference/models/list-models)。原生支持适用于思考、复盘和压缩；embedding 与画图仍使用各自文档说明的 OpenAI 兼容接口。
 

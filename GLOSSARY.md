@@ -201,7 +201,7 @@ The part of the program through which a platform account is reached. It offers t
 _Avoid_: platform account, a plugin for one feature
 
 **Deferred Tool**:
-A tool the model is told of by name and description, and whose parameters it reads when it decides to use it. It is enabled and callable by its own name like any other; deferral changes what each model call carries, not what the Agent may do.
+A tool the instructions list by name and what it does, and that is declared to the model once it asks for it. It is enabled like any other and, once loaded, called by its own name; deferral changes what each model call carries, not what the Agent may do.
 _Avoid_: disabled tool, unlocked tool, hidden tool
 
 **Plugin**:

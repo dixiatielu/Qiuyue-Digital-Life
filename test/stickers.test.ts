@@ -207,8 +207,6 @@ test('disabling sticker enhancement restores native tools and blocks a held enha
     f.cfg.plugins['qq-main-qq-stickers'] = false;
     assert.deepEqual(current('add_custom_face').parameters, findSnowLumaAction('add_custom_face').inputSchema);
     assert.doesNotMatch(current('add_custom_face').description, /alreadySaved|Pass desc/);
-    const detail = await current('load_snowluma_tools').execute('detail', { names: ['add_custom_face'] });
-    assert.deepEqual(JSON.parse((detail.content[0] as { text: string }).text)[0].inputSchema, findSnowLumaAction('add_custom_face').inputSchema);
     await assert.rejects(enhanced.execute('held', { file: 'a', desc: 'a cat' }), /disabled/);
     assert.equal(f.store.actions().length, 0);
     const saved = await current('add_custom_face').execute('native', { file: 'a' });
