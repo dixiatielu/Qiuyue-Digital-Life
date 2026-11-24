@@ -449,7 +449,8 @@ test('a review gives its sources itself, and checks against the record what was 
     assert.doesNotMatch(prompt, /今天的日记/);
     assert.match(prompt, /Keep as an entry of its own anything the record shows that you would want to have the next time that person or group comes up/);
     // A review has no message in front of it to rest a memory on.
-    assert.match(refusal, /must reference IDs of actual experiences or existing memories/);
+    assert.match(refusal, /A memory review has no message in front of it to rest this on\. Give in sources the events from the record that show it; for a revision, the events that show the change/);
+    assert.match(prompt, /Whatever you save or revise here, give its sources: the lines of the record that show it/);
     assert.deepEqual(store.logs(80).filter(log => log.kind === 'remembered').map(log => (log.data as { where: string }).where).sort(), ['conversation', 'conversation', 'review']);
     // The next review is told only of what was kept since, and what a review itself wrote is not among it.
     say(store, 7, '又来了');
