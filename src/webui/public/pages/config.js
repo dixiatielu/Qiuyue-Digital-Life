@@ -42,8 +42,7 @@ const sections = () => [
     { path: 'memory.recentEvents', type: 'int', label: t('Recent events in a snapshot', '快照中的最近事件数') },
     { path: 'memory.reflectionEveryEvents', type: 'int', label: t('Review every N events', '每多少事件整理一次记忆') },
     { path: 'memory.experienceChars', type: 'int', label: t('Characters per experience', '每条经历的字数上限') },
-    { path: 'memory.revisitBatch', type: 'int', label: t('Old memories revisited at a time (0 = off)', '每次回看的旧记忆条数（0 为关闭）') },
-    { path: 'memory.revisitEveryHours', type: 'int', label: t('Hours between revisits', '两次回看间隔（小时）') },
+    { path: 'memory.revisitBatch', type: 'int', label: t('Old experiences gone back over per batch, once (0 = off)', '一次性回看旧经历时每批的条数（0 为关闭）') },
   ]],
   ['development', t('Development size', '发展容量'), [
     { path: 'development.entryChars', type: 'int', label: t('Characters per entry', '每条习惯、惯例或印象的字数上限') },

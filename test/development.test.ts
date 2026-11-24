@@ -499,7 +499,7 @@ test('an experience tells one thing, and the longer ones from before are due to 
   } finally { store.close(); }
 });
 
-test('going back over old memories waits for quiet and for rest, reads each with the record it rests on, and counts only when it finishes', async () => {
+test('going back over old memories runs batch after batch until none are left, reads each with the record it rests on, and counts a batch only when it finishes', async () => {
   const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
   const DAY = 86_400_000; const now = Date.now();
   try {
@@ -516,11 +516,8 @@ test('going back over old memories waits for quiet and for rest, reads each with
     // A diary entry rests on the digest, and a commitment under way had it in view.
     const diary = store.writeMemory({ kind: 'note', title: 'Diary', content: 'A good afternoon', importance: 5, sources: [digest.id] }, false);
     store.schedule('Bring buns', 'commitment', now + DAY, [digest.id]);
-    // With a life of its own it goes back over memories only while it rests.
+    // It does not wait for a rest: any quiet moment with no review under way will do.
     store.setSetting('lifeEnabled', true); store.schedule('Plan the day', 'life', now + DAY);
-    runtime.start(); await runtime.idle(); await runtime.tick(); await runtime.idle();
-    assert.equal(f.reviewFaux.state.callCount, 0);
-    store.schedule('Get up', 'life', now + DAY, [], true);
     let prompt = ''; let impressions: string[] = []; let tools: string[] = []; let results = '';
     f.reviewFaux.setResponses([
       context => {
@@ -534,7 +531,7 @@ test('going back over old memories waits for quiet and for rest, reads each with
       },
       context => { results = JSON.stringify(context.messages.filter(message => message.role === 'toolResult').slice(-2)); return answer('Done'); },
     ]);
-    await runtime.tick(); await runtime.idle();
+    runtime.start(); await runtime.idle();
     assert.equal(f.reviewFaux.state.callCount, 3); assert.ok(!store.logs(80).some(log => log.kind === 'review_stopped'));
     // The prompt names the oldest due memory and where to read what it rests on; the review has what is kept of those who spoke in that stretch, not of who came later.
     assert.match(prompt, new RegExp(`go back over memories you wrote a while ago.*${digest.id} \\(A whole afternoon\\), written \\S+: 2 events in qq:900:group:100 from \\S+\\+08:00 to \\S+\\+08:00`));
@@ -551,19 +548,31 @@ test('going back over old memories waits for quiet and for rest, reads each with
     assert.equal(Number(store.db.prepare("SELECT count(*) AS n FROM events WHERE kind='memory_revision'").get()!.n), 0);
     assert.deepEqual(store.db.prepare('SELECT memory_id FROM memory_revisits ORDER BY 1').all().map(row => String(row.memory_id)), [digest.id, ...kept.map(memory => memory.id)].sort());
     assert.deepEqual(store.logs(80).find(log => log.kind === 'revisit_finished')?.data, { memories: [digest.id] });
-    // The next batch waits out memory.revisitEveryHours.
-    await runtime.tick(); await runtime.idle();
-    assert.equal(f.reviewFaux.state.callCount, 3);
-    // One that stops before it finishes leaves its batch due.
-    store.setSetting('revisitedAt', 0);
+    // The next batch follows at once. One that stops before it finishes leaves its batch due, and waits before it is tried again.
     f.reviewFaux.setResponses([() => { throw new Error('model down'); }]);
     await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 4);
     assert.ok(store.logs(80).some(log => log.kind === 'review_stopped'));
     assert.deepEqual(store.revisitDue(5, 30).map(item => item.memory.id), [second.id]);
-    // Turned off, nothing is gone back over.
-    store.setSetting('revisitedAt', 0); f.cfg.memory.revisitBatch = 0; const calls = f.reviewFaux.state.callCount;
+    f.reviewFaux.setResponses([answer('Must not be called yet')]);
     await runtime.tick(); await runtime.idle();
-    assert.equal(f.reviewFaux.state.callCount, calls);
+    assert.equal(f.reviewFaux.state.callCount, 4);
+    // Turned off, nothing is gone back over.
+    (runtime as unknown as { revisitAfter: number }).revisitAfter = 0; f.cfg.memory.revisitBatch = 0;
+    await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 4);
+    // Turned on again it takes up the batch that stopped, and when none are left it is over for good.
+    f.cfg.memory.revisitBatch = 1;
+    f.reviewFaux.setResponses([answer('Nothing to change')]);
+    await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 5);
+    assert.equal(store.revisitPending(30), false); assert.equal(store.setting('revisitsDone', false), false);
+    await runtime.tick(); await runtime.idle();
+    assert.equal(store.setting('revisitsDone', false), true); assert.ok(store.logs(80).some(log => log.kind === 'revisits_done'));
+    // A long experience that appears afterwards, such as one the operator writes, starts nothing.
+    store.db.prepare('UPDATE memories SET created_at=? WHERE id=?').run(now - 3 * DAY, store.writeMemory({ kind: 'experience', title: 'Written by hand', content: 'h'.repeat(80), importance: 5, sources: [film.id] }, false).id);
+    await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 5);
   } finally { await runtime.stop(); f.store.close(); }
 });
 

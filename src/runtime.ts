@@ -33,6 +33,8 @@ export class LifeRuntime {
   private quiet = { heardAt: -1, needMs: 0 };
   /** The memory review under way, which runs beside the thoughts rather than taking their turn (ADR-0012). */
   private reviewing?: Promise<void>;
+  /** Not before this does the next batch of old memories start: at once after one that finished, later after one that did not. */
+  private revisitAfter = 0;
   /** Without a reviewer, no review runs. */
   constructor(readonly config: Config, readonly store: Store, readonly brain: Brain, readonly reviewer?: Brain, private random = Math.random) {}
   start() {
@@ -66,7 +68,7 @@ export class LifeRuntime {
       let checkedAt = Date.now();
       const idle = !this.work && pending.first === undefined && checkedAt - this.settledAt >= this.config.compaction.idleAfterMs;
       this.startReview(idle, now);
-      if (idle) this.startRevisit(now, resting, settings.lifeEnabled);
+      if (idle) this.startRevisit(now);
       if (this.work && !this.brain.streaming) return;
       if (idle && settings.lifeEnabled && this.offerFreeTime(now)) { pending = this.store.pendingTiming(settings.lifeEnabled, resting); checkedAt = Date.now(); }
       if (!this.ready(pending, checkedAt, resting)) {
@@ -119,23 +121,27 @@ export class LifeRuntime {
     if (event) this.review(reviewer, event);
   }
   /**
-   * Going back over old memories waits for a quiet moment with no review under way, and for a rest where the digital life keeps
-   * its own days; a batch starts at most every memory.revisitEveryHours (ADR-0027). The batch counts as gone over only when the
-   * review finishes, so one that stops is taken up again.
+   * Going back over old memories is done once (ADR-0028): batch follows batch in any quiet moment with no review under way, and
+   * a review that is due takes its turn between them. A batch counts as gone over only when its review finishes, so one that
+   * stops is taken up again, after a wait, so that a failure that lasts does not repeat without pause. When none are left it is
+   * over for good.
    */
-  private startRevisit(now: number, resting: boolean, lifeEnabled: boolean) {
-    const reviewer = this.reviewer; const { revisitBatch, revisitEveryHours, experienceChars } = this.config.memory;
-    if (!reviewer || this.reviewing || !revisitBatch || (lifeEnabled && !resting)) return;
-    if (now - this.store.setting<number>('revisitedAt', 0) < revisitEveryHours * 3_600_000) return;
+  private startRevisit(now: number) {
+    const reviewer = this.reviewer; const { revisitBatch, experienceChars } = this.config.memory;
+    if (!reviewer || this.reviewing || !revisitBatch || now < this.revisitAfter || this.store.setting('revisitsDone', false)) return;
     const due = this.store.revisitDue(revisitBatch, experienceChars, now);
-    // Nothing to go over is asked again after the same wait, not at every tick.
-    this.store.setSetting('revisitedAt', now);
-    if (!due.length) return;
+    if (!due.length) {
+      // Those written within the last day are still settling; ask again later rather than at every tick.
+      if (this.store.revisitPending(experienceChars)) this.revisitAfter = now + 600_000;
+      else { this.store.setSetting('revisitsDone', true); this.store.log('revisits_done', {}); }
+      return;
+    }
+    this.revisitAfter = now + 600_000;
     const listed = due.map(({ memory, spans }) => `- ${memory.id} (${memory.title}), written ${recordTime(memory.createdAt)}: ${spans.length ? spans.map(span => `${span.events} events in ${span.conversation} from ${recordTime(span.from)} to ${recordTime(span.to)}`).join('; ') : 'the events it rested on are no longer kept'}`).join('\n');
     const text = `Time to go back over memories you wrote a while ago, apart from your conversations: new messages go to them as usual, and nothing you do here reaches anyone. A memory is written in the moment, before you know what will matter. It may tell several things at once, hold something you got wrong, or have in it something lasting about a person that you have since stopped keeping. Going back with the record beside it is how you find out. For each memory below, read it with recall and its id, and read the chat it rests on with read_chat_record from the time given. Then leave it as you would want to find it later. Where the record shows something other than what it says, correct it, keeping who said what, and in what order, as the record has it. Where it tells several separate things, keep each one worth keeping as an experience of its own, under a title that names it and with the events of that thing as its sources, which a review always gives, never the memory it came from: supersede the old memory with one of them, write the others as new, and let go of what is not worth keeping. Where it holds something lasting that you do not already keep, save that as an entry about the person or the group: who a nickname or a running joke means, where someone lives or studies, what someone asked of you, what you told someone about yourself, how a group does things. Say the lasting thing itself in a sentence, one thing to an entry. The occasion stays in the experience, and one occasion shows what happened once, not what someone always does. runtime_data shows what you already keep about the people and chats concerned. A memory that is right and tells one thing needs nothing. The record is what happened: what it does not show stays unknown, and what you felt is yours to keep.\nMemories to go back over:\n${listed}`;
     const ids = due.map(({ memory }) => memory.id);
     const event = this.store.receive({ key: `revisit:${now}`, kind: 'memory_maintenance', at: now, text, payload: { revisit: ids, backlog: due.flatMap(({ spans }) => spans.map(span => ({ conversation: span.conversation, since: span.from, until: span.to }))) } }, true);
-    if (event) this.review(reviewer, event, () => { this.store.markRevisited(ids); this.store.log('revisit_finished', { memories: ids }); });
+    if (event) this.review(reviewer, event, () => { this.store.markRevisited(ids); this.store.log('revisit_finished', { memories: ids }); this.revisitAfter = 0; });
   }
   /** Run one review beside the thoughts. What it read and saved before stopping stays; the next reads on from there. */
   private review(reviewer: Brain, event: EnvironmentEvent, finished?: () => void) {

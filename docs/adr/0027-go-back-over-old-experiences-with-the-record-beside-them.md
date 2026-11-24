@@ -17,3 +17,5 @@ Notes and diary entries are not gone back over: what the digital life felt is it
 The instructions and the `remember` tool change, so a deploy starts a new working context.
 
 Revision of 2026-11-25: a revisit now takes only the experiences longer than the bound, which are those written before an experience told one thing, and no longer those that have merely come to mind; see [ADR-0028](0028-keep-a-thing-when-it-is-said.md). This replaces "and the ones that have come to mind" above. Among them the most often recalled still go first, and when they are done no revisit starts.
+
+Second revision of 2026-11-25: since going back is done once, it no longer keeps a pace. `memory.revisitEveryHours` is gone and so is the wait for a rest: batch follows batch in any quiet moment with no review under way, a review that is due takes its turn between them, and a batch that stops is tried again after ten minutes. When no experience from before the bound is left the program records that and starts no more. This replaces the paragraph above that begins "A revisit starts in a quiet moment", except that `memory.revisitBatch` still sets the size of a batch and 0 still stops it.

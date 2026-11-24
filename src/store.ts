@@ -700,6 +700,10 @@ export class Store {
     const ids = this.db.prepare("SELECT json_extract(data,'$.id') AS id FROM trace WHERE kind='remembered' AND at>? AND json_extract(data,'$.where')='conversation' ORDER BY id").all(at).map(row => String(row.id));
     return ids.map(memoryId => this.memory(memoryId)).filter((memory): memory is Memory => memory !== undefined && memory.active && !['note', 'fiction'].includes(memory.kind));
   }
+  /** Whether any experience from before the bound is still to be gone back over, however lately written. */
+  revisitPending(experienceChars: number): boolean {
+    return this.db.prepare("SELECT 1 FROM memories m WHERE m.active=1 AND m.kind='experience' AND length(m.content)>? AND NOT EXISTS (SELECT 1 FROM memory_revisits v WHERE v.memory_id=m.id) LIMIT 1").get(experienceChars) !== undefined;
+  }
   /** These memories have been gone back over, or were written while doing so. */
   markRevisited(memoryIds: string[], now = Date.now()) {
     const mark = this.db.prepare('INSERT OR IGNORE INTO memory_revisits SELECT id, ? FROM memories WHERE id=?');
