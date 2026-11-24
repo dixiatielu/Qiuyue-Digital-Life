@@ -20,7 +20,7 @@ function describe(id, value, allowed) {
       needs: [[allowed('modify_custom_face'), t('modify_custom_face allowed, to describe a save', '允许 modify_custom_face（用于描述）')], [Boolean(has('embedding.enabled')), t('embedding on, for suggestions', '开启 embedding（用于推荐）')]] },
     'qq-faces': { name: t('QQ system faces', 'QQ 系统表情'), text: t('Names system faces in what she reads and shows their pictures; adds view_face.', '在她读到的内容里给系统表情标上名字并显示图片，提供 view_face。'),
       needs: [[allowed('fetch_sys_faces'), t('fetch_sys_faces allowed, to read an uncached directory', '允许 fetch_sys_faces（用于读取未缓存的表情目录）')]] },
-    'snowluma-tools': { name: t('QQ native tools', 'QQ 原生接口'), text: t('Every permitted SnowLuma interface as a tool of its own name; find_tools returns each one's documentation. Turned off, she can no longer send messages, react, or poke herself; she still perceives QQ, and other plugins can still use permitted interfaces.', '把每个允许的 SnowLuma 接口作为同名工具提供；find_tools 可查看各接口的文档。关闭后她不能再自己发消息、回应或戳一戳；仍然能感知 QQ，其他插件也仍可使用允许的接口。'),
+    'snowluma-tools': { name: t('QQ native tools', 'QQ 原生接口'), text: t('Every permitted SnowLuma interface as a tool of its own name; find_tools returns each one’s documentation. Turned off, she can no longer send messages, react, or poke herself; she still perceives QQ, and other plugins can still use permitted interfaces.', '把每个允许的 SnowLuma 接口作为同名工具提供；find_tools 可查看各接口的文档。关闭后她不能再自己发消息、回应或戳一戳；仍然能感知 QQ，其他插件也仍可使用允许的接口。'),
       needs: [[null, t('each interface follows the permissions below', '每个接口受下方权限控制')]], warn: t('Off means she cannot speak in QQ.', '关闭后她无法在 QQ 里说话。') },
   })[id] ?? { name: id, text: '', needs: [] };
 }
