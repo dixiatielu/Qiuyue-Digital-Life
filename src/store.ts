@@ -49,8 +49,10 @@ export const actionFingerprint = (kind: string, args: Record<string, unknown>) =
 
 /** What a revision reaches; see Store.revisionReach. */
 export interface RevisionReach { withdrawn: { id: string; kind: string; title: string }[]; cites: { id: string; kind: string; title: string }[] }
-/** What bounds the digital life's own development writes: one entry, and the entries of one kind in a scope, or about a person, together. */
-export interface DevelopmentLimits { entryChars: number; scopeChars: number }
+/** What bounds the digital life's own writes: one entry of development, the entries of one kind in a scope, or about a person, together, and one experience. */
+export interface DevelopmentLimits { entryChars: number; scopeChars: number; experienceChars?: number }
+/** A memory to go back over, with the stretch of each chat its events come from. */
+export interface Revisit { memory: Memory; spans: { conversation: string; from: number; to: number; events: number }[] }
 export interface MemoryInput { kind: MemoryKind; title: string; content: string; importance: number; subjects?: string[]; sources: string[]; supersedes?: string; scope?: string; fictional?: boolean }
 /** Local receive times of claimable events: the earliest waking one, the latest of any kind, and the earliest ambient one. */
 export interface PendingTiming { first?: number; last?: number; ambient?: number }
@@ -83,6 +85,8 @@ export class Store {
       CREATE TRIGGER IF NOT EXISTS memory_vectors_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_vectors WHERE memory_id=old.id; END;
       CREATE TABLE IF NOT EXISTS memory_recalls(memory_id TEXT PRIMARY KEY, spontaneous INTEGER NOT NULL DEFAULT 0, deliberate INTEGER NOT NULL DEFAULT 0, last_at INTEGER NOT NULL);
       CREATE TRIGGER IF NOT EXISTS memory_recalls_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_recalls WHERE memory_id=old.id; END;
+      CREATE TABLE IF NOT EXISTS memory_revisits(memory_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS memory_revisits_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_revisits WHERE memory_id=old.id; END;
       CREATE TABLE IF NOT EXISTS tombstones(source_key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', rest INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS pursuits(id TEXT PRIMARY KEY, title TEXT NOT NULL, progress TEXT NOT NULL, fictional INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -311,6 +315,8 @@ export class Store {
         } else sources.add(source);
       } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); }
     }
+    // An experience that tells one thing comes to mind as that thing, and can be checked against the events of it alone (ADR-0027).
+    if (limits?.experienceChars && input.kind === 'experience' && typeof input.content === 'string' && characters(input.content) > limits.experienceChars) problems.push(`An experience tells one thing that happened in at most ${limits.experienceChars} characters, under a title that names it; this content has ${characters(input.content)}. Save each thing as an experience of its own, with the events of that thing in its sources, and leave out what is not worth keeping. A long text of your own belongs in a note.${input.supersedes ? ' To break up a longer experience, supersede it with one of the things it tells and write the others as new experiences.' : ''}`);
     if (limits && input.kind && isDevelopment(input.kind) && typeof input.content === 'string') {
       const scope = input.scope ?? (input.kind === 'impression' ? undefined : 'global');
       // An entry that says one thing can be revised, checked against its own evidence, and retired alone (ADR-0025).
@@ -325,8 +331,11 @@ export class Store {
     }
     return { sources: [...sources], problems };
   }
-  /** Limits bound the digital life's own development writes; operator corrections pass none. */
-  writeMemory(input: MemoryInput, allowFiction: boolean, limits?: DevelopmentLimits): Memory {
+  /**
+   * Limits bound the digital life's own development writes; operator corrections pass none. A revision withdraws what rested on
+   * the old version unless it only goes back over how a memory is kept (ADR-0027), which leaves what rested on it in place.
+   */
+  writeMemory(input: MemoryInput, allowFiction: boolean, limits?: DevelopmentLimits, keepDependents = false): Memory {
     if (!input.content.trim() || characters(input.content) > 12_000 || characters(input.title) > 200) throw new Error('Memory content is empty or too long.');
     if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
     if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
@@ -366,7 +375,8 @@ export class Store {
       for (const source of sources) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(memoryId, source);
       if (previous) {
         // A correction invalidates dependent interpretations, while preserving their history.
-        this.db.prepare(`WITH RECURSIVE ${restingOn} UPDATE memories SET active=0 WHERE id IN (SELECT id FROM dependent) AND id!=?`).run(previous.id, memoryId);
+        if (keepDependents) this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(previous.id);
+        else this.db.prepare(`WITH RECURSIVE ${restingOn} UPDATE memories SET active=0 WHERE id IN (SELECT id FROM dependent) AND id!=?`).run(previous.id, memoryId);
         this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(memoryId, previous.id);
       }
       this.log('memory_written', { id: memoryId, kind: input.kind, supersedes: input.supersedes, ...(scope ? { scope } : {}) });
@@ -673,6 +683,22 @@ export class Store {
     const marks = this.setting<Record<string, number>>('reviewMarks');
     if (through > (marks[conversation] ?? 0)) this.setSetting('reviewMarks', { ...marks, [conversation]: through });
   }
+  /**
+   * Experiences to go back over, which no review has yet: those that tell more than one experience may, and those that have come
+   * to mind, the most often recalled first and then the oldest (ADR-0027). One written within the last day is left to settle.
+   */
+  revisitDue(limit: number, experienceChars: number, now = Date.now()): Revisit[] {
+    const rows = this.db.prepare(`SELECT m.*, coalesce(r.spontaneous+r.deliberate,0) AS recalls FROM memories m LEFT JOIN memory_recalls r ON r.memory_id=m.id
+      WHERE m.active=1 AND m.kind='experience' AND m.created_at<? AND NOT EXISTS (SELECT 1 FROM memory_revisits v WHERE v.memory_id=m.id) AND (length(m.content)>? OR coalesce(r.spontaneous+r.deliberate,0)>0)
+      ORDER BY recalls DESC, m.created_at, m.rowid LIMIT ?`).all(now - 86_400_000, experienceChars, limit);
+    const spans = this.db.prepare('SELECT e.conversation_ref AS conversation, min(e.at) AS first, max(e.at) AS last, count(*) AS events FROM sources s JOIN events e ON e.id=s.source_id WHERE s.owner_id=? AND e.conversation_ref IS NOT NULL GROUP BY 1 ORDER BY first');
+    return rows.map(row => ({ memory: this.memoryRow(row), spans: spans.all(String(row.id)).map(span => ({ conversation: String(span.conversation), from: Number(span.first), to: Number(span.last), events: Number(span.events) })) }));
+  }
+  /** These memories have been gone back over, or were written while doing so. */
+  markRevisited(memoryIds: string[], now = Date.now()) {
+    const mark = this.db.prepare('INSERT OR IGNORE INTO memory_revisits SELECT id, ? FROM memories WHERE id=?');
+    for (const memoryId of memoryIds) mark.run(now, memoryId);
+  }
   /** Conversations with messages from others that review has not read yet. */
   reviewBacklog(now = Date.now()): { conversation: string; messages: number; since: number }[] {
     return this.db.prepare(`WITH marks AS (SELECT key AS conversation, value AS at FROM json_each((SELECT value FROM settings WHERE key='reviewMarks')))
@@ -680,12 +706,12 @@ export class Store {
       LEFT JOIN marks m USING(conversation) WHERE c.at>=max(coalesce(m.at,0),?) GROUP BY c.conversation ORDER BY messages DESC`).all(now - 86_400_000)
       .map(row => ({ conversation: String(row.conversation), messages: Number(row.messages), since: Number(row.since) }));
   }
-  /** People with an impression who spoke in these conversations since the given times, latest first. */
-  impressionsIn(chats: { conversation: string; since: number }[], limit: number): string[] {
+  /** People with an impression who spoke in these conversations since the given times, and no later than until where one is given, latest first. */
+  impressionsIn(chats: { conversation: string; since: number; until?: number }[], limit: number): string[] {
     const last = new Map<string, number>();
     for (const chat of chats) {
       const filter = this.recordFilter(chat.conversation);
-      for (const row of this.db.prepare(`SELECT actor_ref AS person, max(at) AS at FROM events WHERE ${filter.events} AND kind='message' AND at>=? AND json_extract(source,'$.own')=0 AND EXISTS (SELECT 1 FROM memories WHERE active=1 AND kind='impression' AND scope='person:'||events.actor_ref) GROUP BY person`).all(filter.target, chat.since)) {
+      for (const row of this.db.prepare(`SELECT actor_ref AS person, max(at) AS at FROM events WHERE ${filter.events} AND kind='message' AND at>=? AND at<=? AND json_extract(source,'$.own')=0 AND EXISTS (SELECT 1 FROM memories WHERE active=1 AND kind='impression' AND scope='person:'||events.actor_ref) GROUP BY person`).all(filter.target, chat.since, chat.until ?? Number.MAX_SAFE_INTEGER)) {
         const person = String(row.person);
         last.set(person, Math.max(last.get(person) ?? 0, Number(row.at)));
       }

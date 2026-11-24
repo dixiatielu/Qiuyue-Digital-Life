@@ -42,7 +42,10 @@
     "retentionDays": 90,
     "recallLimit": 8,
     "recentEvents": 30,
-    "reflectionEveryEvents": 100
+    "reflectionEveryEvents": 100,
+    "experienceChars": 600,
+    "revisitBatch": 4,
+    "revisitEveryHours": 2
   },
   "development": {
     "entryChars": 200,

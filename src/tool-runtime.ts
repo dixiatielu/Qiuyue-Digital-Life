@@ -7,7 +7,7 @@ import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeTo
 import { PluginHost } from './plugins.js';
 
 /** A review hands revisions affecting unfinished matters back to the conversations (ADR-0012). */
-export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
+export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; /** A review that goes back over old memories (ADR-0027). */ revisiting?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
 export function ensureCurrent(store: Store, context: ThoughtContext, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const settings = store.settings();

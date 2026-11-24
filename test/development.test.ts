@@ -392,6 +392,108 @@ test('a review sees the development of the chats it lists and of the people who 
   } finally { f.store.close(); }
 });
 
+test('an experience tells one thing, and those that tell more or have come to mind are due to be gone back over', () => {
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+  try {
+    const bounds = { entryChars: 60, scopeChars: 200, experienceChars: 30 };
+    const DAY = 86_400_000; const now = Date.now();
+    const first = say(store, 7, '午饭吃了小笼包', { at: now - 3 * DAY }); const last = say(store, 8, '晚上去看新番', { at: now - 3 * DAY + 3_600_000 });
+    const elsewhere = say(store, 7, '私下说的', { groupId: undefined, at: now - 3 * DAY + 60_000 });
+    const write = (kind: 'experience' | 'note', title: string, content: string, sources: string[], limits?: typeof bounds, age = 2) => { const memory = store.writeMemory({ kind, title, content, importance: 5, sources }, false, limits); store.db.prepare('UPDATE memories SET created_at=? WHERE id=?').run(now - age * DAY, memory.id); return memory; };
+    // Her own long experience is refused with what to do instead; a note of any length, and an experience from before the bound, are not.
+    assert.throws(() => write('experience', 'A day', 'x'.repeat(31), [first.id], bounds), /An experience tells one thing that happened in at most 30 characters, under a title that names it; this content has 31\. Save each thing as an experience of its own.*belongs in a note\.$/);
+    assert.ok(write('note', 'Diary', 'x'.repeat(300), [first.id], bounds));
+    const digest = write('experience', 'A whole afternoon', '1. 午饭吃了小笼包，大家都在聊\n2. 晚上约了去看新番的首映\n3. 私下里他说下周搬家', [first.id, last.id, elsewhere.id]);
+    assert.throws(() => store.writeMemory({ kind: 'experience', title: 'Lunch', content: 'y'.repeat(31), importance: 5, sources: [first.id], supersedes: digest.id }, false, bounds), /To break up a longer experience, supersede it with one of the things it tells and write the others as new experiences\.$/);
+    const older = write('experience', 'An older afternoon', 'z'.repeat(40), [first.id], undefined, 5);
+    const brief = write('experience', 'Lunch', '午饭吃了小笼包', [first.id]);
+    const recalled = write('experience', 'Film', '晚上去看新番', [last.id]);
+    const young = write('experience', 'Just now', 'w'.repeat(40), [last.id], undefined, 0.5);
+    store.noteRecalled('spontaneous', [{ id: recalled.id, similarity: 0.7 }]); store.noteRecalled('deliberate', [{ id: recalled.id }]);
+    // The one that came to mind first, then the long ones from the oldest; a short one never recalled and one written today are left.
+    const due = store.revisitDue(10, 30, now);
+    assert.deepEqual(due.map(item => item.memory.id), [recalled.id, older.id, digest.id]);
+    assert.ok(![brief.id, young.id].some(id => due.some(item => item.memory.id === id)));
+    // Each comes with the stretch of every chat its events are from.
+    assert.deepEqual(due[2]!.spans, [{ conversation: 'qq:900:group:100', from: first.at, to: last.at, events: 2 }, { conversation: 'qq:900:private:7', from: elsewhere.at, to: elsewhere.at, events: 1 }]);
+    assert.deepEqual(store.revisitDue(2, 30, now).map(item => item.memory.id), [recalled.id, older.id]);
+    // Once gone over it is not due again, and neither is one replaced or forgotten meanwhile.
+    store.markRevisited([recalled.id, 'm:none']);
+    store.writeMemory({ kind: 'experience', title: 'Older, checked', content: 'short', importance: 5, sources: [first.id], supersedes: older.id }, false);
+    assert.deepEqual(store.revisitDue(10, 30, now).map(item => item.memory.id), [digest.id]);
+    store.forget(recalled.id);
+    assert.equal(Number(store.db.prepare('SELECT count(*) AS n FROM memory_revisits').get()!.n), 0);
+  } finally { store.close(); }
+});
+
+test('going back over old memories waits for quiet and for rest, reads each with the record it rests on, and counts only when it finishes', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
+  const DAY = 86_400_000; const now = Date.now();
+  try {
+    const store = f.store; store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+    f.cfg.memory.reflectionEveryEvents = 10_000; f.cfg.memory.experienceChars = 30; f.cfg.memory.revisitBatch = 1; f.cfg.compaction.idleAfterMs = 0;
+    const lunch = say(store, 7, '午饭吃了小笼包', { at: now - 3 * DAY }); const film = say(store, 8, '晚上去看新番', { at: now - 3 * DAY + 3_600_000 });
+    say(store, 9, '后来才来的人', { at: now - DAY });
+    store.acknowledge(store.claim(10)!.batchId);
+    const aged = (memory: { id: string }, days = 2) => { store.db.prepare('UPDATE memories SET created_at=? WHERE id=?').run(now - days * DAY, memory.id); return memory; };
+    const digest = aged(store.writeMemory({ kind: 'experience', title: 'A whole afternoon', content: '1. 午饭吃了小笼包，大家都在聊\n2. 晚上约了去看新番的首映', importance: 5, sources: [lunch.id, film.id] }, false), 4);
+    const second = aged(store.writeMemory({ kind: 'experience', title: 'Another afternoon', content: 'z'.repeat(40), importance: 5, sources: [film.id] }, false), 3);
+    const knows = (person: number, content: string) => store.writeMemory({ kind: 'impression', title: `P${person}`, content, importance: 5, scope: `person:qq:user:${person}`, sources: [lunch.id] }, false);
+    const seven = knows(7, 'Likes buns'); knows(9, 'Came later');
+    // A diary entry rests on the digest, and a commitment under way had it in view.
+    const diary = store.writeMemory({ kind: 'note', title: 'Diary', content: 'A good afternoon', importance: 5, sources: [digest.id] }, false);
+    store.schedule('Bring buns', 'commitment', now + DAY, [digest.id]);
+    // With a life of its own it goes back over memories only while it rests.
+    store.setSetting('lifeEnabled', true); store.schedule('Plan the day', 'life', now + DAY);
+    runtime.start(); await runtime.idle(); await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 0);
+    store.schedule('Get up', 'life', now + DAY, [], true);
+    let prompt = ''; let impressions: string[] = []; let tools: string[] = []; let results = '';
+    f.reviewFaux.setResponses([
+      context => {
+        prompt = JSON.stringify(context.messages.at(-2) ?? ''); tools = getCurrentTools(context.messages).map(tool => tool.name);
+        impressions = updates(context.messages as Message[]).at(-1).impressions.map((item: { id: string }) => item.id);
+        return answer([call('recall', { id: digest.id }), call('read_chat_record', { conversation: 'qq:900:group:100', from: new Date(lunch.at).toISOString() })]);
+      },
+      context => {
+        assert.match(JSON.stringify(context.messages.slice(-2)), /小笼包.*P7: 午饭吃了小笼包/);
+        return answer([call('remember', { kind: 'experience', title: '午饭的小笼包', content: '午饭吃了小笼包，大家都在聊', importance: 5, sources: [lunch.id], supersedes: digest.id }), call('remember', { kind: 'experience', title: '约看新番首映', content: '晚上约了去看新番的首映', importance: 5, sources: [film.id] })]);
+      },
+      context => { results = JSON.stringify(context.messages.filter(message => message.role === 'toolResult').slice(-2)); return answer('Done'); },
+    ]);
+    await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 3); assert.ok(!store.logs(80).some(log => log.kind === 'review_stopped'));
+    // The prompt names the oldest due memory and where to read what it rests on; the review has what is kept of those who spoke in that stretch, not of who came later.
+    assert.match(prompt, new RegExp(`go back over memories you wrote a while ago.*${digest.id} \\(A whole afternoon\\), written \\S+: 2 events in qq:900:group:100 from \\S+\\+08:00 to \\S+\\+08:00`));
+    assert.doesNotMatch(prompt, new RegExp(second.id));
+    assert.deepEqual(impressions, [seven.id]);
+    assert.ok(tools.includes('remember') && tools.includes('read_chat_record') && !tools.some(name => name.endsWith('send_group_msg')));
+    // What it wrote is one thing each and has just been checked; the batch counts as gone over.
+    const kept = store.search('', 20).filter(memory => memory.kind === 'experience' && memory.id !== second.id);
+    assert.deepEqual(kept.map(memory => memory.title).sort(), ['午饭的小笼包', '约看新番首映'].sort());
+    assert.equal(store.memory(digest.id)?.active, false);
+    // It changed how the memory is kept: what rested on it stays, and the conversations are not woken to hear of it.
+    assert.equal(store.memory(diary.id)?.active, true);
+    assert.match(results, /stillRestingOnOldVersion.*Diary.*cites.*Bring buns/); assert.doesNotMatch(results, /withdrawn|citesHandedOn/);
+    assert.equal(Number(store.db.prepare("SELECT count(*) AS n FROM events WHERE kind='memory_revision'").get()!.n), 0);
+    assert.deepEqual(store.db.prepare('SELECT memory_id FROM memory_revisits ORDER BY 1').all().map(row => String(row.memory_id)), [digest.id, ...kept.map(memory => memory.id)].sort());
+    assert.deepEqual(store.logs(80).find(log => log.kind === 'revisit_finished')?.data, { memories: [digest.id] });
+    // The next batch waits out memory.revisitEveryHours.
+    await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 3);
+    // One that stops before it finishes leaves its batch due.
+    store.setSetting('revisitedAt', 0);
+    f.reviewFaux.setResponses([() => { throw new Error('model down'); }]);
+    await runtime.tick(); await runtime.idle();
+    assert.ok(store.logs(80).some(log => log.kind === 'review_stopped'));
+    assert.deepEqual(store.revisitDue(5, 30).map(item => item.memory.id), [second.id]);
+    // Turned off, nothing is gone back over.
+    store.setSetting('revisitedAt', 0); f.cfg.memory.revisitBatch = 0; const calls = f.reviewFaux.state.callCount;
+    await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, calls);
+  } finally { await runtime.stop(); f.store.close(); }
+});
+
 test('review waits for a quiet moment and lists the chats it has not read', async () => {
   const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
   try {

@@ -45,8 +45,8 @@ Past information the digital life can continue to use in later experiences. It b
 _Avoid_: separate memory per group
 
 **Experience Record**:
-A record of something the digital life perceived or participated in, preserving time, people, social context, and actual outcomes as a basis for later understanding.
-_Avoid_: verified world fact, final assessment of a person
+A record of something the digital life perceived or participated in, preserving time, people, social context, and actual outcomes as a basis for later understanding. One record tells one thing that happened.
+_Avoid_: verified world fact, final assessment of a person, a digest of everything in a stretch of chat
 
 **Long-term Understanding**:
 Knowledge, preferences, and impressions of relationships formed from experience, with traceable evidence and subject to revision through new experiences.
@@ -63,6 +63,10 @@ _Avoid_: life judgments written by another subject
 **Memory Review**:
 The part of memory consolidation that reads back the chat record of each setting since its last review and revises personal habits, practices, and impressions. It runs apart from the conversations, in a working context of its own.
 _Avoid_: compaction, a summary of the working context
+
+**Memory Revisit**:
+The part of memory consolidation that goes back over memories written earlier, with the record they rest on beside them: it corrects what the record contradicts, separates what tells several things, and keeps the lasting things they show about people and settings. It runs as a memory review does, apart from the conversations.
+_Avoid_: compaction, a rewrite from recollection alone, judgments written by another subject
 
 **Spontaneous Recall**:
 The emergence of relevant past experiences and understanding prompted by current people, topics, or activities.

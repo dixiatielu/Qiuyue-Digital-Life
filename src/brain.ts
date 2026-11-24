@@ -578,7 +578,7 @@ export class PiBrain implements Brain {
     this.seen.clear(); this.broughtToMind.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(); this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
-    this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: false, reviewing: true };
+    this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: false, reviewing: true, ...(observation.events.some(event => Array.isArray(event.payload.revisit)) ? { revisiting: true } : {}) };
     this.store.log('review_started', { runId: this.runId, eventIds: observation.events.map(event => event.id) });
     try {
       const message = await this.message(observation);

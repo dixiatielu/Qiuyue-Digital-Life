@@ -1,10 +1,9 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { validateToolArguments, type ToolCall } from '@earendil-works/pi-ai';
-import type { Config } from './config.js';
-import type { MemoryInput, Store } from './store.js';
+import type { DevelopmentLimits, MemoryInput, Store } from './store.js';
 
 /** Pi prepares arguments before schema validation. Report repairable errors together without echoing the memory body. */
-export function validatedMemoryTool(tool: AgentTool, store: Store, limits: Config['development']): AgentTool {
+export function validatedMemoryTool(tool: AgentTool, store: Store, limits: DevelopmentLimits): AgentTool {
   return {
     ...tool,
     constrainedSampling: { type: 'json_schema', strict: 'prefer' },

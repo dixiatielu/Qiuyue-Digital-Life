@@ -160,7 +160,7 @@ export class SemanticRecall implements SemanticSource {
  */
 export function memoriesInView(config: Config, store: Store, recall: Pick<SemanticRecall, 'recall'> | undefined, observations: EnvironmentEvent[]): { recalled: Recollection[]; development: Memory[]; listed: Memory[] } {
   const recalled = recall?.recall(observations) ?? [];
-  const chats = observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
+  const chats = observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number; until?: number }[]);
   const present = observations.filter(event => !ownEvent(event)).flatMap(event => event.source?.actor ? [event.source.actor] : []).reverse();
   // The limit is on impressions supplied, so those present who have none do not take a place from someone who has.
   const candidates = [...new Set([...present, ...store.impressionsIn(chats, config.development.people)])];
