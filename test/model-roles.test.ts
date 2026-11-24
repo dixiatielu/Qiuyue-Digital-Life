@@ -66,6 +66,9 @@ test('config rejects partial overrides and invalid role settings while allowing 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+/** A thought whose words stay in the working context: the text rides in a send, labelled past what a snapshot previews. */
+let sends = 0;
+const longSend = (label: string) => answer(call('qq_main__send_group_msg', { group_id: 100, message: `${++sends} ${'old working fact '.repeat(600)}${label}` }));
 function brains(independentSummary = true, sameSummaryId = false) {
   const selectedSummary = sameSummaryId ? { ...summaryModel, id: model.id } : summaryModel;
   const cfg = config(); const store = new Store(':memory:');
@@ -88,7 +91,8 @@ function brains(independentSummary = true, sameSummaryId = false) {
   const summaries = independentSummary ? backend('summary', selectedSummary) : undefined;
   const keys = (name: string) => ({ DAILY_KEY: 'daily-secret', REVIEW_KEY: 'review-secret', SUMMARY_KEY: 'summary-secret' })[name];
   let main!: PiBrain; let review!: PiBrain;
-  const social = { execute: async () => { throw new Error('Unexpected social action'); } };
+  // Sends carry the long history a reply no longer keeps (ADR-0024); nothing else reaches the platform.
+  const social = { execute: async (kind: string) => { if (kind === 'send_group_msg') return { message_id: -1 }; throw new Error('Unexpected social action'); } };
   const tools = createTools(cfg, store, social, () => main.thought);
   const reviewTools = forReview(createTools(cfg, store, social, () => review.thought));
   main = new PiBrain(cfg, store, tools, backend('main', model), undefined, undefined, keys, 'main', summaries);
@@ -110,7 +114,9 @@ test('primary, concurrent review, and compaction use independent keys, reasoning
       return answer('Review finished');
     }]);
     const reviewing = f.review.review(f.observation()); await entered.promise;
-    f.scripts.main.setResponses(Array.from({ length: 8 }, () => answer('Earlier fact. ' + 'old working fact '.repeat(1000))));
+    // A full snapshot previews each send, so leave room for those.
+    f.cfg.limits.contextTokens += 1500;
+    f.scripts.main.setResponses(Array.from({ length: 8 }, () => longSend('Earlier fact.')));
     f.scripts.summary.setResponses(Array.from({ length: 8 }, () => answer('Keep the lunar topic, its original sources, and the unfinished commitment.')));
     for (let i = 0; i < 8; i++) { event(f.store, `Latest ${i}`); await f.main.run(f.store.claim(20)!); }
     release.resolve(); await reviewing;
@@ -201,9 +207,12 @@ test('usage aggregates charged attempts once and leaves missing historical or fa
 test('a summary sent to another endpoint strips signatures even for the same provider, API and model ID', async () => {
   const f = brains(true, true);
   try {
+    f.cfg.limits.contextTokens += 1500;
+    // What stays of a reply is its calls (ADR-0024), and a call carries its own signature.
     f.scripts.main.setResponses(Array.from({ length: 8 }, () => answer([
       { type: 'thinking', thinking: 'PRIVATE_REASONING', thinkingSignature: 'PRIVATE_SIGNATURE' },
-      { type: 'text', text: 'Keep source event-1. ' + 'old working fact '.repeat(1000), textSignature: 'PRIVATE_TEXT_SIGNATURE' },
+      { type: 'text', text: 'Thinking aloud.', textSignature: 'PRIVATE_TEXT_SIGNATURE' },
+      { ...call('qq_main__send_group_msg', { group_id: 100, message: `${++sends} ${'old working fact '.repeat(600)}Keep source event-1.` }), thoughtSignature: 'PRIVATE_CALL_SIGNATURE' },
     ])));
     f.scripts.summary.setResponses(Array.from({ length: 8 }, () => context => {
       assert.doesNotMatch(JSON.stringify(context.messages), /PRIVATE_/);
@@ -245,7 +254,8 @@ test('an explicit summarizer transport failure rolls back the hard-budget run wi
   const f = brains(); let failed = false;
   try {
     f.cfg.compaction.idleRatio = 1;
-    f.scripts.main.setResponses(Array.from({ length: 10 }, () => answer('Keep the original. ' + 'old working fact '.repeat(1000))));
+    f.cfg.limits.contextTokens += 1500;
+    f.scripts.main.setResponses(Array.from({ length: 10 }, () => longSend('Keep the original.')));
     f.scripts.summary.setResponses([() => { throw new Error('Summary endpoint unavailable'); }]);
     for (let i = 0; i < 10 && !failed; i++) {
       const before = JSON.stringify(f.main.agent.state.messages);

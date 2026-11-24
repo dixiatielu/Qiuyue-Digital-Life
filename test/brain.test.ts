@@ -420,6 +420,45 @@ test('a reply from the person being answered cancels the call deciding the reply
   } finally { await runtime.stop(); f.store.close(); }
 });
 
+test('a call that fails after the thought acted keeps what it did, and what it had not yet decided on comes again', async () => {
+  const reading = deferred(); const release = deferred();
+  const f = fixture({ execute: async kind => { if (kind === 'get_msg') { reading.resolve(); await release.promise; } return { message_id: -42 }; } });
+  try {
+    const first = event(f.store, 'Do you remember what I said?');
+    f.faux.setResponses([
+      answer(call('qq_main__get_msg', { message_id: -42 })),
+      answer('', { stopReason: 'error', errorMessage: 'The interaction ended as failed.' }),
+    ]);
+    const work = f.brain.run(f.store.claim(10)!); await reading.promise;
+    const later = event(f.store, 'Hello?'); assert.equal(await f.brain.steer(f.store.claim(10)!), true);
+    release.resolve();
+    await assert.rejects(work, /The interaction ended as failed/);
+    // The first observation was decided on; the steered one entered only the failed call.
+    assert.equal(f.store.event(first.id)?.status, 'processed'); assert.equal(f.store.event(later.id)?.status, 'processing');
+    const kept = JSON.stringify(f.brain.agent.state.messages);
+    assert.match(kept, /qq_main__get_msg/); assert.doesNotMatch(kept, /Hello\?/);
+    assert.equal((f.store.logs().find(log => log.kind === 'thought_turns_kept')?.data as { turns: number }).turns, 1);
+    f.store.releaseClaims(); f.restart();
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /Do you remember what I said\?.*qq_main__get_msg.*Hello\?/); return answer('Read it'); }]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.store.event(later.id)?.status, 'processed');
+  } finally { release.resolve(); f.store.close(); }
+});
+
+test('a thought whose first call fails rolls back whole and its observation comes again', async () => {
+  const f = fixture();
+  try {
+    event(f.store, 'Earlier'); f.faux.setResponses([answer(call('set_activity', { activity: 'Listening' })), answer('')]);
+    await f.brain.run(f.store.claim(10)!);
+    const before = JSON.stringify(f.brain.agent.state.messages);
+    const source = event(f.store, 'Are you there?');
+    f.faux.setResponses([answer('', { stopReason: 'error', errorMessage: 'The interaction ended as failed.' })]);
+    await assert.rejects(f.brain.run(f.store.claim(10)!), /The interaction ended as failed/);
+    assert.equal(f.store.event(source.id)?.status, 'processing'); assert.equal(JSON.stringify(f.brain.agent.state.messages), before);
+    assert.ok(!f.store.logs().some(log => log.kind === 'thought_turns_kept'));
+  } finally { f.store.close(); }
+});
+
 test('a cancelled thought leaves its images in view for the next thought, which folds them when it ends', async () => {
   const f = fixture(); const calling = deferred();
   try {
@@ -431,7 +470,8 @@ test('a cancelled thought leaves its images in view for the next thought, which 
     const work = f.brain.run(f.store.claim(10)!); await calling.promise;
     say(f.store, 'Who am I to you?'); const preempting = f.store.claim(10)!;
     assert.equal(await f.brain.steer(preempting), false); f.store.releaseBatch(preempting.batchId); await work;
-    assert.ok(!f.store.logs().some(log => log.kind === 'context_folded'));
+    // Replies fold at every end (ADR-0024); images wait for the thought that decides again.
+    assert.ok(!f.store.logs().some(log => log.kind === 'context_folded' && (log.data as { images?: number }).images));
     f.restart();
     f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /aGVsbG8=/); return answer(call("qq_main__send_private_msg", { user_id: 7, message: 'A cute cat' })); }]);
     await f.brain.run(f.store.claim(10)!);
@@ -625,7 +665,8 @@ test('a thought cites what it had in view, not what earlier thoughts in the same
 test('pausing, resuming, and the life switch keep the working context; a change to what it holds still starts a fresh one', async () => {
   const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   try {
-    event(f.store, 'Do you know this tune?'); f.faux.setResponses([answer('Humming it quietly to herself')]);
+    // What stays of a thought is what it did (ADR-0024), so a call marks this working context.
+    event(f.store, 'Do you know this tune?'); f.faux.setResponses([answer(call('recall', { query: 'Humming it quietly to herself' })), answer('')]);
     await f.brain.run(f.store.claim(10)!);
     runtime.control('pause'); runtime.control('resume'); runtime.control('life', true); runtime.control('life', false);
     event(f.store, 'Still there?');

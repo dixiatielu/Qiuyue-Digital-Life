@@ -2,8 +2,8 @@ import { beginAction } from './helpers.js';
 import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools, toToolDeclaration, type Message } from '@earendil-works/pi-ai';
-import { fixture, event } from './helpers.js';
+import { fauxAssistantMessage as answer, fauxText, fauxThinking, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools, toToolDeclaration, type Message } from '@earendil-works/pi-ai';
+import { deferred, fixture, event } from './helpers.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { normalizeEvent } from '../src/adapters/snowluma/index.js';
 import { textTokens, toModelMessages } from '../src/context.js';
@@ -187,6 +187,58 @@ test('images seen in a thought are folded when it ends, so later thoughts and re
     f.faux.setResponses([context => { assert.doesNotMatch(JSON.stringify(context.messages), /aGVsbG8=/); return answer('Continue'); }]);
     await f.brain.run(f.store.claim(20)!);
   } finally { f.store.close(); }
+});
+
+test('a thought keeps only the actions of its replies: their text and thoughts leave when it ends, and a reply that did nothing leaves no turn', async () => {
+  const f = fixture();
+  try {
+    event(f.store, 'Anyone around?');
+    f.faux.setResponses([
+      answer([fauxText('Let me note what I am doing.'), fauxThinking('private reasoning'), call('set_activity', { activity: 'Reading the group' })]),
+      // Within its thought a reply stays as it was said.
+      context => { assert.match(JSON.stringify(context.messages), /Let me note what I am doing/); return answer('No tool calls, ending thought.'); },
+    ]);
+    await f.brain.run(f.store.claim(20)!);
+    const kept = JSON.stringify(f.brain.agent.state.messages);
+    assert.doesNotMatch(kept, /Let me note what I am doing|private reasoning|ending thought/);
+    assert.match(kept, /Reading the group/);
+    const replies = f.brain.agent.state.messages.filter(message => message.role === 'assistant');
+    assert.deepEqual(replies.map(reply => reply.role === 'assistant' && reply.content.map(block => block.type)), [['toolCall']]);
+    assert.equal((f.store.logs().find(log => log.kind === 'context_folded')?.data as { replies?: number }).replies, 2);
+    event(f.store, 'Quiet now'); f.faux.setResponses([answer('Nothing to add')]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.equal(f.brain.agent.state.messages.filter(message => message.role === 'assistant').length, 1);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /Quiet now/);
+    f.restart(); event(f.store, 'After restart');
+    f.faux.setResponses([context => {
+      const seen = JSON.stringify(context.messages);
+      assert.doesNotMatch(seen, /Nothing to add|ending thought|Let me note/);
+      assert.match(seen, /Anyone around\?.*Reading the group.*Quiet now.*After restart/);
+      return answer('Continue');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+  } finally { f.store.close(); }
+});
+
+test('within a thought, a reply that took no action is gone from the request after the next observation', async () => {
+  const f = fixture(); const calling = deferred(); const release = deferred();
+  try {
+    event(f.store, 'First line');
+    f.faux.setResponses([
+      async () => { calling.resolve(); await release.promise; return answer('No tool calls, ending thought.'); },
+      context => {
+        const seen = JSON.stringify(context.messages);
+        assert.doesNotMatch(seen, /ending thought/); assert.match(seen, /First line.*Second line/);
+        return answer(call('set_activity', { activity: 'Reading along' }));
+      },
+      answer('Quiet again'),
+    ]);
+    const work = f.brain.run(f.store.claim(10)!); await calling.promise;
+    event(f.store, 'Second line'); assert.equal(await f.brain.steer(f.store.claim(10)!), true);
+    release.resolve(); await work;
+    assert.equal(f.faux.state.callCount, 3);
+    assert.deepEqual(f.brain.agent.state.messages.flatMap(message => message.role === 'assistant' ? [message.content.map(block => block.type)] : []), [['toolCall']]);
+  } finally { release.resolve(); f.store.close(); }
 });
 
 test('a delta repeats neither a memory already shown nor an action result already in context, and removes a memory only when it no longer holds', async () => {

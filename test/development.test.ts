@@ -191,7 +191,7 @@ test('a conversation that reads a chat record to its end hears that new messages
         assert.match(result, /More follows/); assert.doesNotMatch(result, /by themselves/);
         return answer(call('read_chat_record', { conversation: "qq:900:group:100", from: new Date(t + 1000).toISOString() }));
       },
-      context => { assert.match(JSON.stringify(context.messages.at(-1)), /line 2.*This is the end of the record so far\.\\nNewer messages come to you by themselves.*潜水.*reply empty/); return answer(''); },
+      context => { assert.match(JSON.stringify(context.messages.at(-1)), /line 2.*This is the end of the record so far\.\\nNewer messages come to you by themselves.*潜水.*end your thought without a tool call/); return answer(''); },
     ]);
     event(f.store, 'A new message', 100);
     await f.brain.run(f.store.claim(20)!);

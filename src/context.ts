@@ -70,6 +70,20 @@ export class TokenMeter {
     const tokens = estimatedContextTokens(messages);
     return { tokens, measuredTokens: 0, estimatedTokens: tokens, basis: 'estimate' };
   }
+  /**
+   * Carry the measured base across a fold, which works message by message: the anchored messages as folded, at the
+   * measured total less the estimate of what the fold took out. Folding most thoughts' last reply would otherwise leave
+   * every next request on an estimate alone.
+   */
+  rebase(messages: AgentMessage[], fold: (messages: AgentMessage[]) => AgentMessage[], route: string) {
+    const anchor = this.anchor;
+    if (!anchor) return;
+    const { header, body } = this.surface(messages, route);
+    if (anchor.header !== header || body.length < anchor.prefix.length || !anchor.prefix.every((id, index) => id === hash(bodySurface(body[index]!)))) return;
+    const anchored = body.slice(0, anchor.prefix.length); const folded = fold(anchored);
+    const removed = anchored.reduce((sum, message) => sum + messageTokens(message), 0) - folded.reduce((sum, message) => sum + messageTokens(message), 0);
+    this.anchor = { header, prefix: folded.map(message => hash(bodySurface(message))), tokens: Math.max(0, anchor.tokens - removed) };
+  }
   observe(request: AgentMessage[], response: AssistantMessage, route: string) {
     const usage = response.usage;
     const values = [usage.input, usage.cacheRead, usage.cacheWrite, usage.output];
@@ -110,6 +124,22 @@ export function foldToolResults(messages: AgentMessage[], toolName: string): { m
     if (text.startsWith(FOLDED)) return message;
     changed++;
     return { ...message, content: [{ type: 'text' as const, text: `${FOLDED} read it again with ${toolName}, or read_context ${contextRecordId(message)} for this exact result]\n${text.split('\n', 1)[0]}` }] };
+  });
+  return { messages: folded, changed };
+}
+/**
+ * Keep of the model's replies only the actions they took (ADR-0024). Its text and thoughts reached no one, and a context
+ * that keeps them teaches the model to answer each observation with the same words, until it writes the next observation itself.
+ * A reply that took no action leaves nothing; one that acted keeps its calls, whose results follow it.
+ */
+export function foldReplies(messages: AgentMessage[]): { messages: AgentMessage[]; changed: number } {
+  let changed = 0;
+  const folded = messages.flatMap((message): AgentMessage[] => {
+    if (message.role !== 'assistant') return [message];
+    const calls = message.content.filter(block => block.type === 'toolCall');
+    if (calls.length === message.content.length) return [message];
+    changed++;
+    return calls.length ? [{ ...message, content: calls }] : [];
   });
   return { messages: folded, changed };
 }
@@ -175,8 +205,9 @@ export function pruneToolResults(messages: AgentMessage[], recentTokens: number)
   let changed = 0;
   const lastAssistant = messages.findLastIndex(message => message.role === 'assistant');
   const last = messages[lastAssistant];
-  const pendingCall = last?.role === 'assistant' && last.content.some(block => block.type === 'toolCall') ? lastAssistant : -1;
   const latestObservation = messages.findLastIndex(message => message.role === 'observation');
+  // A call is pending only in the current turn. A thought that ended on a call (its silent last reply folded, ADR-0024) is history.
+  const pendingCall = lastAssistant > latestObservation && last?.role === 'assistant' && last.content.some(block => block.type === 'toolCall') ? lastAssistant : -1;
   const pruned = messages.map((message, index) => {
     const oversizedBoundary = index === boundary && index < latestObservation;
     if (index >= boundary && !oversizedBoundary || pendingCall >= 0 && index >= pendingCall || message.role !== 'toolResult' || messageTokens(message) < 1000) return message;

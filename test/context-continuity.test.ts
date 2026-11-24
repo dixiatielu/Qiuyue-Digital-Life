@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools, toToolDeclaration, type Message } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage as answer, fauxText, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools, toToolDeclaration, type Message } from '@earendil-works/pi-ai';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -26,23 +26,30 @@ function smallWindow(f: ReturnType<typeof fixture>) {
   f.cfg.compaction.summaryMaxTokens = 512;
   f.cfg.compaction.retries = 0;
 }
-const longReply = (label: string) => label + 'old working fact '.repeat(1000);
+/**
+ * A thought whose words stay in the working context. A reply keeps only its actions (ADR-0024), so the long text rides in
+ * a send, which ends the thought as the old reply did. The label ends the text, past the part of it a runtime snapshot
+ * previews, so a snapshot never shows it; a counter keeps each send its own.
+ */
+let sends = 0;
+const longSend = (label: string, repeat = 1000) => answer(call('qq_main__send_group_msg', { group_id: 100, message: `${++sends} ${'old working fact '.repeat(repeat)}${label}` }));
 
 
-test('new runs preserve the exact preceding request prefix and assistant-only context', async () => {
+test('new runs preserve the exact preceding request prefix and what earlier replies did, not what they said', async () => {
   const f = fixture(); let prefix: Message[] = [];
   try {
     event(f.store, 'Talk about the Moon first');
     f.faux.setResponses([context => {
       prefix = structuredClone(context.messages);
       assert.doesNotMatch(getCurrentSystemPrompt(context.messages), /<runtime_data>|\d{4}-\d{2}-\d{2}T/);
-      return answer('Judgment only in the previous model reply: discuss lunar maria next.');
+      return answer([fauxText('Judgment only in the previous model reply: discuss lunar maria next.'), call('qq_main__group_poke', { group_id: 100, user_id: 7 })]);
     }]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Continue the conversation', 200);
     f.faux.setResponses([context => {
       assert.deepEqual(context.messages.slice(0, prefix.length), prefix);
-      assert.match(JSON.stringify(context.messages), /Judgment only in the previous model reply/);
+      assert.doesNotMatch(JSON.stringify(context.messages), /Judgment only in the previous model reply/);
+      assert.match(JSON.stringify(context.messages), /qq_main__group_poke/);
       // The first message came in its own observation, so no delta repeats it as a recent event.
       assert.equal(snapshots(context.messages).length, 1);
       return answer('Continue');
@@ -78,7 +85,8 @@ test('tool turns append changed state without rewriting prior snapshots or repea
 test('budget pressure produces a handoff summary and retains the latest observation and durable state', async () => {
   const f = fixture(); let summaries = 0; let calls = 0;
   try {
-    smallWindow(f);
+    // A send's preview stays in each full snapshot, so leave room for the ten a snapshot shows.
+    smallWindow(f); f.cfg.limits.contextTokens += 1500;
     const source = event(f.store, 'An earlier source');
     f.store.setActivity('Keep researching lunar maria', [source.id]);
     f.store.schedule('Watch the Moon together tomorrow', 'commitment', Date.now() + 86400000, [source.id]);
@@ -92,7 +100,7 @@ test('budget pressure produces a handoff summary and retains the latest observat
       assert.ok(estimatedContextTokens(context.messages) < f.cfg.limits.contextTokens);
       assert.match(JSON.stringify(snapshots(context.messages).at(-1)), /Keep researching lunar maria/);
       assert.match(JSON.stringify(snapshots(context.messages).at(-1)), /Watch the Moon together tomorrow/);
-      return answer(longReply('Judgment found only in old exchanges.'));
+      return longSend('Judgment found only in old exchanges.', 600);
     }));
     for (let index = 0; index < 8; index++) {
       const latest = event(f.store, `Latest observation ${index}`);
@@ -130,7 +138,7 @@ test('deletion during summarization invalidates its result before any further mo
   try {
     smallWindow(f);
     const source = event(f.store, 'Source in the summary pending deletion');
-    f.faux.setResponses([answer(longReply('Judgment that must be forgotten with its source.'))]);
+    f.faux.setResponses([longSend('Judgment that must be forgotten with its source.')]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Trigger consolidation');
     let furtherCalls = 0;
@@ -157,7 +165,7 @@ test('a summary lost to a transport error fails the run and keeps the previous w
   try {
     smallWindow(f);
     event(f.store, 'Previous observation');
-    f.faux.setResponses([answer(longReply('Judgment not yet saved to long-term memory.'))]);
+    f.faux.setResponses([longSend('Judgment not yet saved to long-term memory.')]);
     await f.brain.run(f.store.claim(20)!);
     const source = event(f.store, 'New observation triggering consolidation');
     f.faux.setResponses([context => {
@@ -181,7 +189,7 @@ test('observations arriving during summarization are steered into the same run a
   try {
     smallWindow(f);
     event(f.store, 'Previous observation');
-    f.faux.setResponses([answer(longReply('Previous working record.'))]);
+    f.faux.setResponses([longSend('Previous working record.')]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Start the next run');
     f.faux.setResponses([
@@ -213,7 +221,7 @@ test('summary requests reuse the original system, tools and verbatim history pre
     f.faux.setResponses([ (context, options) => {
       prefix = structuredClone(context.messages);
       assert.equal(options?.maxTokens, f.cfg.limits.outputReserveTokens);
-      return answer(longReply('Previous judgment'));
+      return longSend('Previous judgment');
     } ]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Continue');
@@ -238,7 +246,7 @@ test('SQLite checkpoints restore the compacted window, source records and tools 
   let f = fixture(undefined, new Store(path));
   try {
     smallWindow(f); event(f.store, 'Observation before restart');
-    f.faux.setResponses([answer(call("find_tools", { names: ['qq_main__get_group_member_info'] })), answer(longReply('Judgment only in working history'))]);
+    f.faux.setResponses([answer(call("find_tools", { names: ['qq_main__get_group_member_info'] })), longSend('Judgment only in working history')]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Trigger compaction');
     f.faux.setResponses([answer('Handoff summary that must survive restart.'), answer('Run completed')]);
@@ -278,8 +286,8 @@ test('checkpoint write failure keeps the prior window and observation acknowledg
     await assert.rejects(f.brain.run(f.store.claim(20)!), /checkpoint write failure/);
     assert.equal(f.store.processedCount(), 1); assert.equal(f.store.event(next.id)?.status, 'processing');
     assert.equal(f.store.db.prepare('SELECT data FROM working_context').get()!.data, previous);
-    assert.match(JSON.stringify(f.brain.agent.state.messages), /Previous complete window/);
-    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /Window that must not be committed/);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /Acknowledged observation/);
+    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /Unacknowledged observation|Window that must not be committed/);
     f.store.db.exec('DROP TRIGGER reject_checkpoint'); f.store.releaseClaims();
     f.faux.setResponses([answer('Committed after reprocessing')]); await f.brain.run(f.store.claim(20)!);
     assert.equal(f.store.processedCount(), 2);
@@ -295,10 +303,10 @@ test('pressure can be resolved by pruning old tool output without a summary call
     const originalResult = f.brain.agent.state.messages.find(message => message.role === 'toolResult')!;
     const originalId = (await import('../src/context.js')).contextRecordId(originalResult);
     // Set pressure explicitly; smaller runtime deltas no longer fill the old fixed window in two runs.
-    const latest = f.brain.agent.state.messages.findLast(message => message.role === 'assistant')!;
-    assert.equal(latest.role, 'assistant');
-    const usage = latest.usage;
-    f.cfg.limits.contextTokens = usage.input + usage.cacheRead + usage.cacheWrite + usage.output + f.cfg.limits.outputReserveTokens + f.cfg.limits.contextSafetyTokens + 100;
+    // The last reply took no action and left no turn; its usage is in the trace.
+    const usage = (f.store.logs().find(log => log.kind === 'thought_turn_completed')!.data as { usage: { input: number; cacheRead: number; cacheWrite: number; output: number } }).usage;
+    // Replies that take no action no longer add to it, so leave less room than one observation needs.
+    f.cfg.limits.contextTokens = usage.input + usage.cacheRead + usage.cacheWrite + usage.output + f.cfg.limits.outputReserveTokens + f.cfg.limits.contextSafetyTokens + 20;
     for (let index = 0; index < 2; index++) {
       event(f.store, `New observation ${index}`); f.faux.setResponses([context => {
         assert.ok(!isSummary(context.messages)); return answer('Continue');
@@ -317,7 +325,7 @@ test('summary retries are bounded and charged, and only the valid replacement is
   const f = fixture();
   try {
     smallWindow(f); f.cfg.compaction.retries = 1;
-    event(f.store, 'Previous observation'); f.faux.setResponses([answer(longReply('Preserve the original judgment'))]);
+    event(f.store, 'Previous observation'); f.faux.setResponses([longSend('Preserve the original judgment')]);
     await f.brain.run(f.store.claim(20)!);
     event(f.store, 'Consolidation needed');
     f.faux.setResponses([
@@ -340,7 +348,7 @@ test('a summary cut off at the limit keeps its complete lines', async () => {
   const f = fixture();
   try {
     smallWindow(f);
-    event(f.store, 'Previous observation'); f.faux.setResponses([answer(longReply('Judgment before the cut.'))]);
+    event(f.store, 'Previous observation'); f.faux.setResponses([longSend('Judgment before the cut.')]);
     await f.brain.run(f.store.claim(20)!);
     const source = event(f.store, 'Consolidation needed');
     f.faux.setResponses([
@@ -362,7 +370,7 @@ test('a summary that cannot be completed sets older exchanges aside instead of f
   try {
     smallWindow(f);
     event(f.store, 'Previous observation');
-    f.faux.setResponses([answer(longReply('Judgment not yet saved to long-term memory.'))]);
+    f.faux.setResponses([longSend('Judgment not yet saved to long-term memory.')]);
     await f.brain.run(f.store.claim(20)!);
     const source = event(f.store, 'New observation triggering consolidation');
     f.faux.setResponses([
@@ -387,9 +395,9 @@ test('a summary that cannot be completed sets older exchanges aside instead of f
 test('setting exchanges aside carries the previous summary forward', async () => {
   const f = fixture(); let summaries = 0;
   try {
-    smallWindow(f);
+    smallWindow(f); f.cfg.limits.contextTokens += 1500;
     f.faux.setResponses(Array.from({ length: 40 }, () => context => {
-      if (!isSummary(context.messages)) return answer(longReply('Ordinary judgment.'));
+      if (!isSummary(context.messages)) return longSend('Ordinary judgment.', 600);
       return ++summaries === 1 ? answer('Handoff: keep the lunar topic going.') : { ...answer('Cut off'), stopReason: 'length' };
     }));
     for (let index = 0; index < 8 && summaries < 2; index++) {
@@ -420,9 +428,10 @@ test('history too large for one summary request is set aside without a summary c
   const f = fixture();
   try {
     smallWindow(f); f.cfg.limits.contextTokens = 64000;
-    f.faux.setResponses(Array.from({ length: 4 }, () => answer(longReply('Judgment from a roomy window.'))));
+    f.faux.setResponses(Array.from({ length: 4 }, () => longSend('Judgment from a roomy window.')));
     for (let index = 0; index < 4; index++) { event(f.store, `Observation ${index}`); await f.brain.run(f.store.claim(20)!); }
-    f.cfg.limits.contextTokens = 15500;
+    // Still too small for the history in one summary request, with room for the previews of its four sends.
+    f.cfg.limits.contextTokens = 17500;
     const source = event(f.store, 'Observation after the window shrank');
     f.faux.setResponses([context => { assert.ok(!isSummary(context.messages)); return answer('Continue'); }]);
     await f.brain.run(f.store.claim(20)!);
@@ -458,13 +467,15 @@ async function idleFixture() {
   const f = fixture();
   smallWindow(f); f.cfg.compaction.keepRecentTokens = 200;
   event(f.store, 'Previous observation');
-  f.faux.setResponses([answer('Judgment from the previous run. ' + 'old working fact '.repeat(300))]);
+  f.faux.setResponses([longSend('Judgment from the previous run.', 600)]);
   await f.brain.run(f.store.claim(20)!);
   event(f.store, 'Second observation', 200);
   f.faux.setResponses([answer('Short reply')]);
   await f.brain.run(f.store.claim(20)!);
   // A run's first request compacts at the same ratio, so lower it only once the runs are done.
-  f.cfg.compaction.idleRatio = 0.7;
+  // The snapshot that follows a compaction previews the send, so the window grows by as much; the ratio lies between the
+  // context before a summary and after it.
+  f.cfg.limits.contextTokens += 600; f.cfg.compaction.idleRatio = 0.75;
   return f;
 }
 
@@ -507,7 +518,7 @@ test('background compaction preserves replies and runtime updates made while its
     background = f.brain.consolidate(); await entered.promise;
     const latest = event(f.store, 'Message arriving during compaction');
     await f.brain.run(f.store.claim(20)!);
-    assert.equal(f.sent[0]?.args.message, 'Reply while summarizing');
+    assert.equal(f.sent.at(-1)?.args.message, 'Reply while summarizing');
     assert.equal(f.store.event(latest.id)?.status, 'processed');
     release.resolve(); await background;
     const state = JSON.stringify(f.brain.agent.state.messages);
@@ -541,7 +552,7 @@ test('administrative cancellation discards a background summary without rolling 
     event(f.store, 'A new observation before cancellation'); await f.brain.run(f.store.claim(20)!);
     f.brain.abort(); release.resolve(); await rejected;
     assert.match(JSON.stringify(f.brain.agent.state.messages), /Judgment from the previous run/);
-    assert.match(JSON.stringify(f.brain.agent.state.messages), /Reply before cancellation/);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /A new observation before cancellation/);
     assert.ok(!f.store.logs().some(log => log.kind === 'context_compacted'));
     event(f.store, 'Arrived during consolidation');
     // Enough room remains to answer without starting the cancelled work again.
@@ -581,7 +592,7 @@ test('a completed background summary waits for the active model call and keeps i
     finishSummary.resolve(); await background;
     assert.equal(JSON.stringify(f.brain.agent.state.messages), active, 'the active transcript is not replaced mid-call');
     finishThought.resolve(); await run;
-    assert.match(JSON.stringify(f.brain.agent.state.messages), /Reply after safe replacement/);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /Handoff ready.*Activity after the summary finished/);
   } finally { finishSummary.resolve(); finishThought.resolve(); await Promise.allSettled([background, run]); f.store.close(); }
 });
 

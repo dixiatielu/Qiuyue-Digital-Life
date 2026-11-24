@@ -10,7 +10,7 @@ import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, FIND_TOOLS, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
+import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldReplies, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { waitFor } from './async.js';
@@ -99,6 +99,8 @@ export class PiBrain implements Brain {
   private preemptions = 0;
   private callStartedAt = 0;
   private activeRequest?: ModelRequest;
+  /** The thought as it stood after its last completed turn, which a later failed call does not undo (ADR-0024). */
+  private completed?: { messages: AgentMessage[]; seen: string[]; sources: string[]; compactions: number; anchor: ContextCheckpoint['anchor']; turns: number };
   private background?: BackgroundCompaction;
   private lastCallId?: string;
   private readonly summaryBackend?: { model: Model<any>; stream: StreamFn };
@@ -130,6 +132,15 @@ export class PiBrain implements Brain {
         ensureCurrent(store, this.thought, signal);
         const runtime = this.runtimeContext();
         let messages = [...context.messages];
+        // Replies before the newest observation belong to turns already answered; only their actions stay (ADR-0024).
+        // A reply that took no action ended its request, so it was never the input to one and leaving it out costs no cache.
+        const latest = messages.findLastIndex(message => message.role === 'observation');
+        const earlier = foldReplies(messages.slice(0, Math.max(latest, 0)));
+        if (earlier.changed) {
+          // The meter's list leaves out system messages, so find the newest observation by itself rather than by index.
+          this.meter.rebase(messages, before => { const at = before.indexOf(messages[latest]!); const cut = at < 0 ? before.length : at; return [...foldReplies(before.slice(0, cut)).messages, ...before.slice(cut)]; }, this.route(currentModel));
+          messages = [...earlier.messages, ...messages.slice(latest)];
+        }
         const shown = this.shown(messages, runtime);
         const view = shown ? carry(runtime, shown, ids => store.activeMemories(ids)) : runtime;
         const update = runtimeUpdate(view, shown);
@@ -176,6 +187,7 @@ export class PiBrain implements Brain {
         ensureCurrent(store, this.thought);
         this.meter.observe(this.pendingRequest, event.message, this.pendingRoute);
         store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
+        this.completed = { messages: this.agent.state.messages.slice(), seen: [...this.seen], sources: [...this.thought.sources], compactions: this.compactions.length, anchor: this.meter.anchor, turns: (this.completed?.turns ?? 0) + 1 };
         store.log('thought_turn_completed', { runId: this.runId, callId: this.lastCallId, owner, toolCalls: event.toolResults.length, usage: event.message.usage });
       }
     });
@@ -528,7 +540,7 @@ export class PiBrain implements Brain {
   async run(observation: Observation) {
     const generation = this.store.settings().generation;
     this.prepare(generation);
-    const rollback = this.checkpoint(); this.compactions = [];
+    const rollback = this.checkpoint(); this.compactions = []; this.completed = undefined;
     this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(observation.events.filter(event => !ownEvent(event) && !ambientEvent(event)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
@@ -547,12 +559,17 @@ export class PiBrain implements Brain {
       this.controller.signal.throwIfAborted();
       ensureCurrent(this.store, this.thought);
       // The next thought decides again, so a preempted one leaves what it was looking at for it to fold.
-      if (!this.preempted) this.fold();
+      this.fold(!this.preempted);
       if (this.background?.summary) this.agent.state.messages = this.applyBackground(this.agent.state.messages, this.runtimeContext());
       this.store.saveContext(this.checkpoint(), [...this.seen], this.compactions);
       this.seen.clear();
     }
-    catch (error) { outcome = this.controller.signal.aborted ? 'interrupted' : 'error'; this.revert(rollback, generation); throw error; }
+    catch (error) {
+      outcome = this.controller.signal.aborted ? 'interrupted' : 'error';
+      // An operator's stop discards the thought (ADR-0002); a failed call undoes nothing the thought already did (ADR-0024).
+      if (outcome === 'interrupted' || !this.keepCompleted(generation)) this.revert(rollback, generation);
+      throw error;
+    }
     finally { this.finishRequest(undefined, this.preempted || this.controller.signal.aborted); this.display(monitor => monitor.endRun(this.preempted ? 'interrupted' : outcome)); this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; }
   }
   /** A memory review runs apart from the conversations, in a working context of its own that starts from runtime state and ends with it; nothing steers into it (ADR-0012). */
@@ -606,14 +623,48 @@ export class PiBrain implements Brain {
     }
     return { block: true, reason: `Not sent: a new message arrived in ${chat} after you decided this. It follows as a new observation; decide again with it in view.` };
   }
-  /** Chat records read and images seen in a thought leave working context when it ends. Both sit within this thought, so the cached prefix before it stays valid. */
-  private fold() {
-    const records = foldToolResults(this.agent.state.messages, 'read_chat_record');
-    const images = foldImages(records.messages, label => this.tools.plugins.imageViewer(label));
-    if (!records.changed && !images.changed) return;
+  /**
+   * What a thought read and said leaves working context when it ends: chat records it read, images it saw, and the text and
+   * thoughts of its replies (ADR-0024). All sit within this thought, so the cached prefix before it stays valid. A preempted
+   * thought leaves its records and images for the next thought, which decides again with them in view.
+   */
+  private fold(everything = true) {
+    let results = 0; let images = 0; let replies = 0;
+    // Message by message, so the token meter can apply it to the prefix it measured.
+    const fold = (messages: AgentMessage[]) => {
+      let folded = messages;
+      if (everything) {
+        const records = foldToolResults(folded, 'read_chat_record'); folded = records.messages; results += records.changed;
+        const seen = foldImages(folded, label => this.tools.plugins.imageViewer(label)); folded = seen.messages; images += seen.changed;
+      }
+      const said = foldReplies(folded); replies += said.changed;
+      return said.messages;
+    };
+    const folded = fold(this.agent.state.messages);
+    const counts = { results, images, replies };
+    if (!results && !images && !replies) return;
     this.store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
-    this.agent.state.messages = images.messages;
-    this.store.log('context_folded', { runId: this.runId, results: records.changed, images: images.changed });
+    this.meter.rebase(this.agent.state.messages, fold, this.route(this.agent.state.model));
+    this.agent.state.messages = folded;
+    this.store.log('context_folded', { runId: this.runId, ...counts });
+  }
+  /**
+   * Save a failed thought as it stood after its last completed turn. Its actions happened and their results are in view,
+   * and the observations it decided on count as perceived; those that entered after return to pending and come again.
+   * False when no turn completed or the state cannot be saved, so the whole thought rolls back as before.
+   */
+  private keepCompleted(generation: number): boolean {
+    const completed = this.completed;
+    if (!completed || this.store.settings().generation !== generation) return false;
+    try {
+      this.restore({ identity: this.identity, generation, messages: completed.messages, sources: completed.sources, anchor: completed.anchor });
+      ensureCurrent(this.store, this.thought);
+      this.fold();
+      this.store.saveContext(this.checkpoint(), completed.seen, this.compactions.slice(0, completed.compactions));
+      this.store.log('thought_turns_kept', { runId: this.runId, turns: completed.turns, batches: completed.seen.length });
+      this.seen.clear();
+      return true;
+    } catch { return false; }
   }
   private matchesBackground(job: BackgroundCompaction, messages: AgentMessage[]) {
     return !job.controller.signal.aborted && job.identity === this.identity && job.thought.generation === this.store.settings().generation

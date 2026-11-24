@@ -33,3 +33,5 @@ At the hard input budget, a request waits for the existing task and uses its res
 This replaces the 2026-10-28 rule that new events cancel idle compaction and the 2026-10-29 soft-threshold check at the first primary request. Memory review, which has a separate disposable context and no idle compaction phase, retains its existing compaction policy. The single acting subject, pause semantics, provenance-aware deletion, and preservation of unknown action outcomes remain unchanged.
 
 See also: [ADR-0016](0016-hold-group-chat-while-resting.md) holds unaddressed group chat while the digital life rests, instead of letting it start a thought.
+
+Revision of 2026-11-25: a thought whose later call fails now keeps its completed turns as a cancelled one does, and the observations that reached only the failed call come again ([ADR-0024](0024-keep-what-happened-in-the-working-context.md)). Completed turns keep their calls and results; the text and thoughts of replies leave the working context, and a reply that took no action leaves no turn.
