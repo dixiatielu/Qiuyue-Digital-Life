@@ -150,3 +150,20 @@ export class SemanticRecall implements SemanticSource {
     this.store.log('recall_error', { ...detail, message: errorText(error) });
   }
 }
+
+/**
+ * The memories a thought has in view. What is said calls memories to mind, not merely where it is said (ADR-0009); development
+ * comes by scope, for the chats and people of the observations, and never by chance (ADR-0012). A review looks at the chats it
+ * lists, so their groups and the people who spoke there count as present. A replay asks the same of a past moment.
+ */
+export function memoriesInView(config: Config, store: Store, recall: Pick<SemanticRecall, 'recall'> | undefined, observations: EnvironmentEvent[]): { recalled: Recollection[]; development: Memory[] } {
+  const recalled = recall?.recall(observations) ?? [];
+  const chats = observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
+  const present = observations.filter(event => !ownEvent(event)).flatMap(event => event.source?.actor ? [event.source.actor] : []).reverse();
+  // The limit is on impressions supplied, so those present who have none do not take a place from someone who has.
+  const candidates = [...new Set([...present, ...store.impressionsIn(chats, config.development.people)])];
+  const known = new Set(store.development(candidates.map(person => `person:${person}`)).map(memory => memory.scope));
+  const people = candidates.filter(person => known.has(`person:${person}`)).slice(0, config.development.people);
+  const conversations = [...new Set([...observations.flatMap(event => event.source?.conversation ? [event.source.conversation] : []), ...chats.map(chat => chat.conversation)])];
+  return { recalled, development: store.development(['global', ...conversations.map(chat => `conversation:${chat}`), ...people.map(person => `person:${person}`)]) };
+}

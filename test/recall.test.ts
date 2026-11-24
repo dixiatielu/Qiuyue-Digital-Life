@@ -1,7 +1,7 @@
 import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fauxAssistantMessage as answer, type Message } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage as answer, fauxToolCall as call, type Message } from '@earendil-works/pi-ai';
 import { Store } from '../src/store.js';
 import { handleControl } from '../src/control.js';
 import { EmbeddingClient, SemanticRecall, memoryLines, queryText } from '../src/recall.js';
@@ -159,6 +159,9 @@ test('the recall tool searches by meaning when embedding is on, and records what
     const found = JSON.parse((result.content[0] as { text: string }).text) as { id: string; matchedLine?: string }[];
     assert.deepEqual(found.map(memory => [memory.id, memory.matchedLine]), [[song.id, '练夜曲的副歌又破音了，有点烦']]);
     assert.ok(f.brain.thought.sources.has(song.id));
+    // A search that found it counts as a deliberate recall, noted by ID alone.
+    assert.deepEqual({ ...store.recalls(song.id), lastAt: 0 }, { spontaneous: 0, deliberate: 1, lastAt: 0 });
+    assert.deepEqual(store.logs().find(log => log.kind === 'memory_recalled')?.data, { how: 'deliberate', memories: [{ id: song.id }] });
   } finally { await recall.stop(); store.close(); }
 });
 
@@ -195,5 +198,38 @@ test('a thought sees the memories its messages call up, with the matching line, 
     f.faux.setResponses([context => { seen = updates(context.messages as Message[]).at(-1)?.recalled; return answer('Remembered'); }]);
     await f.brain.run(store.claim(20)!);
     assert.deepEqual((seen as { id: string; matchedLine: string }[]).map(item => [item.id, item.matchedLine]), [[song.id, '1. 练夜曲的副歌又破音了，有点烦']]);
+  } finally { await recall.stop(); store.close(); }
+});
+
+test('what comes to mind is counted once a thought, with how alike it was, and the count goes when the memory is forgotten', async () => {
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+  const song = remember(store, '日记', '练夜曲的副歌又破音了，有点烦');
+  const lunch = remember(store, '午饭', '地铁请大家吃小笼包，说下次还请');
+  const recall = new SemanticRecall(embeddingConfig(), store, topics());
+  const f = fixture(undefined, store, recall);
+  const noted = () => store.logs(50).filter(log => log.kind === 'memory_recalled').reverse().map(log => log.data as { how: string; runId?: string; memories: { id: string; similarity?: number }[] });
+  try {
+    recall.start(); await recall.idle();
+    event(store, '那首夜曲你练得怎么样了'); await recall.idle();
+    // Two model calls in one thought read the same recollection; it came to mind once.
+    f.faux.setResponses([answer(call('set_activity', { activity: 'Chatting' })), answer('Done')]);
+    await f.brain.run(store.claim(20)!);
+    assert.equal(f.faux.state.callCount, 2);
+    assert.deepEqual({ ...store.recalls(song.id), lastAt: 0 }, { spontaneous: 1, deliberate: 0, lastAt: 0 });
+    assert.equal(store.recalls(lunch.id), undefined);
+    assert.equal(noted().length, 1);
+    assert.deepEqual(noted()[0]!.memories.map(memory => memory.id), [song.id]);
+    assert.ok(noted()[0]!.memories[0]!.similarity! >= embeddingConfig().embedding.threshold && noted()[0]!.runId);
+    // The next thought it comes up in counts again; a thought nothing comes up in notes nothing.
+    event(store, '夜曲的副歌怎么唱'); await recall.idle();
+    f.faux.setResponses([answer('Again')]); await f.brain.run(store.claim(20)!);
+    event(store, '今天天气不错'); await recall.idle();
+    f.faux.setResponses([answer('Quiet')]); await f.brain.run(store.claim(20)!);
+    assert.equal(store.recalls(song.id)?.spontaneous, 2); assert.equal(noted().length, 2);
+    // Its text was never in the trace, and its count leaves with it (ADR-0003).
+    assert.doesNotMatch(JSON.stringify(noted()), /夜曲|破音/);
+    store.forget(song.id);
+    assert.equal(store.recalls(song.id), undefined);
+    assert.equal(Number(store.db.prepare('SELECT count(*) AS n FROM memory_recalls').get()!.n), 0);
   } finally { await recall.stop(); store.close(); }
 });

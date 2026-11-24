@@ -14,7 +14,7 @@ import { compactionSplit, contextRecordId, estimatedContextTokens, estimateToken
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { waitFor } from './async.js';
-import type { SemanticRecall } from './recall.js';
+import { memoriesInView, type SemanticRecall } from './recall.js';
 import type { OnlineActivity } from './plugins.js';
 
 /** Built-in online activities; plugins contribute their own activities through the host. */
@@ -76,6 +76,8 @@ export class PiBrain implements Brain {
   thought: ThoughtContext = { generation: 0, sources: new Set(), triggers: new Set(), lifeOnly: true };
   private controller = new AbortController();
   private seen = new Set<string>();
+  /** Memories this thought has already been counted as calling to mind. */
+  private broughtToMind = new Set<string>();
   private turns = 0;
   private runId = '';
   private observations: EnvironmentEvent[] = [];
@@ -130,7 +132,7 @@ export class PiBrain implements Brain {
         this.phase = 'preparing'; this.stale.clear(); this.skipped = false;
         this.display(monitor => monitor.preparingRequest());
         ensureCurrent(store, this.thought, signal);
-        const runtime = this.runtimeContext();
+        const runtime = this.runtimeContext(true);
         let messages = [...context.messages];
         // Replies before the newest observation belong to turns already answered; only their actions stay (ADR-0024).
         // A reply that took no action ended its request, so it was never the input to one and leaving it out costs no cache.
@@ -407,26 +409,23 @@ export class PiBrain implements Brain {
     this.contextGeneration = checkpoint.generation;
     this.thought.sources = new Set(checkpoint.sources);
   }
-  private runtimeContext() {
+  /** The runtime state for a model call; thinking is set for a call of the thought under way, whose recollections are then counted. */
+  private runtimeContext(thinking = false) {
     const recent = this.store.recent(this.config.memory.recentEvents);
-    // What is said calls memories to mind, not merely where it is said (ADR-0009); development is supplied by scope below.
-    const recalled = this.recall?.recall(this.observations) ?? [];
+    const { recalled, development } = memoriesInView(this.config, this.store, this.recall, this.observations);
     for (const source of [...recent, ...recalled.map(item => item.memory)]) this.thought.sources.add(source.id);
-    // A review looks at the chats it lists, so their groups and the people who spoke there count as present.
-    const chats = this.observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
-    const present = this.observations.filter(event => !ownEvent(event)).flatMap(event => event.source?.actor ? [event.source.actor] : []).reverse();
-    // The limit is on impressions supplied, so those present who have none do not take a place from someone who has.
-    const candidates = [...new Set([...present, ...this.store.impressionsIn(chats, this.config.development.people)])];
-    const known = new Set(this.store.development(candidates.map(person => `person:${person}`)).map(memory => memory.scope));
-    const people = candidates.filter(person => known.has(`person:${person}`)).slice(0, this.config.development.people);
-    const conversations = [...new Set([...this.observations.flatMap(event => event.source?.conversation ? [event.source.conversation] : []), ...chats.map(chat => chat.conversation)])];
-    const development = this.store.development(['global', ...conversations.map(chat => `conversation:${chat}`), ...people.map(person => `person:${person}`)]);
     // When each was formed, so a judgment from last night's review reads as that rather than as settled.
     const entries = (kind: MemoryKind) => development.filter(memory => memory.kind === kind).map((memory: Memory) => ({ id: memory.id, scope: memory.scope, title: memory.title, content: memory.content, createdAt: new Date(memory.createdAt).toISOString() }));
     const runtime = { platformAccounts: this.store.setting('platformAccounts', {}), now: new Date().toISOString(), timeZone: 'Asia/Shanghai', adapters: this.config.adapters.map(({ id, driver, accountId, tools }) => ({ id, driver, accountId, tools })), settings: this.store.settings(), allowFiction: this.config.life.allowFiction, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, ...(event.source ? { source: event.source } : {}), text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression') };
     // Commitments, current activity, pursuits, and development are never selected by probabilistic recall.
     while (estimateTokens(runtime) > this.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
     while (estimateTokens(runtime) > this.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
+    if (thinking) {
+      // Counted once a thought, however many calls it makes, and only for what stayed within the budget.
+      const fresh = recalled.slice(0, runtime.recalled.length).filter(item => !this.broughtToMind.has(item.memory.id));
+      for (const item of fresh) this.broughtToMind.add(item.memory.id);
+      this.store.noteRecalled('spontaneous', fresh.map(item => ({ id: item.memory.id, similarity: item.similarity })), { runId: this.runId, ...(this.owner === 'review' ? { reviewing: true } : {}) });
+    }
     return runtime;
   }
   private async message(observation: Observation): Promise<ObservationMessage> {
@@ -541,7 +540,7 @@ export class PiBrain implements Brain {
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = []; this.completed = undefined;
-    this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.broughtToMind.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(observation.events.filter(event => !ownEvent(event) && !ambientEvent(event)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
@@ -576,7 +575,7 @@ export class PiBrain implements Brain {
   async review(observation: Observation) {
     const generation = this.store.settings().generation;
     this.resetContext(); this.compactions = [];
-    this.seen.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.broughtToMind.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(); this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: false, reviewing: true };

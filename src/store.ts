@@ -80,6 +80,8 @@ export class Store {
       CREATE TRIGGER IF NOT EXISTS memory_delete AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE id=old.id; END;
       CREATE TABLE IF NOT EXISTS memory_vectors(memory_id TEXT NOT NULL, chunk INTEGER NOT NULL, model TEXT NOT NULL, line TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(memory_id,chunk));
       CREATE TRIGGER IF NOT EXISTS memory_vectors_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_vectors WHERE memory_id=old.id; END;
+      CREATE TABLE IF NOT EXISTS memory_recalls(memory_id TEXT PRIMARY KEY, spontaneous INTEGER NOT NULL DEFAULT 0, deliberate INTEGER NOT NULL DEFAULT 0, last_at INTEGER NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS memory_recalls_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_recalls WHERE memory_id=old.id; END;
       CREATE TABLE IF NOT EXISTS tombstones(source_key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', rest INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS pursuits(id TEXT PRIMARY KEY, title TEXT NOT NULL, progress TEXT NOT NULL, fictional INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -483,6 +485,25 @@ export class Store {
       const recency = Math.exp(-(now - memory.createdAt) / (30 * 86_400_000));
       return { memory, score: matches * 5 + person + memory.importance / 3 + recency, relevant: !query.trim() || matches > 0 || person > 0 };
     }).filter(x => x.relevant).sort((a, b) => b.score - a.score).slice(0, limit).map(x => x.memory);
+  }
+  /**
+   * Keep how often each memory comes to mind: by itself in a thought, or found by a deliberate search. The trace says when and how
+   * alike it was, by ID alone, so nothing a forgotten memory said stays in it; the counts go with the memory.
+   */
+  noteRecalled(how: 'spontaneous' | 'deliberate', memories: { id: string; similarity?: number }[], detail: { runId?: string; reviewing?: boolean } = {}) {
+    if (!memories.length) return;
+    const now = Date.now();
+    const count = this.db.prepare(`INSERT INTO memory_recalls(memory_id,${how},last_at) SELECT id,1,? FROM memories WHERE id=? ON CONFLICT(memory_id) DO UPDATE SET ${how}=${how}+1,last_at=excluded.last_at`);
+    const write = () => {
+      for (const memory of memories) count.run(now, memory.id);
+      this.log('memory_recalled', { how, ...detail, memories: memories.map(({ id, similarity }) => ({ id, ...(similarity === undefined ? {} : { similarity: Math.round(similarity * 1000) / 1000 }) })) });
+    };
+    if (this.db.isTransaction) write(); else this.transaction(write);
+  }
+  /** How often a memory has come to mind, and when it last did. */
+  recalls(memoryId: string): { spontaneous: number; deliberate: number; lastAt: number } | undefined {
+    const row = this.db.prepare('SELECT * FROM memory_recalls WHERE memory_id=?').get(memoryId);
+    return row ? { spontaneous: Number(row.spontaneous), deliberate: Number(row.deliberate), lastAt: Number(row.last_at) } : undefined;
   }
   recallableIds(): Set<string> { return new Set(this.db.prepare(`SELECT id FROM memories WHERE ${recallable}`).all().map(row => String(row.id))); }
   /** Memories a deliberate search may find: current ones of every kind, and with historical their earlier versions too. */

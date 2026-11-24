@@ -114,6 +114,18 @@ Use these commands with `npm start -- <command> --config config.json` after buil
 
 Run `npm start -- help` for all commands, including memory correction and deletion. Restart the daemon after changing core configuration.
 
+### Replaying memory
+
+`replay` asks of past moments what memory a thought would have had in view, with the memories held at that moment and the code a thought runs now. It reads the database only and can run beside the daemon; it embeds only the messages of the cases, and keeps those vectors in `<cases>.vectors.json`.
+
+```bash
+npm start -- replay data/eval/cases.json --config config.json
+```
+
+The cases file is a JSON array kept with the private data. Each case has an `id`; `triggers`, the event IDs the thought observed; and `gold`, the IDs of memories, in any version, that say what the moment needed. Leave `gold` empty where no memory held then said it. `query` is what a deliberate search would have asked, `did` what the digital life actually did (`used`, `missed`, `wrong`), and `where` and `note` are the labeller's own. Read a memory before naming it as gold: citing an event is not saying what happened there.
+
+Each case comes out as `supplied` (came with the thought as development), `recalled` (came to mind by itself), `findable` (only a deliberate search finds it), `missed` (held, but neither reaches it), or `unrecorded`. The report gives IDs, counts, similarities, and ranks, and nothing a memory or message says.
+
 ### Live view
 
 ```bash
