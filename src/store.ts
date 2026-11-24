@@ -38,8 +38,8 @@ function listItems(content: string): string[] | undefined {
   const items = body.map(line => line.replace(marker, '').trim());
   return items.every(Boolean) ? items : undefined;
 }
-/** A handle for an entry split from a list: its opening clause, or its start where that is too short to look for it by. */
-function entryTitle(item: string): string {
+/** A handle for what was written without a title, such as an entry split from a list: its opening clause, or its start where that is too short to look for it by. */
+export function entryTitle(item: string): string {
   const opening = (item.split(/[，。；：,;:!?！？（(「]/, 1)[0] ?? '').trim();
   const title = [...([...opening].length >= 4 ? opening : item.trim())];
   return title.length > 30 ? `${title.slice(0, 30).join('')}…` : title.join('');
@@ -684,15 +684,21 @@ export class Store {
     if (through > (marks[conversation] ?? 0)) this.setSetting('reviewMarks', { ...marks, [conversation]: through });
   }
   /**
-   * Experiences to go back over, which no review has yet: those that tell more than one experience may, and those that have come
-   * to mind, the most often recalled first and then the oldest (ADR-0027). One written within the last day is left to settle.
+   * Experiences to go back over, which no review has yet: those from before an experience told one thing, which tell more than
+   * one may now, the most often recalled first and then the oldest (ADR-0027, ADR-0028). Nothing written since can be one, so
+   * going back ends when these are done. One written within the last day is left to settle.
    */
   revisitDue(limit: number, experienceChars: number, now = Date.now()): Revisit[] {
     const rows = this.db.prepare(`SELECT m.*, coalesce(r.spontaneous+r.deliberate,0) AS recalls FROM memories m LEFT JOIN memory_recalls r ON r.memory_id=m.id
-      WHERE m.active=1 AND m.kind='experience' AND m.created_at<? AND NOT EXISTS (SELECT 1 FROM memory_revisits v WHERE v.memory_id=m.id) AND (length(m.content)>? OR coalesce(r.spontaneous+r.deliberate,0)>0)
+      WHERE m.active=1 AND m.kind='experience' AND m.created_at<? AND NOT EXISTS (SELECT 1 FROM memory_revisits v WHERE v.memory_id=m.id) AND length(m.content)>?
       ORDER BY recalls DESC, m.created_at, m.rowid LIMIT ?`).all(now - 86_400_000, experienceChars, limit);
     const spans = this.db.prepare('SELECT e.conversation_ref AS conversation, min(e.at) AS first, max(e.at) AS last, count(*) AS events FROM sources s JOIN events e ON e.id=s.source_id WHERE s.owner_id=? AND e.conversation_ref IS NOT NULL GROUP BY 1 ORDER BY first');
     return rows.map(row => ({ memory: this.memoryRow(row), spans: spans.all(String(row.id)).map(span => ({ conversation: String(span.conversation), from: Number(span.first), to: Number(span.last), events: Number(span.events) })) }));
+  }
+  /** What the digital life noted in conversation since a time and still holds, for a review to check against the record (ADR-0028). Diary and fiction are its own. */
+  notedSince(at: number): Memory[] {
+    const ids = this.db.prepare("SELECT json_extract(data,'$.id') AS id FROM trace WHERE kind='remembered' AND at>? AND json_extract(data,'$.where')='conversation' ORDER BY id").all(at).map(row => String(row.id));
+    return ids.map(memoryId => this.memory(memoryId)).filter((memory): memory is Memory => memory !== undefined && memory.active && !['note', 'fiction'].includes(memory.kind));
   }
   /** These memories have been gone back over, or were written while doing so. */
   markRevisited(memoryIds: string[], now = Date.now()) {

@@ -65,8 +65,8 @@ The part of memory consolidation that reads back the chat record of each setting
 _Avoid_: compaction, a summary of the working context
 
 **Memory Revisit**:
-The part of memory consolidation that goes back over memories written earlier, with the record they rest on beside them: it corrects what the record contradicts, separates what tells several things, and keeps the lasting things they show about people and settings. It runs as a memory review does, apart from the conversations.
-_Avoid_: compaction, a rewrite from recollection alone, judgments written by another subject
+The part of memory consolidation that goes back over memories written earlier, with the record they rest on beside them: it corrects what the record contradicts, separates what tells several things, and keeps the lasting things they show about people and settings. It runs as a memory review does, apart from the conversations, and takes the memories written before an experience record told one thing.
+_Avoid_: compaction, a rewrite from recollection alone, judgments written by another subject, a second pass over what a review has just written
 
 **Spontaneous Recall**:
 The emergence of relevant past experiences and understanding prompted by current people, topics, or activities.

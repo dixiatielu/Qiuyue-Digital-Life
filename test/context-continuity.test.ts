@@ -431,7 +431,7 @@ test('history too large for one summary request is set aside without a summary c
     f.faux.setResponses(Array.from({ length: 4 }, () => longSend('Judgment from a roomy window.')));
     for (let index = 0; index < 4; index++) { event(f.store, `Observation ${index}`); await f.brain.run(f.store.claim(20)!); }
     // Still too small for the history in one summary request, with room for the previews of its four sends.
-    f.cfg.limits.contextTokens = 17500;
+    f.cfg.limits.contextTokens = 17900;
     const source = event(f.store, 'Observation after the window shrank');
     f.faux.setResponses([context => { assert.ok(!isSummary(context.messages)); return answer('Continue'); }]);
     await f.brain.run(f.store.claim(20)!);

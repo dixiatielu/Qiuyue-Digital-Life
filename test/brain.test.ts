@@ -389,6 +389,9 @@ test('a batch of successful messages, reactions, or pokes ends the thought; anot
     await f.brain.run(f.store.claim(10)!); assert.equal(f.faux.state.callCount, 1);
     event(f.store); f.faux.setResponses([answer([call("qq_main__send_group_msg", { group_id: 100, message: 'Noted' }), call('set_activity', { activity: 'Chatting' })]), answer('Rest')]);
     await f.brain.run(f.store.claim(10)!); assert.equal(f.faux.state.callCount, 3);
+    // Something remembered beside a message is part of the reply and ends the thought with it (ADR-0028).
+    const said = event(f.store); f.faux.setResponses([answer([call("qq_main__send_group_msg", { group_id: 100, message: 'Got it' }), call('remember', { kind: 'experience', content: 'They said hello', sources: [said.id] })]), answer('Must not be called')]);
+    await f.brain.run(f.store.claim(10)!); assert.equal(f.faux.state.callCount, 4);
   } finally { f.store.close(); }
   const failing = fixture({ execute: async () => { throw new ActionNotDispatchedError('SnowLuma is not connected'); } });
   try {

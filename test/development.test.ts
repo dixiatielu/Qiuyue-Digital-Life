@@ -392,7 +392,76 @@ test('a review sees the development of the chats it lists and of the people who 
   } finally { f.store.close(); }
 });
 
-test('an experience tells one thing, and those that tell more or have come to mind are due to be gone back over', () => {
+test('a thing is kept as it is said: content alone is enough beside a reply, and the reply still ends the thought', async () => {
+  const f = fixture();
+  try {
+    const store = f.store; store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+    const noted = () => store.logs(80).filter(log => log.kind === 'remembered').reverse().map(log => log.data as { id: string; kind: string; where: string; defaulted?: string[] });
+    // Two people speak; what she keeps about one of them rests on that one's message.
+    const other = say(store, 8, '今天好冷'); const told = say(store, 7, '我在北京读研，不是上海');
+    f.faux.setResponses([answer([call('qq_main__send_group_msg', { group_id: 100, message: '记住啦' }), call('remember', { kind: 'impression', scope: 'person:qq:user:7', content: '在北京读研，不是上海' })]), answer('Must not be called')]);
+    await f.brain.run(store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 1);
+    const [kept] = store.development(['person:qq:user:7']);
+    assert.deepEqual([kept!.title, kept!.content, kept!.importance, kept!.sources], ['在北京读研', '在北京读研，不是上海', 5, [told.id]]);
+    assert.deepEqual(noted(), [{ id: kept!.id, kind: 'impression', where: 'conversation', defaulted: ['sources', 'title', 'importance'] }]);
+    // How she wants to act is kept the same way, resting on everything in front of her; what she gives herself is kept as given.
+    const teased = say(store, 7, '你这也太长了吧');
+    f.faux.setResponses([answer([call('qq_main__send_group_msg', { group_id: 100, message: '好嘛' }), call('remember', { kind: 'habit', title: '说短点', content: '群里一句就够', importance: 8, sources: [teased.id] }), call('remember', { kind: 'practice', scope: 'conversation:qq:900:group:100', content: '这里的人嫌长消息' })])]);
+    await f.brain.run(store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 2);
+    assert.deepEqual(store.development(['global']).map(memory => [memory.title, memory.importance, memory.sources]), [['说短点', 8, [teased.id]]]);
+    assert.deepEqual(store.development(['conversation:qq:900:group:100']).map(memory => memory.sources), [[teased.id]]);
+    assert.deepEqual(noted().slice(1).map(item => item.defaulted), [undefined, ['sources', 'title', 'importance']]);
+    // Remembering alone does not end a thought, so she can still answer; and the rule on evidence holds for what rests on defaults.
+    say(store, 7, '在吗');
+    f.faux.setResponses([answer(call('remember', { kind: 'experience', content: 'P7 问我在不在' })), answer(call('qq_main__send_group_msg', { group_id: 100, message: '在' })), answer('Must not be called')]);
+    await f.brain.run(store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 4);
+    store.setSetting('lifeEnabled', true); store.receive({ key: 'wake:noting', kind: 'wake', at: Date.now(), text: 'Free time', payload: { wakeKind: 'life' } });
+    let refusal = '';
+    f.faux.setResponses([answer(call('remember', { kind: 'habit', content: '我要多说话' })), context => { refusal = JSON.stringify(context.messages.at(-1)); return answer('Fine'); }]);
+    await f.brain.run(store.claim(10)!);
+    assert.match(refusal, /cannot rest only on your own messages, notes, or judgments/);
+    assert.equal(store.development(['global']).length, 1);
+    void other;
+  } finally { f.store.close(); }
+});
+
+test('a review gives its sources itself, and checks against the record what was kept in conversation since the last one', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
+  try {
+    const store = f.store; store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+    f.cfg.memory.reflectionEveryEvents = 1; f.cfg.memory.revisitBatch = 0; f.cfg.compaction.idleAfterMs = 0;
+    say(store, 7, '我在北京读研');
+    f.faux.setResponses([answer([call('qq_main__send_group_msg', { group_id: 100, message: '好' }), call('remember', { kind: 'impression', scope: 'person:qq:user:7', title: '读研的地方', content: '在北京读研' }), call('remember', { kind: 'note', content: '今天的日记' })])]);
+    let prompt = ''; let refusal = '';
+    f.reviewFaux.setResponses([
+      context => { prompt = JSON.stringify(context.messages); return answer(call('remember', { kind: 'experience', content: 'P7 说他在北京读研' })); },
+      context => { refusal = JSON.stringify(context.messages.at(-1)); return answer(call('remember', { kind: 'experience', content: 'P7 说他在北京读研', sources: [store.recent(5).find(event => event.kind === 'message')!.id] })); },
+      answer('Reviewed'),
+    ]);
+    runtime.start(); await runtime.idle(); await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 3);
+    const kept = store.development(['person:qq:user:7'])[0]!;
+    // The review is told what she kept as it was said, though not her diary, and asked to check it against the record.
+    assert.match(prompt, new RegExp(`Since your last review you kept these in conversation, as they were said: ${kept.id} \\(impression: 读研的地方\\)\\. Each had only that moment to go on\\..*check them against it`));
+    assert.doesNotMatch(prompt, /今天的日记/);
+    assert.match(prompt, /Keep as an entry of its own anything the record shows that you would want to have the next time that person or group comes up/);
+    // A review has no message in front of it to rest a memory on.
+    assert.match(refusal, /must reference IDs of actual experiences or existing memories/);
+    assert.deepEqual(store.logs(80).filter(log => log.kind === 'remembered').map(log => (log.data as { where: string }).where).sort(), ['conversation', 'conversation', 'review']);
+    // The next review is told only of what was kept since, and what a review itself wrote is not among it.
+    say(store, 7, '又来了');
+    f.faux.setResponses([answer('Quiet')]);
+    f.reviewFaux.setResponses([context => { prompt = JSON.stringify(context.messages); return answer('Reviewed again'); }]);
+    await runtime.tick(); await runtime.idle(); await runtime.tick(); await runtime.idle();
+    assert.equal(f.reviewFaux.state.callCount, 4);
+    assert.doesNotMatch(prompt, /Since your last review you kept these/);
+  } finally { await runtime.stop(); f.store.close(); }
+});
+
+test('an experience tells one thing, and the longer ones from before are due to be gone back over, once', () => {
   const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   try {
     const bounds = { entryChars: 60, scopeChars: 200, experienceChars: 30 };
@@ -410,18 +479,21 @@ test('an experience tells one thing, and those that tell more or have come to mi
     const recalled = write('experience', 'Film', '晚上去看新番', [last.id]);
     const young = write('experience', 'Just now', 'w'.repeat(40), [last.id], undefined, 0.5);
     store.noteRecalled('spontaneous', [{ id: recalled.id, similarity: 0.7 }]); store.noteRecalled('deliberate', [{ id: recalled.id }]);
-    // The one that came to mind first, then the long ones from the oldest; a short one never recalled and one written today are left.
+    // Only the long ones, from the oldest; a short one is left however often it came to mind, and so is one written today.
     const due = store.revisitDue(10, 30, now);
-    assert.deepEqual(due.map(item => item.memory.id), [recalled.id, older.id, digest.id]);
-    assert.ok(![brief.id, young.id].some(id => due.some(item => item.memory.id === id)));
+    assert.deepEqual(due.map(item => item.memory.id), [older.id, digest.id]);
+    assert.ok(![brief.id, recalled.id, young.id].some(id => due.some(item => item.memory.id === id)));
     // Each comes with the stretch of every chat its events are from.
-    assert.deepEqual(due[2]!.spans, [{ conversation: 'qq:900:group:100', from: first.at, to: last.at, events: 2 }, { conversation: 'qq:900:private:7', from: elsewhere.at, to: elsewhere.at, events: 1 }]);
-    assert.deepEqual(store.revisitDue(2, 30, now).map(item => item.memory.id), [recalled.id, older.id]);
+    assert.deepEqual(due[1]!.spans, [{ conversation: 'qq:900:group:100', from: first.at, to: last.at, events: 2 }, { conversation: 'qq:900:private:7', from: elsewhere.at, to: elsewhere.at, events: 1 }]);
+    assert.deepEqual(store.revisitDue(1, 30, now).map(item => item.memory.id), [older.id]);
+    // Among them, the one that has come to mind goes first.
+    store.noteRecalled('spontaneous', [{ id: digest.id, similarity: 0.7 }]);
+    assert.deepEqual(store.revisitDue(10, 30, now).map(item => item.memory.id), [digest.id, older.id]);
     // Once gone over it is not due again, and neither is one replaced or forgotten meanwhile.
-    store.markRevisited([recalled.id, 'm:none']);
+    store.markRevisited([digest.id, 'm:none']);
     store.writeMemory({ kind: 'experience', title: 'Older, checked', content: 'short', importance: 5, sources: [first.id], supersedes: older.id }, false);
-    assert.deepEqual(store.revisitDue(10, 30, now).map(item => item.memory.id), [digest.id]);
-    store.forget(recalled.id);
+    assert.deepEqual(store.revisitDue(10, 30, now), []);
+    store.forget(digest.id);
     assert.equal(Number(store.db.prepare('SELECT count(*) AS n FROM memory_revisits').get()!.n), 0);
   } finally { store.close(); }
 });

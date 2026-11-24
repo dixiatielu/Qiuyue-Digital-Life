@@ -15,3 +15,5 @@ Two trials ran on a copy of the database with the review model, claude-fable-5-2
 Notes and diary entries are not gone back over: what the digital life felt is its own to keep, though some hold facts as well. Development entries are not checked against their evidence here; the review that reads new chat revises them. Whether revisits bring what a moment needs into view is for the replay to show on moments labelled after a deployment.
 
 The instructions and the `remember` tool change, so a deploy starts a new working context.
+
+Revision of 2026-11-25: a revisit now takes only the experiences longer than the bound, which are those written before an experience told one thing, and no longer those that have merely come to mind; see [ADR-0028](0028-keep-a-thing-when-it-is-said.md). This replaces "and the ones that have come to mind" above. Among them the most often recalled still go first, and when they are done no revisit starts.

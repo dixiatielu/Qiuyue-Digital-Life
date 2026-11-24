@@ -76,6 +76,8 @@ export class PiBrain implements Brain {
   thought: ThoughtContext = { generation: 0, sources: new Set(), triggers: new Set(), lifeOnly: true };
   private controller = new AbortController();
   private seen = new Set<string>();
+  /** The tools the reply being carried out calls. */
+  private batch: string[] = [];
   /** Memories this thought has already been counted as calling to mind. */
   private broughtToMind = new Set<string>();
   private turns = 0;
@@ -125,7 +127,8 @@ export class PiBrain implements Brain {
       // What a thought has loaded is declared from its next turn on; Pi writes the change into the transcript.
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.declared() } }),
       beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
-      afterToolCall: async ({ toolCall, isError, result }) => !isError && this.tools.plugins.endsThought(toolCall.name, result.details) ? { terminate: true } : undefined,
+      // A batch ends the thought when every call in it does. Something remembered beside a message sent is part of that reply, not a reason to decide again (ADR-0028).
+      afterToolCall: async ({ toolCall, isError, result }) => !isError && (this.tools.plugins.endsThought(toolCall.name, result.details) || (toolCall.name === 'remember' && this.batch.some(name => this.tools.plugins.endsThought(name, undefined)))) ? { terminate: true } : undefined,
       prepareRequest: async ({ context, model: currentModel }, signal) => {
         const first = this.turns === 0;
         // Observations steered in for stale chats have entered by now.
@@ -178,7 +181,7 @@ export class PiBrain implements Brain {
         this.thought.lifeOnly &&= event.message.lifeOnly;
         store.log('observation_entered', { runId: this.runId, batchId: event.message.batchId });
       }
-      if (event.type === 'message_end' && event.message.role === 'assistant') { this.finishRequest(event.message); this.phase = 'acting'; }
+      if (event.type === 'message_end' && event.message.role === 'assistant') { this.finishRequest(event.message); this.phase = 'acting'; this.batch = event.message.content.flatMap(block => block.type === 'toolCall' ? [block.name] : []); }
       if (event.type === 'tool_execution_start') {
         const chat = this.tools.plugins.chatTarget(event.toolName, event.args); if (chat) this.engaged.add(chat);
         // A call to a tool not yet loaded fails as not found; loading it now lets the next turn make the call.
