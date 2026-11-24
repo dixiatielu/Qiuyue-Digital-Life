@@ -9,7 +9,7 @@ import { handleControl } from '../src/control.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { deferred, event, fixture } from './helpers.js';
 
-const limits = { scopeChars: 60, personChars: 40 };
+const limits = { entryChars: 60, scopeChars: 60, personChars: 40 };
 function say(store: Store, actorId: number, text: string, options: { groupId?: number; messageId?: number; name?: string; at?: number; segments?: unknown[] } = {}) {
   const groupId = 'groupId' in options ? options.groupId : 100;
   return store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: options.at ?? Date.now(), text, groupId, actorId, payload: { message_id: options.messageId, message_type: groupId ? 'group' : 'private', sender: { user_id: actorId, card: options.name ?? `P${actorId}` }, message: options.segments ?? [{ type: 'text', data: { text } }] } }, store))!;
@@ -78,6 +78,79 @@ test('development is bounded per kind and scope for the digital life but not for
     assert.equal(store.memory(corrected.id)?.active, false);
     assert.ok(store.logs().some(log => log.kind === 'memory_retired'));
   } finally { store.close(); }
+});
+
+test('a habit or practice entry says one thing: one too long is refused, and revising one entry leaves the others as they were', () => {
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+  try {
+    const bounds = { entryChars: 20, scopeChars: 200, personChars: 40 };
+    const seen = say(store, 7, '+1'); const later = say(store, 8, '+1');
+    const write = (kind: 'habit' | 'practice' | 'impression', content: string, extra: { supersedes?: string; sources?: string[]; scope?: string } = {}) => store.writeMemory({ kind, title: 'Chains', content, importance: 5, sources: [seen.id], ...extra }, false, bounds);
+    // The refusal says how long an entry may be and what to do with the rest, and saves nothing.
+    assert.throws(() => write('habit', 'h'.repeat(21)), /A habit entry says one thing in at most 20 characters.*this content has 21\. Save each point as an entry of its own/);
+    assert.throws(() => write('practice', '字'.repeat(21)), /A practice entry says one thing in at most 20 characters/);
+    assert.doesNotMatch((() => { try { write('habit', 'h'.repeat(21)); return ''; } catch (error) { return String(error); } })(), /break up a longer entry/);
+    assert.equal(store.development(['global']).length, 0);
+    // An impression is one entry per person with its own limit; an operator correction is bound by neither.
+    assert.ok(write('impression', 'i'.repeat(40), { scope: 'person:qq:user:7' }));
+    const chains = write('habit', 'Join a chain once'); const short = write('habit', 'Keep replies short'); const stickers = write('habit', 'One sticker ends it');
+    // Revising one entry replaces that entry alone: the others keep their IDs, wording, and time.
+    const before = store.development(['global']).filter(memory => memory.id !== chains.id);
+    const revised = write('habit', 'Join a chain of 3+', { supersedes: chains.id, sources: [later.id] });
+    assert.deepEqual(store.development(['global']).filter(memory => memory.id !== revised.id), before);
+    assert.deepEqual(store.development(['global']).map(memory => memory.id).sort(), [short.id, stickers.id, revised.id].sort());
+    assert.deepEqual(revised.sources.sort(), [later.id, chains.id].sort());
+    const corrected = handleControl(store, { args: ['memory', 'correct', short.id, 'w'.repeat(80)] }) as { id: string };
+    assert.equal(store.memory(corrected.id)?.content.length, 80);
+    // A longer entry, such as one the operator wrote, is broken up by replacing it with one of its points.
+    assert.throws(() => write('habit', 'v'.repeat(30), { supersedes: corrected.id }), /To break up a longer entry, supersede it with one of its points and write the others as new entries\./);
+  } finally { store.close(); }
+});
+
+test('a list kept as one entry is split once into its items, which rest on its evidence and are forgotten with it', async () => {
+  const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
+  try {
+    const store = f.store; store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+    f.cfg.development.entryChars = 40; f.cfg.compaction.idleAfterMs = 60_000;
+    const seen = say(store, 7, '绷'); const other = say(store, 8, '神了');
+    store.acknowledge(store.claim(10)!.batchId);
+    const group = 'conversation:qq:900:group:100';
+    const write = (kind: 'habit' | 'practice', content: string, scope = 'global', sources = [seen.id]) => store.writeMemory({ kind, title: '群聊节奏（昨晚修）', content, importance: 8, scope, sources }, false);
+    const list = write('habit', '群聊节奏（昨晚修）：\n1. 一句就够，接当下那口气。\n2、反应词换着来：绷、神了。\n3) 复读链三四人以上原样抄一遍就停，抄完不加评论；只有一两条就不动，这一条本身就超过了四十个字的上限。');
+    const bullets = write('practice', '- 极短句不带句末标点，两到六个字就是一条完整的话\n- 单发问号是没看懂，连发是集体懵，不用解释', group);
+    const prose = write('practice', '这个群说话很短，多半不带标点。\n有人讲翻车的事先接具体感受，不给建议，也不替人安排。', 'global', [other.id]);
+    const mixed = write('habit', '对熟人：\n1. 被逗了回一句嘴硬就收，不解释也不追问为什么\n私聊时：\n2. 先接具体感受，再说自己的事情，不抢话', group);
+    const brief = write('habit', '1. 早上只回一次早\n2. 揉一揉回一个就停', group, [other.id]);
+    runtime.start(); await runtime.idle();
+    // Items keep their wording, order, scope, importance, and time; the heading and the numbering go.
+    const habits = store.development(['global']).filter(memory => memory.kind === 'habit');
+    assert.deepEqual(habits.map(memory => memory.content), ['一句就够，接当下那口气。', '反应词换着来：绷、神了。', '复读链三四人以上原样抄一遍就停，抄完不加评论；只有一两条就不动，这一条本身就超过了四十个字的上限。']);
+    assert.deepEqual(habits.map(memory => memory.title), ['一句就够', '反应词换着来', '复读链三四人以上原样抄一遍就停']);
+    for (const entry of habits) assert.deepEqual({ supersedes: entry.supersedes, sources: entry.sources, importance: entry.importance, createdAt: entry.createdAt, conversations: entry.conversations }, { supersedes: list.id, sources: [list.id], importance: 8, createdAt: list.createdAt, conversations: list.conversations });
+    assert.equal(store.memory(list.id)?.active, false);
+    assert.deepEqual(store.development([group]).filter(memory => memory.kind === 'practice').map(memory => memory.content), ['极短句不带句末标点，两到六个字就是一条完整的话', '单发问号是没看懂，连发是集体懵，不用解释']);
+    assert.equal(store.memory(bullets.id)?.active, false);
+    // What is not plainly one list, or is short enough already, stays as written.
+    for (const kept of [prose, mixed, brief]) assert.equal(store.memory(kept.id)?.active, true);
+    assert.equal(store.logs(50).filter(log => log.kind === 'development_split').length, 2);
+    assert.equal(store.logs(50).filter(log => log.kind === 'memory_written' && (log.data as { supersedes?: string }).supersedes === list.id).length, 3);
+    // An item rests on others through the list, so it can be revised with new evidence alone, and its siblings stay.
+    const revised = store.writeMemory({ kind: 'habit', title: '一句就够', content: '一句就够；同一件事可以分几口气发。', importance: 8, sources: [other.id], supersedes: habits[0]!.id }, false, { ...f.cfg.development });
+    assert.deepEqual(store.development(['global']).filter(memory => memory.kind === 'habit').map(memory => memory.id).sort(), [revised.id, habits[1]!.id, habits[2]!.id].sort());
+    // Whoever still holds the list's ID hears what it became.
+    assert.throws(() => store.writeMemory({ kind: 'habit', title: 'x', content: 'x', importance: 5, sources: [seen.id], supersedes: list.id }, false), new RegExp(`already been revised\\. It was split into 3 entries, which hold now: .*${habits[1]!.id} \\(反应词换着来\\).*The one you mean is among them\\.`));
+    // It happens once: a list an operator writes afterwards stays one entry.
+    const corrected = handleControl(store, { args: ['memory', 'correct', prose.id, '1. 这个群说话很短，多半不带标点，一条两到六个字\n2. 有人讲翻车的事先接具体感受，不给建议'] }) as { id: string };
+    assert.equal(store.splitDevelopment(40), 0);
+    assert.equal(store.memory(corrected.id)?.active, true);
+    // Forgetting the evidence takes the list and every entry that came of it (ADR-0003).
+    const plan = store.forgetPlan(seen.id);
+    for (const gone of [list.id, bullets.id, habits[1]!.id, habits[2]!.id, revised.id, ...store.development([group]).filter(memory => memory.kind === 'practice').map(memory => memory.id)]) assert.ok(plan.includes(gone));
+    assert.ok(!plan.includes(brief.id));
+    store.forget(seen.id);
+    assert.deepEqual(store.development(['global', group]).map(memory => memory.id).sort(), [corrected.id, brief.id].sort());
+    assert.equal(store.search('反应词换着来', 8, [], true).length, 0);
+  } finally { await runtime.stop(); f.store.close(); }
 });
 
 test('the chat record shows everyone in order, folds echoes and reactions into the lines they belong to, and keeps chats apart', () => {

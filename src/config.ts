@@ -32,7 +32,7 @@ export interface Config {
   limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; maxPreemptions: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
   compaction: { model?: ModelConfig; contextTokens?: number; keepRecentTokens: number; summaryMaxTokens: number; retries: number; idleRatio: number; idleAfterMs: number };
   memory: { retentionDays: number; recallLimit: number; recentEvents: number; reflectionEveryEvents: number };
-  development: { scopeChars: number; personChars: number; people: number; recordLines: number };
+  development: { entryChars: number; scopeChars: number; personChars: number; people: number; recordLines: number };
   web: { enabled: boolean; searchUrl: string; searchKeyEnv: string; timeoutMs: number; maxBytes: number };
   /** Recall by meaning, through an OpenAI-compatible /embeddings endpoint. Every threshold depends on the model: threshold for what messages call to mind, searchThreshold for the few words of a deliberate search, which score lower, and stickerThreshold for saved stickers whose descriptions fit what was said. */
   embedding: { enabled: boolean; baseUrl: string; model: string; apiKeyEnv: string; threshold: number; searchThreshold: number; limit: number; stickerThreshold: number; stickerLimit: number; timeoutMs: number; selfNames: string[] };
@@ -83,7 +83,7 @@ export function loadConfig(path: string): Config {
     limits: { batchSize: 20, debounceMs: 1200, maxDelayMs: 4000, ambientDelayMs: 120_000, maxPreemptions: 2, tickMs: 500, modelCallsPerDay: null, actionsPerHour: null, runTimeoutMs: null, maxTurnsPerRun: null, maxImages: 4, contextTokens: 262144, outputReserveTokens: 32768, contextSafetyTokens: 2048, ...raw.limits },
     compaction: { keepRecentTokens: 12000, summaryMaxTokens: 2048, retries: 1, idleRatio: 0.85, idleAfterMs: 30_000, ...raw.compaction, ...(raw.compaction?.model === undefined ? {} : { model: readModel(raw.compaction.model, 'compaction.model') }) },
     memory: { retentionDays: 90, recallLimit: 8, recentEvents: 30, reflectionEveryEvents: 100, ...raw.memory },
-    development: { scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
+    development: { entryChars: 200, scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
     web: { enabled: true, searchUrl: 'https://api.deepseek.com/v1/tools/search', searchKeyEnv: 'DEEPSEEK_API_KEY', timeoutMs: 15_000, maxBytes: 2_000_000, ...raw.web },
     embedding: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [], ...raw.embedding },
     drawing: { enabled: false, baseUrl: '', model: '', apiKeyEnv: 'MODEL_API_KEY', timeoutMs: 300_000, ...raw.drawing, dir: resolve(base, raw.drawing?.dir ?? 'data/drawings') },

@@ -43,6 +43,7 @@ const sections = () => [
     { path: 'memory.reflectionEveryEvents', type: 'int', label: t('Review every N events', '每多少事件整理一次记忆') },
   ]],
   ['development', t('Development size', '发展容量'), [
+    { path: 'development.entryChars', type: 'int', label: t('Characters per habit or practice', '每条习惯或惯例的字数上限') },
     { path: 'development.scopeChars', type: 'int', label: t('Characters per scope', '每个范围的字数上限') },
     { path: 'development.personChars', type: 'int', label: t('Characters per impression', '每条印象的字数上限') },
     { path: 'development.people', type: 'int', label: t('Impressions in view', '同时提供的印象数') },

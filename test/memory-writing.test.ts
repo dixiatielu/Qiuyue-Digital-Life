@@ -37,7 +37,7 @@ test('remember requests strict schemas only on providers that support them, with
 test('a review receives the configured memory budgets and can recover a pruned record', async () => {
   const f = fixture();
   try {
-    f.cfg.development.personChars = 500; f.cfg.development.scopeChars = 1500; f.restart();
+    f.cfg.development.personChars = 500; f.cfg.development.scopeChars = 1500; f.cfg.development.entryChars = 170; f.restart();
     const source = event(f.store);
     const original: Message = { role: 'toolResult', toolCallId: 'old', toolName: 'read_chat_record', content: [{ type: 'text', text: `Beginning\n${'Evidence\n'.repeat(3000)}The original source is ${source.id}\nEnd` }], isError: false, timestamp: 1 };
     const [id] = f.store.archiveContext([original], [source.id]);
@@ -48,7 +48,7 @@ test('a review receives the configured memory budgets and can recover a pruned r
         const tools = getCurrentTools(context.messages);
         assert.ok(tools.some(tool => tool.name === 'read_context'));
         const remember = tools.find(tool => tool.name === 'remember')!;
-        assert.match(remember.description, /500/); assert.match(remember.description, /1500/);
+        assert.match(remember.description, /500/); assert.match(remember.description, /1500/); assert.match(remember.description, /says one thing in at most 170 characters/);
         assert.match(remember.description, /kind/);
         return answer(call('read_context', { id: id! }));
       },
@@ -104,8 +104,8 @@ test('direct memory writes report every invalid source and the available charact
   try {
     const source = event(f.store);
     const base = { kind: 'practice' as const, title: 'Style', content: 'x'.repeat(50), importance: 5, sources: [source.id] };
-    f.store.writeMemory(base, false, { scopeChars: 60, personChars: 40 });
-    assert.throws(() => f.store.writeMemory({ ...base, content: 'y'.repeat(30), sources: [source.id, '#00000000', '#ffffffff'] }, false, { scopeChars: 60, personChars: 40 }), error => {
+    f.store.writeMemory(base, false, { entryChars: 60, scopeChars: 60, personChars: 40 });
+    assert.throws(() => f.store.writeMemory({ ...base, content: 'y'.repeat(30), sources: [source.id, '#00000000', '#ffffffff'] }, false, { entryChars: 60, scopeChars: 60, personChars: 40 }), error => {
       const text = String(error);
       assert.match(text, /#00000000/); assert.match(text, /#ffffffff/);
       assert.match(text, /80 characters.*60/); assert.match(text, /10 characters/);

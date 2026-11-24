@@ -29,11 +29,27 @@ const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 
 /** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
 /** Chat records cite events by the first eight characters of their ID. */
 export const eventRef = (eventId: string) => `#${eventId.slice(2, 10)}`;
+/** The items of content written as one numbered or bulleted list under at most one heading line; undefined when it is anything else. */
+function listItems(content: string): string[] | undefined {
+  const lines = content.split(/\r?\n|\\n/).map(line => line.trim()).filter(Boolean);
+  const marker = /^(?:\d+\s*[.、)）:：]|[-*•·])\s*/;
+  const body = marker.test(lines[0] ?? '') ? lines : lines.slice(1);
+  if (body.length < 2 || !body.every(line => marker.test(line))) return;
+  const items = body.map(line => line.replace(marker, '').trim());
+  return items.every(Boolean) ? items : undefined;
+}
+/** A handle for an entry split from a list: its opening clause. */
+function entryTitle(item: string): string {
+  const clause = [...(item.split(/[，。；：,;:!?！？（(「]/, 1)[0] || item).trim()];
+  return clause.length > 30 ? `${clause.slice(0, 30).join('')}…` : clause.join('');
+}
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
 export const actionFingerprint = (kind: string, args: Record<string, unknown>) => digest({ kind, args: canonical(args) });
 
 /** What a revision reaches; see Store.revisionReach. */
 export interface RevisionReach { withdrawn: { id: string; kind: string; title: string }[]; cites: { id: string; kind: string; title: string }[] }
+/** What bounds the digital life's own development writes: one habit or practice entry, each kind's entries in a scope together, and one impression. */
+export interface DevelopmentLimits { entryChars: number; scopeChars: number; personChars: number }
 export interface MemoryInput { kind: MemoryKind; title: string; content: string; importance: number; subjects?: string[]; sources: string[]; supersedes?: string; scope?: string; fictional?: boolean }
 /** Local receive times of claimable events: the earliest waking one, the latest of any kind, and the earliest ambient one. */
 export interface PendingTiming { first?: number; last?: number; ambient?: number }
@@ -279,7 +295,7 @@ export class Store {
   }
   memory(memoryId: string): Memory | undefined { const row = this.db.prepare('SELECT * FROM memories WHERE id=?').get(memoryId); return row ? this.memoryRow(row) : undefined; }
   /** Check independent source and size errors together, even when a tool call is missing another required field. Never writes. */
-  inspectMemoryWrite(input: Partial<MemoryInput>, limits?: { scopeChars: number; personChars: number }) {
+  inspectMemoryWrite(input: Partial<MemoryInput>, limits?: DevelopmentLimits) {
     const sources = new Set<string>(); const problems: string[] = [];
     if (Array.isArray(input.sources)) for (const ref of new Set(input.sources)) {
       if (typeof ref !== 'string' || !ref.length || ref.length > 100) { problems.push('Each source must be a non-empty event or memory ID of at most 100 characters.'); continue; }
@@ -294,18 +310,20 @@ export class Store {
     }
     if (limits && input.kind && isDevelopment(input.kind) && typeof input.content === 'string') {
       const scope = input.scope ?? (input.kind === 'impression' ? undefined : 'global');
+      // An entry that says one thing can be revised, checked against its own evidence, and retired alone (ADR-0025).
+      if (input.kind !== 'impression' && characters(input.content) > limits.entryChars) problems.push(`A ${input.kind} entry says one thing in at most ${limits.entryChars} characters, so that it can be revised alone; this content has ${characters(input.content)}. Save each point as an entry of its own, with the evidence for that point in its sources. What happened that showed it to you belongs in sources or an experience, not in the entry.${input.supersedes ? ' To break up a longer entry, supersede it with one of its points and write the others as new entries.' : ''}`);
       if (typeof scope === 'string') {
         const cap = scope.startsWith('person:') ? limits.personChars : limits.scopeChars;
         // Habits and practices have separate budgets; replacing an entry frees its old content.
         const used = this.db.prepare('SELECT content FROM memories WHERE active=1 AND scope=? AND kind=? AND id IS NOT ?').all(scope, input.kind, typeof input.supersedes === 'string' ? input.supersedes : null).reduce((sum, row) => sum + characters(String(row.content)), 0);
         const length = characters(input.content);
-        if (used + length > cap) problems.push(`Your ${input.kind}s in ${scope} would reach ${used + length} characters, above the limit of ${cap}; merge entries with supersedes or retire some with retire_memory first. This write has room for ${Math.max(0, cap - used)} characters; its content has ${length}. Shorten it before retrying.`);
+        if (used + length > cap) problems.push(`Your ${input.kind}s in ${scope} would reach ${used + length} characters, above the limit of ${cap}; retire entries you no longer see with retire_memory, or fold entries that say the same thing into one with supersedes, first. This write has room for ${Math.max(0, cap - used)} characters; its content has ${length}. Shorten it before retrying.`);
       }
     }
     return { sources: [...sources], problems };
   }
   /** Limits bound the digital life's own development writes; operator corrections pass none. */
-  writeMemory(input: MemoryInput, allowFiction: boolean, limits?: { scopeChars: number; personChars: number }): Memory {
+  writeMemory(input: MemoryInput, allowFiction: boolean, limits?: DevelopmentLimits): Memory {
     if (!input.content.trim() || characters(input.content) > 12_000 || characters(input.title) > 200) throw new Error('Memory content is empty or too long.');
     if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
     if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
@@ -358,9 +376,11 @@ export class Store {
   }
   /** The version that replaced a revised memory and still holds, described for whoever would revise or cite the old one. */
   private currentVersion(memoryId: string): string | undefined {
-    const row = this.db.prepare('WITH RECURSIVE later(id) AS (SELECT ? UNION SELECT memories.id FROM memories JOIN later ON memories.supersedes=later.id) SELECT * FROM memories WHERE active=1 AND id IN (SELECT id FROM later) ORDER BY created_at DESC,rowid DESC LIMIT 1').get(memoryId);
-    if (!row) return;
-    const current = this.memoryRow(row);
+    const rows = this.db.prepare('WITH RECURSIVE later(id) AS (SELECT ? UNION SELECT memories.id FROM memories JOIN later ON memories.supersedes=later.id) SELECT * FROM memories WHERE active=1 AND id IN (SELECT id FROM later) ORDER BY created_at DESC,rowid DESC').all(memoryId);
+    if (!rows.length) return;
+    // A list split into entries holds as all of them (ADR-0025).
+    if (rows.length > 1) return `It was split into ${rows.length} entries, which hold now: ${rows.reverse().map(row => `${row.id} (${row.title})`).join('; ')}. The one you mean is among them.`;
+    const current = this.memoryRow(rows[0]!);
     return `Its current version is ${current.id} (${current.title}): ${current.content}`;
   }
   /** Which of these memories are current. */
@@ -413,6 +433,35 @@ export class Store {
     if (!memory?.active || !isDevelopment(memory.kind)) throw new Error('Only a current habit, practice, or impression can be retired.');
     this.transaction(() => { this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(memoryId); this.log('memory_retired', { id: memoryId, kind: memory.kind, scope: memory.scope }); });
     return { ...memory, active: false };
+  }
+  /**
+   * Once, split habits and practices kept as one numbered list into an entry for each item (ADR-0025). Nothing is reworded:
+   * an item becomes an entry with the list's scope, importance, and time, resting on the list and so on its evidence, and the
+   * list leaves use as a replaced version does. A long entry that is not plainly such a list is left for the digital life to split.
+   */
+  splitDevelopment(entryChars: number): number {
+    return this.transaction(() => {
+      if (this.setting('developmentSplit', false)) return 0;
+      const insert = this.db.prepare('INSERT INTO memories(id,kind,title,content,importance,subjects,conversations_json,fictional,supersedes,active,created_at,scope) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)');
+      let split = 0;
+      for (const row of this.db.prepare("SELECT * FROM memories WHERE active=1 AND kind IN ('habit','practice') ORDER BY created_at,rowid").all()) {
+        const items = listItems(String(row.content));
+        if (characters(String(row.content)) <= entryChars || !items) continue;
+        const ids = items.map(item => {
+          const entryId = id('m');
+          insert.run(entryId, row.kind!, entryTitle(item), item, row.importance!, row.subjects!, row.conversations_json!, row.fictional!, row.id!, row.created_at!, row.scope!);
+          this.db.prepare('INSERT INTO sources VALUES (?,?)').run(entryId, String(row.id));
+          return entryId;
+        });
+        this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(String(row.id));
+        this.log('development_split', { id: row.id, kind: row.kind, scope: row.scope, entries: ids.length });
+        // Each is a memory written, which recall embeds when it hears of it.
+        for (const entryId of ids) this.log('memory_written', { id: entryId, kind: row.kind, supersedes: row.id, scope: row.scope });
+        split++;
+      }
+      this.setSetting('developmentSplit', true);
+      return split;
+    });
   }
   search(query: string, limit = 8, subjects: string[] = [], historical = false): Memory[] {
     const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])].slice(0, 30);

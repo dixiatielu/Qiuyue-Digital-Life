@@ -45,6 +45,7 @@
     "reflectionEveryEvents": 100
   },
   "development": {
+    "entryChars": 200,
     "scopeChars": 2000,
     "personChars": 600,
     "people": 8,
