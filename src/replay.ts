@@ -18,10 +18,10 @@ import { Store } from './store.js';
  */
 export interface ReplayCase { id: string; triggers: string[]; gold: string[]; where?: string[]; query?: string; at?: number; did?: string; note?: string }
 /**
- * supplied: came with the thought as development. recalled: came to mind by itself. findable: not in view, but a deliberate
- * search finds it. missed: a memory of it was held, and none of those reach it. unrecorded: no memory held then said it.
+ * supplied: came with the thought as development. recalled: came to mind by itself. listed: its title came with the thought,
+ * one read away. findable: not in view, but a deliberate search finds it. missed: a memory of it was held, and none of those reach it. unrecorded: no memory held then said it.
  */
-export type ReplayOutcome = 'supplied' | 'recalled' | 'findable' | 'missed' | 'unrecorded';
+export type ReplayOutcome = 'supplied' | 'recalled' | 'listed' | 'findable' | 'missed' | 'unrecorded';
 export interface ReplayResult {
   id: string; at: number; outcome: ReplayOutcome; did?: string;
   /** Versions of the named memories held at that moment. */
@@ -32,6 +32,10 @@ export interface ReplayResult {
   similarity?: number; rank?: number;
   /** Its place in the deliberate search, when found. */
   searchRank?: number;
+  /** Its place when the search is given only what was said, as a search no one had to think of would be. */
+  saidRank?: number;
+  /** Its place among the memories that concern the chat it was said in. */
+  chatRank?: number;
 }
 export interface ReplayReport { cases: number; threshold: number; limit: number; outcomes: Record<ReplayOutcome, number>; byDid: Record<string, Partial<Record<ReplayOutcome, number>>>; results: ReplayResult[] }
 
@@ -107,6 +111,7 @@ export async function replay(databasePath: string, config: Config, embedder: Emb
     for (const { memoryId, line, vector } of store.memoryVectors(embedder.model)) lines.set(memoryId, [...lines.get(memoryId) ?? [], { line, vector }]);
     // What can come to mind by itself: everything but development, which comes by scope.
     const development = new Set<string>(developmentKinds);
+    const concerns = new Map(memories.map(row => [String(row.id), JSON.parse(String(row.conversations_json)) as string[]]));
     const recallable = memories.filter(row => !development.has(String(row.kind)) && lines.has(String(row.id))).map(row => String(row.id));
     const setHeld = store.db.prepare('UPDATE memories SET active=? WHERE id=?');
     const eventRow = live.prepare('SELECT * FROM events WHERE id=?');
@@ -131,11 +136,17 @@ export async function replay(databasePath: string, config: Config, embedder: Emb
             .map(memoryId => ({ memoryId, similarity: queries.length ? closestLine(queries, lines.get(memoryId)!).similarity : -1 })).sort((a, b) => b.similarity - a.similarity);
           const place = ranked.findIndex(entry => held.has(entry.memoryId));
           if (place >= 0 && queries.length) { result.similarity = Math.round(ranked[place]!.similarity * 1000) / 1000; result.rank = place + 1; }
+          const chats = new Set(events.flatMap(event => event.source?.conversation ? [event.source.conversation] : []));
+          const inChat = ranked.filter(entry => concerns.get(entry.memoryId)!.some(chat => chats.has(chat))).findIndex(entry => held.has(entry.memoryId));
+          if (inChat >= 0 && queries.length) result.chatRank = inChat + 1;
+          const said = events.map(event => queryText(event.text, {}, config.embedding.selfNames)).join(' ').slice(0, 500);
+          const saidPlace = said.trim() ? (await recall.search(said, config.memory.recallLimit)).findIndex(memory => held.has(memory.id)) : -1;
+          if (saidPlace >= 0) result.saidRank = saidPlace + 1;
           const query = item.query ?? events.map(event => queryText(event.text, {}, config.embedding.selfNames)).join(' ');
           const searched = (await recall.search(query.slice(0, 500), config.memory.recallLimit)).map(memory => memory.id);
           const searchPlace = searched.findIndex(memoryId => held.has(memoryId));
           if (searchPlace >= 0) result.searchRank = searchPlace + 1;
-          result.outcome = view.development.some(memory => held.has(memory.id)) ? 'supplied' : recalled.some(memoryId => held.has(memoryId)) ? 'recalled' : searchPlace >= 0 ? 'findable' : 'missed';
+          result.outcome = view.development.some(memory => held.has(memory.id)) ? 'supplied' : recalled.some(memoryId => held.has(memoryId)) ? 'recalled' : view.listed.some(memory => held.has(memory.id)) ? 'listed' : searchPlace >= 0 ? 'findable' : 'missed';
         }
         results.push(result);
       } finally { Date.now = clock; }
@@ -143,7 +154,7 @@ export async function replay(databasePath: string, config: Config, embedder: Emb
     // A failed embedding leaves a thought without recall and says so only in the trace; a replay that went on would count that as memory missed.
     const failed = store.logs(1000).find(log => log.kind === 'recall_error');
     if (failed) throw new Error(`Embedding failed during the replay, so its results are not kept: ${JSON.stringify(failed.data)}`);
-    const outcomes: Record<ReplayOutcome, number> = { supplied: 0, recalled: 0, findable: 0, missed: 0, unrecorded: 0 };
+    const outcomes: Record<ReplayOutcome, number> = { supplied: 0, recalled: 0, listed: 0, findable: 0, missed: 0, unrecorded: 0 };
     const byDid: ReplayReport['byDid'] = {};
     for (const result of results) { outcomes[result.outcome]++; if (result.did) (byDid[result.did] ??= {})[result.outcome] = (byDid[result.did]![result.outcome] ?? 0) + 1; }
     return { cases: results.length, threshold: config.embedding.threshold, limit: config.embedding.limit, outcomes, byDid, results };

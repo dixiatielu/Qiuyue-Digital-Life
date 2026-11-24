@@ -124,7 +124,7 @@ npm start -- replay data/eval/cases.json --config config.json
 
 The cases file is a JSON array kept with the private data. Each case has an `id`; `triggers`, the event IDs the thought observed; and `gold`, the IDs of memories, in any version, that say what the moment needed. Leave `gold` empty where no memory held then said it. `query` is what a deliberate search would have asked, `did` what the digital life actually did (`used`, `missed`, `wrong`), and `where` and `note` are the labeller's own. Read a memory before naming it as gold: citing an event is not saying what happened there.
 
-Each case comes out as `supplied` (came with the thought as development), `recalled` (came to mind by itself), `findable` (only a deliberate search finds it), `missed` (held, but neither reaches it), or `unrecorded`. The report gives IDs, counts, similarities, and ranks, and nothing a memory or message says.
+Each case comes out as `supplied` (came with the thought as development), `recalled` (came to mind by itself), `listed` (its title came with the thought, one read away), `findable` (only a deliberate search finds it), `missed` (held, but neither reaches it), or `unrecorded`. The report gives IDs, counts, similarities, and ranks, and nothing a memory or message says.
 
 ### Live view
 

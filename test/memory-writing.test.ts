@@ -84,7 +84,7 @@ test('a review gets concise combined memory errors before retrying a valid write
         const result = results(context.messages).at(-1)!;
         const text = JSON.stringify(result.content);
         assert.equal(result.isError, true);
-        assert.match(text, /601/); assert.match(text, /600/);
+        assert.match(text, /601/); assert.match(text, /at most 200 characters/);
         assert.match(text, /#00000000/); assert.match(text, /#ffffffff/);
         assert.equal(f.store.development(['person:qq:user:7']).length, 0);
         return answer(call('remember', { kind: 'impression', title: 'Someone', content: 'Said hello', importance: 5, scope: 'person:qq:user:7', sources: [source.id], supersedes: null, subjects: null, fictional: null }));
@@ -104,8 +104,8 @@ test('direct memory writes report every invalid source and the available charact
   try {
     const source = event(f.store);
     const base = { kind: 'practice' as const, title: 'Style', content: 'x'.repeat(50), importance: 5, sources: [source.id] };
-    f.store.writeMemory(base, false, { entryChars: 60, scopeChars: 60, personChars: 40 });
-    assert.throws(() => f.store.writeMemory({ ...base, content: 'y'.repeat(30), sources: [source.id, '#00000000', '#ffffffff'] }, false, { entryChars: 60, scopeChars: 60, personChars: 40 }), error => {
+    f.store.writeMemory(base, false, { entryChars: 60, scopeChars: 60 });
+    assert.throws(() => f.store.writeMemory({ ...base, content: 'y'.repeat(30), sources: [source.id, '#00000000', '#ffffffff'] }, false, { entryChars: 60, scopeChars: 60 }), error => {
       const text = String(error);
       assert.match(text, /#00000000/); assert.match(text, /#ffffffff/);
       assert.match(text, /80 characters.*60/); assert.match(text, /10 characters/);

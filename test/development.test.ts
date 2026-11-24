@@ -9,7 +9,7 @@ import { handleControl } from '../src/control.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { deferred, event, fixture } from './helpers.js';
 
-const limits = { entryChars: 60, scopeChars: 60, personChars: 40 };
+const limits = { entryChars: 60, scopeChars: 60 };
 function say(store: Store, actorId: number, text: string, options: { groupId?: number; messageId?: number; name?: string; at?: number; segments?: unknown[] } = {}) {
   const groupId = 'groupId' in options ? options.groupId : 100;
   return store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: options.at ?? Date.now(), text, groupId, actorId, payload: { message_id: options.messageId, message_type: groupId ? 'group' : 'private', sender: { user_id: actorId, card: options.name ?? `P${actorId}` }, message: options.segments ?? [{ type: 'text', data: { text } }] } }, store))!;
@@ -25,7 +25,7 @@ function sent(store: Store, kind: string, args: Record<string, unknown>, message
 const updates = (messages: Message[]) => messages.flatMap(message => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<runtime_data>')
   ? [JSON.parse(message.content.slice('<runtime_data>'.length, message.content.lastIndexOf('</runtime_data>')))] : []);
 
-test('development holds everywhere unless it belongs to one group, with one impression per person and support beyond its own messages', () => {
+test('development holds everywhere unless it belongs to one group, an impression is of one person, and all of it needs support beyond its own messages', () => {
   const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   try {
     const other = say(store, 7, '你这也太长了吧');
@@ -53,9 +53,11 @@ test('development holds everywhere unless it belongs to one group, with one impr
     assert.ok(store.writeMemory({ ...base, kind: 'practice', scope: "conversation:qq:900:group:100", sources: [mine.id] }, false));
     const impression = store.writeMemory({ ...base, kind: 'impression', title: 'P7', content: 'Teases me about long messages', scope: "person:qq:user:7", sources: [eventRef(other.id)] }, false);
     assert.deepEqual(impression.sources, [other.id]); assert.deepEqual(impression.subjects, ['qq:user:7']);
-    assert.throws(() => store.writeMemory({ ...base, kind: 'impression', scope: "person:qq:user:7", sources: [other.id] }, false), /already exists.*supersedes/);
+    // What is known of a person is several entries, each revised alone (ADR-0026).
+    const second = store.writeMemory({ ...base, kind: 'impression', title: 'Where', content: 'Lives in Chengdu', scope: "person:qq:user:7", sources: [other.id] }, false);
     const revised = store.writeMemory({ ...base, kind: 'impression', content: 'Teases me, kindly', scope: "person:qq:user:7", sources: [other.id], supersedes: impression.id }, false);
-    assert.deepEqual(store.development(["person:qq:user:7"]).map(memory => memory.id), [revised.id]);
+    assert.deepEqual(store.development(["person:qq:user:7"]).map(memory => memory.id), [second.id, revised.id]);
+    assert.deepEqual(second.subjects, ['qq:user:7']);
     assert.throws(() => store.writeMemory({ ...base, kind: 'note', sources: ['#00000000'] }, false), /does not exist/);
   } finally { store.close(); }
 });
@@ -83,7 +85,7 @@ test('development is bounded per kind and scope for the digital life but not for
 test('a habit or practice entry says one thing: one too long is refused, and revising one entry leaves the others as they were', () => {
   const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   try {
-    const bounds = { entryChars: 20, scopeChars: 200, personChars: 40 };
+    const bounds = { entryChars: 20, scopeChars: 200 };
     const seen = say(store, 7, '+1'); const later = say(store, 8, '+1');
     const write = (kind: 'habit' | 'practice' | 'impression', content: string, extra: { supersedes?: string; sources?: string[]; scope?: string } = {}) => store.writeMemory({ kind, title: 'Chains', content, importance: 5, sources: [seen.id], ...extra }, false, bounds);
     // The refusal says how long an entry may be and what to do with the rest, and saves nothing.
@@ -91,8 +93,11 @@ test('a habit or practice entry says one thing: one too long is refused, and rev
     assert.throws(() => write('practice', '字'.repeat(21)), /A practice entry says one thing in at most 20 characters/);
     assert.doesNotMatch((() => { try { write('habit', 'h'.repeat(21)); return ''; } catch (error) { return String(error); } })(), /break up a longer entry/);
     assert.equal(store.development(['global']).length, 0);
-    // An impression is one entry per person with its own limit; an operator correction is bound by neither.
-    assert.ok(write('impression', 'i'.repeat(40), { scope: 'person:qq:user:7' }));
+    // An impression entry is bound the same way, and what is kept about one person shares the scope's bound.
+    assert.throws(() => write('impression', 'i'.repeat(21), { scope: 'person:qq:user:7' }), /An impression entry says one thing in at most 20 characters/);
+    for (let entry = 0; entry < 10; entry++) write('impression', `${entry}`.repeat(20), { scope: 'person:qq:user:7' });
+    assert.throws(() => write('impression', 'one more', { scope: 'person:qq:user:7' }), /impressions in person:qq:user:7 would reach 208 characters, above the limit of 200/);
+    assert.ok(write('impression', 'another person', { scope: 'person:qq:user:8' }));
     const chains = write('habit', 'Join a chain once'); const short = write('habit', 'Keep replies short'); const stickers = write('habit', 'One sticker ends it');
     // Revising one entry replaces that entry alone: the others keep their IDs, wording, and time.
     const before = store.development(['global']).filter(memory => memory.id !== chains.id);
@@ -121,6 +126,8 @@ test('a list kept as one entry is split once into its items, which rest on its e
     const prose = write('practice', '这个群说话很短，多半不带标点。\n有人讲翻车的事先接具体感受，不给建议，也不替人安排。', 'global', [other.id]);
     const mixed = write('habit', '对熟人：\n1. 被逗了回一句嘴硬就收，不解释也不追问为什么\n私聊时：\n2. 先接具体感受，再说自己的事情，不抢话', group);
     const brief = write('habit', '1. 早上只回一次早\n2. 揉一揉回一个就停', group, [other.id]);
+    const terse = write('practice', '1. 绷，是这里最常见的单字反应，谁都会用，不必解释它的意思\n2. 「笑死」连发会被当成模子，他们会换着词来', 'conversation:qq:900:group:200');
+    const person = store.writeMemory({ kind: 'impression', title: 'P7（昨晚修）', content: 'P7（昨晚修）：\n1. 群里的老朋友，爱拿我的长消息开玩笑，但从不过火\n2. 他说的“我老婆”指的是 P8，是个固定玩笑', importance: 7, scope: 'person:qq:user:7', sources: [seen.id] }, false);
     runtime.start(); await runtime.idle();
     // Items keep their wording, order, scope, importance, and time; the heading and the numbering go.
     const habits = store.development(['global']).filter(memory => memory.kind === 'habit');
@@ -130,9 +137,17 @@ test('a list kept as one entry is split once into its items, which rest on its e
     assert.equal(store.memory(list.id)?.active, false);
     assert.deepEqual(store.development([group]).filter(memory => memory.kind === 'practice').map(memory => memory.content), ['极短句不带句末标点，两到六个字就是一条完整的话', '单发问号是没看懂，连发是集体懵，不用解释']);
     assert.equal(store.memory(bullets.id)?.active, false);
+    // An opening too short to look an entry up by gives way to the start of the item.
+    assert.deepEqual(store.development(['conversation:qq:900:group:200']).map(memory => memory.title), ['绷，是这里最常见的单字反应，谁都会用，不必解释它的意思', '「笑死」连发会被当成模子，他们会换着词来']);
+    assert.equal(store.memory(terse.id)?.active, false);
     // What is not plainly one list, or is short enough already, stays as written.
     for (const kept of [prose, mixed, brief]) assert.equal(store.memory(kept.id)?.active, true);
-    assert.equal(store.logs(50).filter(log => log.kind === 'development_split').length, 2);
+    // What was known of a person as one list becomes entries about that person.
+    const known = store.development(['person:qq:user:7']);
+    assert.deepEqual(known.map(memory => [memory.kind, memory.title, memory.content, memory.importance]), [['impression', '群里的老朋友', '群里的老朋友，爱拿我的长消息开玩笑，但从不过火', 7], ['impression', '他说的“我老婆”指的是 P8', '他说的“我老婆”指的是 P8，是个固定玩笑', 7]]);
+    assert.deepEqual(known.map(memory => memory.subjects), [['qq:user:7'], ['qq:user:7']]);
+    assert.equal(store.memory(person.id)?.active, false);
+    assert.equal(store.logs(80).filter(log => log.kind === 'development_split').length, 4);
     assert.equal(store.logs(50).filter(log => log.kind === 'memory_written' && (log.data as { supersedes?: string }).supersedes === list.id).length, 3);
     // An item rests on others through the list, so it can be revised with new evidence alone, and its siblings stay.
     const revised = store.writeMemory({ kind: 'habit', title: '一句就够', content: '一句就够；同一件事可以分几口气发。', importance: 8, sources: [other.id], supersedes: habits[0]!.id }, false, { ...f.cfg.development });
@@ -145,7 +160,7 @@ test('a list kept as one entry is split once into its items, which rest on its e
     assert.equal(store.memory(corrected.id)?.active, true);
     // Forgetting the evidence takes the list and every entry that came of it (ADR-0003).
     const plan = store.forgetPlan(seen.id);
-    for (const gone of [list.id, bullets.id, habits[1]!.id, habits[2]!.id, revised.id, ...store.development([group]).filter(memory => memory.kind === 'practice').map(memory => memory.id)]) assert.ok(plan.includes(gone));
+    for (const gone of [list.id, bullets.id, person.id, ...known.map(memory => memory.id), habits[1]!.id, habits[2]!.id, revised.id, ...store.development([group]).filter(memory => memory.kind === 'practice').map(memory => memory.id)]) assert.ok(plan.includes(gone));
     assert.ok(!plan.includes(brief.id));
     store.forget(seen.id);
     assert.deepEqual(store.development(['global', group]).map(memory => memory.id).sort(), [corrected.id, brief.id].sort());
@@ -269,6 +284,52 @@ test('a conversation that reads a chat record to its end hears that new messages
     event(f.store, 'A new message', 100);
     await f.brain.run(f.store.claim(20)!);
     assert.equal(f.faux.state.callCount, 3);
+  } finally { f.store.close(); }
+});
+
+test('of what is known of a person the most important comes with a thought, and the rest is listed by title and read when asked for', async () => {
+  const f = fixture();
+  try {
+    f.store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+    f.cfg.development.personChars = 30;
+    const source = say(f.store, 7, 'source'); f.store.acknowledge(f.store.claim(5)!.batchId);
+    const know = (title: string, content: string, importance: number, supersedes?: string) => f.store.writeMemory({ kind: 'impression', title, content, importance, scope: 'person:qq:user:7', sources: [source.id], supersedes }, false, f.cfg.development);
+    const friend = know('Friend', 'A close friend who teases', 9);
+    const city = know('Where he lives', 'Lives in Chengdu', 5);
+    const joke = know('The wife joke', 'My wife means P8', 7);
+    const texts = (messages: Message[]) => JSON.stringify(messages.filter(message => message.role === 'toolResult').at(-1)?.content);
+    say(f.store, 7, 'Hello');
+    f.faux.setResponses([
+      context => {
+        const snapshot = updates(context.messages as Message[]).at(-1);
+        // The first always comes; the next by importance does not fit beside it, and neither does the last.
+        assert.deepEqual(snapshot.impressions.map((item: { id: string }) => item.id), [friend.id]);
+        assert.deepEqual(snapshot.impressionIndex, [{ id: city.id, scope: 'person:qq:user:7', title: 'Where he lives' }, { id: joke.id, scope: 'person:qq:user:7', title: 'The wife joke' }]);
+        return answer(call('recall', { id: joke.id }));
+      },
+      context => { assert.match(texts(context.messages as Message[]), /My wife means P8/); assert.doesNotMatch(texts(context.messages as Message[]), /Chengdu/); return answer(call('recall', { scope: 'person:qq:user:7' })); },
+      context => { assert.match(texts(context.messages as Message[]), /close friend.*Chengdu.*My wife means P8/); return answer(call('recall', {})); },
+      context => { assert.match(texts(context.messages as Message[]), /Give a query to search for, an id to read, or a scope to read/); return answer(call('recall', { id: 'm:none' })); },
+      context => { assert.match(texts(context.messages as Message[]), /does not exist or has been forgotten/); return answer('Read'); },
+    ]);
+    await f.brain.run(f.store.claim(20)!);
+    // Reading one by its ID or a person's entries together counts as recalling them deliberately.
+    assert.deepEqual([friend, city, joke].map(memory => f.store.recalls(memory.id)?.deliberate ?? 0), [1, 1, 2]);
+    // Given more importance, where he lives now comes whole. What the context already shows whole stays shown and takes no line in the index.
+    const moved = know('Where he lives', 'Moved to Beijing', 10, city.id);
+    say(f.store, 7, 'Again');
+    f.faux.setResponses([context => {
+      const delta = updates(context.messages as Message[]).at(-1);
+      assert.equal(delta.format, 'delta');
+      assert.deepEqual(delta.impressions, { upsert: [{ id: moved.id, scope: 'person:qq:user:7', title: 'Where he lives', content: 'Moved to Beijing', createdAt: new Date(moved.createdAt).toISOString() }], removedIds: [] });
+      assert.deepEqual(delta.impressionIndex, { upsert: [], removedIds: [city.id] });
+      return answer('Seen');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+    // Someone else speaking brings nothing of him.
+    say(f.store, 8, 'Hi');
+    f.faux.setResponses([context => { const snapshot = updates(context.messages as Message[]).at(-1); assert.deepEqual([snapshot.format, snapshot.impressions, snapshot.impressionIndex], ['snapshot', [], []]); return answer('Quiet'); }]);
+    f.brain.abort(); const fresh = f.restart(); await fresh.run(f.store.claim(20)!);
   } finally { f.store.close(); }
 });
 

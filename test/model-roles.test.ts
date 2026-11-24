@@ -115,7 +115,7 @@ test('primary, concurrent review, and compaction use independent keys, reasoning
     }]);
     const reviewing = f.review.review(f.observation()); await entered.promise;
     // A full snapshot previews each send, so leave room for those.
-    f.cfg.limits.contextTokens += 1500;
+    f.cfg.limits.contextTokens += 1600;
     f.scripts.main.setResponses(Array.from({ length: 8 }, () => longSend('Earlier fact.')));
     f.scripts.summary.setResponses(Array.from({ length: 8 }, () => answer('Keep the lunar topic, its original sources, and the unfinished commitment.')));
     for (let i = 0; i < 8; i++) { event(f.store, `Latest ${i}`); await f.main.run(f.store.claim(20)!); }

@@ -15,3 +15,5 @@ The lists it holds are instead split once, when the daemon starts, without rewor
 Every entry comes to runtime state with its own ID, scope, title, and time. By the program's estimate the four scopes together rose from 4,854 tokens to 8,398. Against that, a rewritten list was some 550 to 1,570 tokens brought to the working context again at every revision, and a revised entry is about a hundred. The instructions and the `remember` tool change, so a deploy starts a new working context.
 
 Whether reviews now revise fewer entries at a time is not yet known; the count of entries a review supersedes will show it. Entries with evidence of their own are also what a later review needs in order to check each one against what it rests on.
+
+Revision of 2026-11-25: what is known of a person is kept as entries too, and the one-time split takes impressions with it; see [ADR-0026](0026-keep-what-is-known-of-a-person-as-entries-and-list-the-rest-by-title.md). This replaces "An impression stays one entry per person under its own bound" above.

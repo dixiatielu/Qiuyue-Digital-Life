@@ -12,9 +12,9 @@ export function actionSummary(action: Action, previewLength = 2000) {
 export type RuntimeSnapshot = Record<string, unknown>;
 type Entry = { id: string };
 type ArrayUpdate = { upsert: Entry[]; removedIds: string[] };
-const collections = new Set(['recentEvents', 'recalled', 'actualActions', 'activeCommitmentsAndPlans', 'pursuits', 'myHabits', 'practices', 'impressions']);
+const collections = new Set(['recentEvents', 'recalled', 'actualActions', 'activeCommitmentsAndPlans', 'pursuits', 'myHabits', 'practices', 'impressions', 'impressionIndex']);
 /** Memories runtime_data has brought stay in the working context until compaction, so a delta removes one only when it no longer holds. */
-const lasting = ['recalled', 'myHabits', 'practices', 'impressions'];
+const lasting = ['recalled', 'myHabits', 'practices', 'impressions', 'impressionIndex'];
 /** Recent events come with the observations that bring them; only a snapshot, which stands in for compacted exchanges, lists them. */
 const snapshotOnly = new Set(['recentEvents']);
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -48,6 +48,9 @@ export function carry(current: RuntimeSnapshot, shown: RuntimeSnapshot, holding:
     const ids = new Set(before.map(item => item.id));
     view[key] = [...before.filter(item => held.has(item.id)), ...((current[key] ?? []) as Entry[]).filter(item => !ids.has(item.id))];
   }
+  // An entry the context already shows whole needs no line in the index of those listed by title.
+  const whole = new Set(((view.impressions ?? []) as Entry[]).map(item => item.id));
+  view.impressionIndex = ((view.impressionIndex ?? []) as Entry[]).filter(item => !whole.has(item.id));
   const actions = new Map(((shown.actualActions ?? []) as Entry[]).map(action => [action.id, action]));
   for (const action of (current.actualActions ?? []) as Entry[]) actions.set(action.id, action);
   view.actualActions = [...actions.values()];

@@ -154,9 +154,11 @@ export class SemanticRecall implements SemanticSource {
 /**
  * The memories a thought has in view. What is said calls memories to mind, not merely where it is said (ADR-0009); development
  * comes by scope, for the chats and people of the observations, and never by chance (ADR-0012). A review looks at the chats it
- * lists, so their groups and the people who spoke there count as present. A replay asks the same of a past moment.
+ * lists, so their groups and the people who spoke there count as present. Of what is kept about a person, the entries that
+ * matter most come whole, as far as development.personChars reaches, and the others are listed for the thought to read when
+ * it needs them (ADR-0026). A replay asks the same of a past moment.
  */
-export function memoriesInView(config: Config, store: Store, recall: Pick<SemanticRecall, 'recall'> | undefined, observations: EnvironmentEvent[]): { recalled: Recollection[]; development: Memory[] } {
+export function memoriesInView(config: Config, store: Store, recall: Pick<SemanticRecall, 'recall'> | undefined, observations: EnvironmentEvent[]): { recalled: Recollection[]; development: Memory[]; listed: Memory[] } {
   const recalled = recall?.recall(observations) ?? [];
   const chats = observations.filter(event => event.kind === 'memory_maintenance').flatMap(event => (event.payload.backlog ?? []) as { conversation: string; since: number }[]);
   const present = observations.filter(event => !ownEvent(event)).flatMap(event => event.source?.actor ? [event.source.actor] : []).reverse();
@@ -165,5 +167,17 @@ export function memoriesInView(config: Config, store: Store, recall: Pick<Semant
   const known = new Set(store.development(candidates.map(person => `person:${person}`)).map(memory => memory.scope));
   const people = candidates.filter(person => known.has(`person:${person}`)).slice(0, config.development.people);
   const conversations = [...new Set([...observations.flatMap(event => event.source?.conversation ? [event.source.conversation] : []), ...chats.map(chat => chat.conversation)])];
-  return { recalled, development: store.development(['global', ...conversations.map(chat => `conversation:${chat}`), ...people.map(person => `person:${person}`)]) };
+  const held = store.development(['global', ...conversations.map(chat => `conversation:${chat}`), ...people.map(person => `person:${person}`)]);
+  const whole = new Set<string>();
+  for (const person of people) {
+    let used = 0;
+    // By the importance she gave each, the newer first among equals; the first always comes, however long.
+    for (const entry of held.filter(memory => memory.scope === `person:${person}`).sort((a, b) => b.importance - a.importance || b.createdAt - a.createdAt)) {
+      const length = [...entry.content].length;
+      if (used && used + length > config.development.personChars) continue;
+      used += length; whole.add(entry.id);
+    }
+  }
+  const about = (memory: Memory) => memory.scope?.startsWith('person:') ?? false;
+  return { recalled, development: held.filter(memory => !about(memory) || whole.has(memory.id)), listed: held.filter(memory => about(memory) && !whole.has(memory.id)) };
 }

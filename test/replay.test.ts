@@ -12,7 +12,7 @@ import { SemanticRecall } from '../src/recall.js';
 const DAY = 86_400_000;
 test('a replay asks what was in view at a past moment, with the memories held then, and reads the database only', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-replay-')); const path = join(dir, 'life.sqlite');
-  const cfg = embeddingConfig(); cfg.embedding.limit = 1;
+  const cfg = embeddingConfig(); cfg.embedding.limit = 1; cfg.development.personChars = 8;
   const store = new Store(path); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
   const start = Date.now() - 10 * DAY;
   const said = (text: string, day: number, actorId = 7) => store.receive(qqEvent({ key: crypto.randomUUID(), kind: 'message', at: start + day * DAY, text, groupId: 100, actorId, payload: { message_type: 'group', sender: { user_id: actorId }, message: [{ type: 'text', data: { text } }] } }, store), true)!;
@@ -26,6 +26,7 @@ test('a replay asks what was in view at a past moment, with the memories held th
     const lunch = note(1, '午饭', '天气好，地铁请大家吃小笼包，说下次还请', ate.id);
     const weather = note(1, '下雨', '那天的天气很差，淋了雨', rain.id);
     const impression = remembered(1, { kind: 'impression', title: 'P7', content: '爱聊夜曲', importance: 5, scope: 'person:qq:user:7', sources: [sang.id] });
+    const lives = remembered(1, { kind: 'impression', title: '住处', content: '住在成都，离学校很近', importance: 3, scope: 'person:qq:user:7', sources: [sang.id] });
     const habit = remembered(1, { kind: 'habit', title: '少说', content: '一句就够', importance: 5, sources: [sang.id] });
     store.retireMemory(habit.id); store.db.prepare("UPDATE trace SET at=? WHERE kind='memory_retired'").run(start + 3 * DAY);
     const embedder = topics();
@@ -40,6 +41,8 @@ test('a replay asks what was in view at a past moment, with the memories held th
       { id: 'later-version', triggers: [askedLater.id], gold: [song.id] },
       // The impression of the speaker comes with the thought, whatever is said.
       { id: 'supplied', triggers: [quiet.id, asked.id], gold: [impression.id] },
+      // Less important than what comes whole about him, it comes as a title, one read away.
+      { id: 'listed', triggers: [quiet.id, asked.id], gold: [lives.id] },
       // Two memories are alike to what is said and one may come up; the other is still found by a search for its words.
       { id: 'findable', triggers: [stranger.id], gold: [lunch.id], query: '小笼包' },
       // Held, but nothing said calls it up and its words are not searched for.
@@ -55,9 +58,9 @@ test('a replay asks what was in view at a past moment, with the memories held th
     const calls = embedder.calls.length;
     const report = await replay(path, cfg, cachedEmbedder(embedder, join(dir, 'vectors.json')), cases);
     const result = Object.fromEntries(report.results.map(item => [item.id, item]));
-    assert.deepEqual(Object.fromEntries(report.results.map(item => [item.id, item.outcome])), { recalled: 'recalled', 'later-version': 'recalled', supplied: 'supplied', findable: 'findable', missed: 'missed', 'habit-held': 'supplied', 'habit-retired': 'unrecorded', unrecorded: 'unrecorded', 'not-yet': 'unrecorded' });
-    assert.deepEqual(report.outcomes, { supplied: 2, recalled: 2, findable: 1, missed: 1, unrecorded: 3 });
-    assert.deepEqual([report.cases, report.threshold, report.limit], [9, cfg.embedding.threshold, 1]);
+    assert.deepEqual(Object.fromEntries(report.results.map(item => [item.id, item.outcome])), { recalled: 'recalled', 'later-version': 'recalled', supplied: 'supplied', listed: 'listed', findable: 'findable', missed: 'missed', 'habit-held': 'supplied', 'habit-retired': 'unrecorded', unrecorded: 'unrecorded', 'not-yet': 'unrecorded' });
+    assert.deepEqual(report.outcomes, { supplied: 2, recalled: 2, listed: 1, findable: 1, missed: 1, unrecorded: 3 });
+    assert.deepEqual([report.cases, report.threshold, report.limit], [10, cfg.embedding.threshold, 1]);
     // What she did at the time is set beside what the replay finds, and the labeller's notes stay out of the report.
     assert.deepEqual(report.byDid, { used: { recalled: 1 }, missed: { missed: 1, unrecorded: 1 } });
     assert.doesNotMatch(JSON.stringify(report), /never saved/);

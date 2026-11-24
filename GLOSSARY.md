@@ -113,8 +113,8 @@ A way of behaving or expressing itself, including its own expression style, that
 _Avoid_: an edit to the operator's persona file, a rule another person imposed
 
 **Impression**:
-The digital life's current, revisable understanding of a specific person and its relationship with them; a kind of long-term understanding with traceable evidence.
-_Avoid_: a permanent label, an operator-facing user profile
+The digital life's current, revisable understanding of a specific person and its relationship with them; a kind of long-term understanding with traceable evidence. It is made of the separate things known about the person, each resting on its own evidence and revised alone.
+_Avoid_: a permanent label, an operator-facing user profile, one summary rewritten whole
 
 **Practice**:
 Know-how the digital life has formed about doing something in its environment, such as how the people in a group talk and act, using an interface, or following a group's norms. It is revised through use and fades when no longer observed.

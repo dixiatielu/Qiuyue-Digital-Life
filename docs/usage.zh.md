@@ -124,7 +124,7 @@ npm start -- replay data/eval/cases.json --config config.json
 
 样本文件是一个 JSON 数组，和私有数据放在一起。每个样本有 `id`；`triggers`，那次思考看到的事件 ID；`gold`，写下了这一刻所需内容的记忆 ID（任一版本均可）。当时没有任何记忆写下它时，`gold` 留空。`query` 是主动回忆时会用的查询，`did` 是秋月当时实际的表现（`used`、`missed`、`wrong`），`where` 和 `note` 供标注者自己使用。把一条记忆写进 `gold` 前先读它：引用了某条事件不等于写下了那里发生的事。
 
-每个样本的结果是 `supplied`（作为个人发展随思考提供）、`recalled`（自己想起）、`findable`（只有主动回忆能找到）、`missed`（持有但两者都够不着）或 `unrecorded`（没有记下）。报告只含 ID、计数、相似度和名次，不含记忆或消息的内容。
+每个样本的结果是 `supplied`（作为个人发展随思考提供）、`recalled`（自己想起）、`listed`（标题随思考列出，读一次即可）、`findable`（只有主动回忆能找到）、`missed`（持有但两者都够不着）或 `unrecorded`（没有记下）。报告只含 ID、计数、相似度和名次，不含记忆或消息的内容。
 
 ### 实时界面
 
