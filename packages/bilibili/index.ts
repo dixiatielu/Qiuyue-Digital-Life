@@ -201,7 +201,7 @@ export function setup(ctx: PluginContext) {
   registerOnlineReading(ctx, 'bili', reader, {
     browse: 'Find Bilibili videos by your own query, or omit query to browse popular videos. Popular is not a personalized feed.',
     read: 'Read a Bilibili BV/av ID, video URL or b23.tv link: description, one chunk of subtitles and a sample of comments. This does not play or listen to the video. Cover images can be inspected with view_event_image using the returned sourceId and cover URL.',
-    activity: 'Browse Bilibili for something that interests you, or continue something kept in bili_history; you may stop or keep it to yourself',
+    activity: 'Browse Bilibili for something that interests you, or continue something kept in bili_history; stop, keep it to yourself, or share a genuine find',
   });
 }
 

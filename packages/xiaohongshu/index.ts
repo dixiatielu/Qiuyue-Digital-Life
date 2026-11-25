@@ -124,7 +124,7 @@ export function setup(ctx: PluginContext) {
   registerOnlineReading(ctx, 'xhs', reader, {
     browse: 'Browse Xiaohongshu recommendations or search for a topic. This service returns one bounded batch; only page 1 is supported.',
     read: 'Read a discovered Xiaohongshu note ID or full URL: text, sampled comments and actual images together in one response. imageDelivery identifies attached, failed and omitted images; no extra viewing call is needed for attached images. Reading text is not watching a video.',
-    activity: 'Browse Xiaohongshu pictures and notes that interest you, or revisit something kept in xhs_history; you may stop or keep it to yourself',
+    activity: 'Browse Xiaohongshu pictures and notes that interest you, or revisit something kept in xhs_history; stop, keep it to yourself, or share a genuine find',
   });
 }
 
