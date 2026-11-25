@@ -203,6 +203,8 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
         call("qq_main__send_private_msg", { user_id: 7, message: [{ type: 'image', data: { file: avif } }] }),
         call("qq_main__send_private_forward_msg", { user_id: 7, messages: node('https://a1.qpic.cn/psc?/x!/c&t=5') as any }),
         call("qq_main__send_group_msg", { group_id: 100, message: [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }] }),
+        call("qq_main__add_custom_face", { file: avif }),
+        call("qq_main__send_qzone_msg", { content: avif, images: [avif, 'https://example.com/a.png?t=8'] }),
       ]),
       answer('Done'),
     ]);
@@ -210,7 +212,11 @@ test('Qzone images are sent as JPEG, and the action records the URL actually sen
     assert.deepEqual(f.sent[0]!.args.message, [{ type: 'image', data: { file: jpeg } }]);
     assert.deepEqual(f.sent[1]!.args.messages, node('https://a1.qpic.cn/psc?/x!/c'));
     assert.deepEqual(f.sent[2]!.args.message, [{ type: 'image', data: { file: 'https://example.com/a.png?t=8' } }]);
+    assert.deepEqual(f.sent[3]!.args, { file: jpeg });
+    assert.deepEqual(f.sent[4]!.args, { content: avif, images: [jpeg, 'https://example.com/a.png?t=8'] });
     assert.deepEqual(f.store.actions().find(action => action.kind === 'qq_main__send_private_msg')!.args, { user_id: 7, message: [{ type: 'image', data: { file: jpeg } }] });
+    assert.deepEqual(f.store.actions().find(action => action.kind === 'qq_main__add_custom_face')!.args, { file: jpeg });
+    assert.deepEqual(f.store.actions().find(action => action.kind === 'qq_main__send_qzone_msg')!.args, { content: avif, images: [jpeg, 'https://example.com/a.png?t=8'] });
   } finally { f.store.close(); }
 });
 

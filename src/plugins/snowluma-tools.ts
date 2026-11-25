@@ -43,9 +43,17 @@ function unchangedProfileAction(name: string, args: Record<string, unknown>, pre
   return false;
 }
 
-/** SnowLuma uploads an image segment's bytes as they come, and QQ rejects AVIF (highway error 921), so ask Qzone's CDN for JPEG. */
-function jpegImages(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(jpegImages);
+/** SnowLuma uploads an image's bytes as they come, and QQ rejects AVIF (highway error 921), so ask Qzone's CDN for JPEG. */
+function jpegImages(value: unknown, action?: SnowLumaActionDefinition): unknown {
+  if (action && value && typeof value === 'object' && !Array.isArray(value)) {
+    const props = (action.inputSchema as { properties?: Record<string, { 'x-role'?: unknown }> }).properties ?? {};
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+      if (props[key]?.['x-role'] === 'image' && typeof item === 'string') return [key, preferJpeg(item)];
+      if (key === 'images' && Array.isArray(item)) return [key, item.map(entry => typeof entry === 'string' ? preferJpeg(entry) : jpegImages(entry))];
+      return [key, jpegImages(item)];
+    }));
+  }
+  if (Array.isArray(value)) return value.map(item => jpegImages(item));
   if (!value || typeof value !== 'object') return value;
   const segment = value as { type?: unknown; data?: Record<string, unknown> };
   if (segment.type === 'image' && segment.data && typeof segment.data === 'object') {
@@ -124,7 +132,7 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
           replay: 'never', executionMode: 'sequential',
           execute: async (_callId, parameters, signal) => {
             // Normalized before the action is recorded, so its record shows what was sent.
-            const args = jpegImages(parameters) as Record<string, unknown>;
+            const args = jpegImages(parameters, action) as Record<string, unknown>;
             runtime.check(signal);
             if (!allowed(action)) throw new Error('The operator has not enabled this SnowLuma interface.');
             if (unchangedProfileAction(action.name, args, runtime.store.lastSuccessfulAction(nativeToolName(account.id, action.name))?.args)) {
