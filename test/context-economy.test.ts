@@ -276,3 +276,74 @@ test('a delta repeats neither a memory already shown nor an action result alread
     await f.brain.run(f.store.claim(20)!);
   } finally { f.store.close(); }
 });
+
+test('unchanged set_activity and update_pursuit end the thought and fold out of working context so they cannot snowball', async () => {
+  const f = fixture();
+  try {
+    f.cfg.life.enabled = true;
+    f.cfg.life.allowFiction = true;
+    f.store.setSetting('lifeEnabled', true);
+    f.store.setActivity('散步消食中', []);
+    const pursuit = f.store.updatePursuit({ title: '学一首新歌', progress: '练到副歌', fictional: true }, [], true);
+    event(f.store, 'Unrelated chatter');
+    f.faux.setResponses([
+      answer(call('set_activity', { activity: '散步消食中' })),
+      answer('Must not be called after unchanged set_activity'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 1);
+    assert.equal(f.brain.agent.state.messages.some(message => message.role === 'assistant' || message.role === 'toolResult'), false);
+    assert.equal((f.store.logs(10).find(log => log.kind === 'context_folded')?.data as any)?.noops, 2);
+
+    // A genuine change stays in context and lets the thought continue.
+    event(f.store, 'Time to draw');
+    f.faux.setResponses([
+      answer(call('set_activity', { activity: '画画中' })),
+      answer('Done'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 3);
+    assert.equal(f.store.settings().activity, '画画中');
+    assert.equal(f.brain.agent.state.messages.filter(message => message.role === 'toolResult' && message.toolName === 'set_activity').length, 1);
+
+    // Unchanged update_pursuit behaves the same way.
+    event(f.store, 'More chatter');
+    f.faux.setResponses([
+      answer(call('update_pursuit', { id: pursuit.id, title: '学一首新歌', progress: '练到副歌', fictional: true })),
+      answer('Must not be called'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 4);
+    assert.equal(f.brain.agent.state.messages.some(message => message.role === 'toolResult' && message.toolName === 'update_pursuit'), false);
+  } finally { f.store.close(); }
+});
+
+test('identical repeated calls within one thought are blocked, end the thought, fold out, and remain allowed after a new observation', async () => {
+  const f = fixture();
+  try {
+    event(f.store, 'Check recent actions');
+    f.faux.setResponses([
+      answer(call('inspect_actions', { offset: 0 })),
+      answer(call('inspect_actions', { offset: 0 })),
+      answer('Must not be called after blocked repeat'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 2);
+    // The first inspect_actions stays; the blocked repeat and its error result are folded out.
+    const results = f.brain.agent.state.messages.filter(message => message.role === 'toolResult' && message.toolName === 'inspect_actions');
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.isError, false);
+
+    // Mixed batch: only the no-op call is dropped, leaving the real call and its result paired.
+    event(f.store, 'Another line');
+    f.store.setActivity('听歌中', []);
+    f.faux.setResponses([
+      answer([call('inspect_actions', { offset: 0 }), call('set_activity', { activity: '听歌中' })]),
+      answer('Done'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.faux.state.callCount, 4);
+    assert.equal(f.brain.agent.state.messages.filter(message => message.role === 'toolResult' && message.toolName === 'inspect_actions').length, 2);
+    assert.equal(f.brain.agent.state.messages.some(message => message.role === 'toolResult' && message.toolName === 'set_activity'), false);
+  } finally { f.store.close(); }
+});

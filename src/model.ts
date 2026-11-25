@@ -73,9 +73,17 @@ export function addsToolsInPlace(model: Model<Api>): boolean {
     : model.api === 'openai-responses' ? compat.supportsAdditionalTools === true
     : model.api === 'openai-completions' && compat.supportsMidConvoToolAdditions === true;
 }
-/** False for a configuration whose model cannot be resolved; starting with it fails elsewhere, with the reason. */
+/**
+ * False for a configuration whose model cannot be resolved; starting with it fails elsewhere, with the reason.
+ * Gemini's `generateContent` also loads seldom-used tools on demand: models such as gemini-4-hydrogen cap total
+ * declared tools (128), while deferred tools are loaded rarely enough that replacing the top-level tool list when one
+ * is asked for is far cheaper than hitting the cap or using Interactions API (ADR-0023).
+ */
 export function loadsToolsOnDemand(config: Config, owner: ModelOwner): boolean {
-  try { return addsToolsInPlace(resolveModel(modelUse(config, owner).thinking)); } catch { return false; }
+  try {
+    const model = resolveModel(modelUse(config, owner).thinking);
+    return addsToolsInPlace(model) || model.api === 'google-generative-ai';
+  } catch { return false; }
 }
 
 export function modelRoute(model: Model<Api>) { return JSON.stringify([model.provider, model.id, model.api, model.baseUrl]); }

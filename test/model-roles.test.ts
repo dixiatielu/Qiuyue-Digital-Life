@@ -152,7 +152,7 @@ test('review compaction inherits the review backend with no explicit reasoning, 
       const fixed = textTokens(f.review.agent.state.systemPrompt) + estimateTokens(f.reviewTools.current().map(toToolDeclaration));
       f.cfg.review!.limits!.contextTokens = 2048 + f.cfg.limits.contextSafetyTokens + Math.ceil((fixed + 700) / 0.7);
       let turns = 0;
-      const respond = (context: any) => summaryRequest(context.messages) ? answer('Review summary with sources and unsettled matters.') : ++turns < 6 ? answer([{ type: 'text', text: 'review evidence '.repeat(250) }, call('inspect_actions', {})]) : answer('Done');
+      const respond = (context: any) => summaryRequest(context.messages) ? answer('Review summary with sources and unsettled matters.') : ++turns < 6 ? answer([{ type: 'text', text: 'review evidence '.repeat(250) }, call('inspect_actions', { offset: turns })]) : answer('Done');
       f.scripts.review.setResponses(Array.from({ length: 15 }, () => respond));
       f.scripts.summary.setResponses(Array.from({ length: 10 }, () => answer('Review summary with sources and unsettled matters.')));
       await f.review.review(f.observation());

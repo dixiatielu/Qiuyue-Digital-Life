@@ -312,7 +312,18 @@ test('Pi\'s transports declare a loaded tool in place for Anthropic and OpenAI R
   const gpt = await payload({ ...base, id: 'gpt', api: 'openai-responses', compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true } });
   assert.equal(addsToolsInPlace(gpt.resolved), true);
   assert.deepEqual(gpt.body.input.filter((item: any) => item.type === 'additional_tools').map((item: any) => item.tools.map((added: any) => added.name)), [['find_tools'], ['rare']]);
-  // Without the flags a new tool replaces the request's list, so such a model has every tool declared from the start.
+  // Without the flags a new tool replaces the request's list, so addsToolsInPlace stays false; google-generative-ai still loads seldom-used tools on demand to stay within Gemini's tool cap (ADR-0023).
   for (const cfg of [{ ...base, id: 'claude', api: 'anthropic-messages' as const }, { ...base, id: 'gpt', api: 'openai-responses' as const }, { ...base, id: 'gemini', api: 'google-generative-ai' as const }]) assert.equal(addsToolsInPlace(resolveModel(cfg)), false, cfg.api);
   assert.equal(addsToolsInPlace(model), true);
+
+  const geminiCfg = config();
+  geminiCfg.model = { ...base, id: 'gemini-4-hydrogen', api: 'google-generative-ai' };
+  const store = new Store(':memory:');
+  try {
+    const tools = createTools(geminiCfg, store, { execute: async () => ({}) }, () => ({ generation: 0, sources: new Set<string>(), triggers: new Set<string>(), lifeOnly: false }));
+    assert.equal(tools.loading.enabled, true);
+    assert.ok(tools.declared().length < 128 && tools.deferred().length > 150);
+    assert.equal(tools.loading.add('qq_main__get_group_info'), true);
+    assert.ok(tools.declared().some(item => item.name === 'qq_main__get_group_info'));
+  } finally { store.close(); }
 });

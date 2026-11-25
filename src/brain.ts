@@ -1,6 +1,7 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend, modelBudget, modelRoute, modelUse, type ModelOwner } from './model.js';
+import { GEMINI_INTERACTIONS } from './gemini-interactions.js';
 import { createInitialSystemMessage, getCurrentTools, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
@@ -10,7 +11,7 @@ import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
 import { ensureCurrent, FIND_TOOLS, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldReplies, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
+import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldNoopCalls, foldReplies, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { waitFor } from './async.js';
@@ -36,6 +37,14 @@ function localTime(at: number) {
   const parts = localParts(at);
   return `${parts.year}-${parts.month}-${parts.day} ${parts.weekday} ${parts.hour}:${parts.minute}`;
 }
+/** Canonical JSON for matching repeated tool calls regardless of key order. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value as Record<string, unknown>).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  return JSON.stringify(value) ?? 'undefined';
+}
+/** Tools whose own execution checks live state for no-op updates (so A -> B -> A remains allowed in one thought). */
+const stateCheckedTools = new Set(['set_activity', 'update_pursuit']);
 /** A day of life runs from 05:00 local time, so staying up past midnight does not start the next one. */
 const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
 interface ObservationMessage { role: 'observation'; batchId: string; content: (TextContent | ImageContent)[]; eventIds: string[]; lifeOnly: boolean; timestamp: number }
@@ -78,6 +87,10 @@ export class PiBrain implements Brain {
   private seen = new Set<string>();
   /** The tools the reply being carried out calls. */
   private batch: string[] = [];
+  /** Tool calls already completed since the latest observation in this thought, to stop in-thought repeat loops. */
+  private repeatedCalls = new Set<string>();
+  /** Tool call IDs in this thought that were no-ops or blocked repeats, folded out when the thought ends (ADR-0024). */
+  private noopCalls = new Set<string>();
   /** Memories this thought has already been counted as calling to mind. */
   private broughtToMind = new Set<string>();
   private turns = 0;
@@ -112,7 +125,7 @@ export class PiBrain implements Brain {
     const use = modelUse(config, owner);
     const { model, stream: transport } = backend ?? createModelBackend(use.thinking, credential);
     // A transport of our own must be told which tool loads the others; Pi's render a transcript's tool additions themselves (ADR-0023).
-    const loading = (send: StreamFn): StreamFn => !tools.loading.enabled ? send : (target, context, options) => send(target, context, { ...options, toolLoader: FIND_TOOLS } as typeof options);
+    const loading = (send: StreamFn): StreamFn => !tools.loading.enabled ? send : (target, context, options) => target.api === GEMINI_INTERACTIONS ? send(target, context, { ...options, toolLoader: FIND_TOOLS } as typeof options) : send(target, context, options);
     const stream = loading(transport);
     this.stream = stream;
     const summary = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential) : undefined);
@@ -126,9 +139,21 @@ export class PiBrain implements Brain {
       convertToLlm: toModelMessages,
       // What a thought has loaded is declared from its next turn on; Pi writes the change into the transcript.
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.declared() } }),
-      beforeToolCall: async ({ toolCall, args }) => this.skipStale(toolCall.name, args),
+      beforeToolCall: async ({ toolCall, args }) => (await this.skipStale(toolCall.name, args)) ?? this.skipRepeated(toolCall.id, toolCall.name, args),
       // A batch ends the thought when every call in it does. Something remembered beside a message sent is part of that reply, not a reason to decide again (ADR-0028).
-      afterToolCall: async ({ toolCall, isError, result }) => !isError && (this.tools.plugins.endsThought(toolCall.name, result.details) || (toolCall.name === 'remember' && this.batch.some(name => this.tools.plugins.endsThought(name, undefined)))) ? { terminate: true } : undefined,
+      afterToolCall: async ({ toolCall, args, isError, result }) => {
+        if (isError) return;
+        if ((result.details as { noop?: unknown } | undefined)?.noop === true) {
+          this.noopCalls.add(toolCall.id);
+          return { terminate: true };
+        }
+        if (!stateCheckedTools.has(toolCall.name) && !this.tools.plugins.endsThought(toolCall.name, result.details) && !(toolCall.name === 'read_chat_record' && this.thought.reviewing && !(args as { from?: unknown } | undefined)?.from)) {
+          this.repeatedCalls.add(`${toolCall.name}:${stableJson(args)}`);
+        }
+        if (this.tools.plugins.endsThought(toolCall.name, result.details) || (toolCall.name === 'remember' && this.batch.some(name => this.tools.plugins.endsThought(name, undefined)))) {
+          return { terminate: true };
+        }
+      },
       prepareRequest: async ({ context, model: currentModel }, signal) => {
         const first = this.turns === 0;
         // Observations steered in for stale chats have entered by now.
@@ -140,10 +165,15 @@ export class PiBrain implements Brain {
         // Replies before the newest observation belong to turns already answered; only their actions stay (ADR-0024).
         // A reply that took no action ended its request, so it was never the input to one and leaving it out costs no cache.
         const latest = messages.findLastIndex(message => message.role === 'observation');
-        const earlier = foldReplies(messages.slice(0, Math.max(latest, 0)));
+        const foldEarlier = (list: AgentMessage[]) => {
+          const dropped = foldNoopCalls(list, this.noopCalls);
+          const folded = foldReplies(dropped.messages);
+          return { messages: folded.messages, changed: dropped.changed + folded.changed };
+        };
+        const earlier = foldEarlier(messages.slice(0, Math.max(latest, 0)));
         if (earlier.changed) {
           // The meter's list leaves out system messages, so find the newest observation by itself rather than by index.
-          this.meter.rebase(messages, before => { const at = before.indexOf(messages[latest]!); const cut = at < 0 ? before.length : at; return [...foldReplies(before.slice(0, cut)).messages, ...before.slice(cut)]; }, this.route(currentModel));
+          this.meter.rebase(messages, before => { const at = before.indexOf(messages[latest]!); const cut = at < 0 ? before.length : at; return [...foldEarlier(before.slice(0, cut)).messages, ...before.slice(cut)]; }, this.route(currentModel));
           messages = [...earlier.messages, ...messages.slice(latest)];
         }
         const shown = this.shown(messages, runtime);
@@ -175,6 +205,7 @@ export class PiBrain implements Brain {
     this.agent.subscribe(event => {
       this.display(monitor => monitor.agentEvent(event));
       if (event.type === 'message_start' && event.message.role === 'observation') {
+        this.repeatedCalls.clear();
         this.seen.add(event.message.batchId);
         for (const source of event.message.eventIds) this.thought.sources.add(source);
         this.thought.triggers = new Set(event.message.eventIds);
@@ -543,7 +574,7 @@ export class PiBrain implements Brain {
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = []; this.completed = undefined;
-    this.seen.clear(); this.broughtToMind.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(observation.events.filter(event => !ownEvent(event) && !ambientEvent(event)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
@@ -578,7 +609,7 @@ export class PiBrain implements Brain {
   async review(observation: Observation) {
     const generation = this.store.settings().generation;
     this.resetContext(); this.compactions = [];
-    this.seen.clear(); this.broughtToMind.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(); this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: false, reviewing: true, ...(observation.events.some(event => Array.isArray(event.payload.revisit)) ? { revisiting: true } : {}) };
@@ -625,13 +656,23 @@ export class PiBrain implements Brain {
     }
     return { block: true, reason: `Not sent: a new message arrived in ${chat} after you decided this. It follows as a new observation; decide again with it in view.` };
   }
+  /** Block an identical repeated call within the same thought and observation window so no tool can loop or snowball (ADR-0024). */
+  private skipRepeated(callId: string, tool: string, args: unknown): BeforeToolCallResult | undefined {
+    if (stateCheckedTools.has(tool) || this.tools.plugins.endsThought(tool, undefined)) return;
+    if (tool === 'read_chat_record' && this.thought.reviewing && !(args as { from?: unknown } | undefined)?.from) return;
+    const key = `${tool}:${stableJson(args)}`;
+    if (!this.repeatedCalls.has(key)) return;
+    this.noopCalls.add(callId);
+    return { block: true, reason: 'Already called with the same arguments in this thought; end your thought without a tool call if nothing else to do.', terminate: true };
+  }
   /**
-   * What a thought read and said leaves working context when it ends: chat records it read, images it saw, and the text and
-   * thoughts of its replies (ADR-0024). All sit within this thought, so the cached prefix before it stays valid. A preempted
-   * thought leaves its records and images for the next thought, which decides again with them in view.
+   * What a thought read and said leaves working context when it ends: chat records it read, images it saw, no-op or
+   * repeated calls, and the text and thoughts of its replies (ADR-0024). All sit within this thought, so the cached
+   * prefix before it stays valid. A preempted thought leaves its records and images for the next thought, which
+   * decides again with them in view.
    */
   private fold(everything = true) {
-    let results = 0; let images = 0; let replies = 0;
+    let results = 0; let images = 0; let replies = 0; let noops = 0;
     // Message by message, so the token meter can apply it to the prefix it measured.
     const fold = (messages: AgentMessage[]) => {
       let folded = messages;
@@ -639,12 +680,13 @@ export class PiBrain implements Brain {
         const records = foldToolResults(folded, 'read_chat_record'); folded = records.messages; results += records.changed;
         const seen = foldImages(folded, label => this.tools.plugins.imageViewer(label)); folded = seen.messages; images += seen.changed;
       }
+      const dropped = foldNoopCalls(folded, this.noopCalls); folded = dropped.messages; noops += dropped.changed;
       const said = foldReplies(folded); replies += said.changed;
       return said.messages;
     };
     const folded = fold(this.agent.state.messages);
-    const counts = { results, images, replies };
-    if (!results && !images && !replies) return;
+    const counts = { results, images, replies, ...(noops ? { noops } : {}) };
+    if (!results && !images && !replies && !noops) return;
     this.store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
     this.meter.rebase(this.agent.state.messages, fold, this.route(this.agent.state.model));
     this.agent.state.messages = folded;

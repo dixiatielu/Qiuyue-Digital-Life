@@ -1,8 +1,47 @@
 import type { AdapterConfig, Config } from '../config.js';
 import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
+import { nativeToolName } from '../platform.js';
 import { errorResult } from '../tool-runtime.js';
 import { preferJpeg } from '../web.js';
 import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
+
+const oneBotSegment = {
+  type: 'object',
+  properties: {
+    type: { type: 'string' },
+    data: { type: 'object', additionalProperties: true },
+  },
+  required: ['type', 'data'],
+};
+/** Gemini's VALIDATED tool-calling mode flattens nested objects inside untyped fields; type OneBot `message` explicitly (ADR-0023). */
+function normalizeParameters(action: SnowLumaActionDefinition) {
+  const schema = action.inputSchema as Record<string, any>;
+  const props = schema?.properties;
+  if (!props || typeof props !== 'object') return action.inputSchema;
+  let changed = false;
+  const nextProps: Record<string, unknown> = { ...props };
+  for (const [key, value] of Object.entries(props)) {
+    if (key === 'message' && value && typeof value === 'object' && !('type' in value) && !('anyOf' in value) && !('oneOf' in value) && typeof (value as { description?: unknown }).description === 'string' && (value as { description: string }).description.includes('OneBot message')) {
+      nextProps[key] = { ...value, anyOf: [{ type: 'string' }, { type: 'array', items: oneBotSegment }, oneBotSegment] };
+      changed = true;
+    }
+  }
+  return changed ? ({ ...schema, properties: nextProps } as typeof action.inputSchema) : action.inputSchema;
+}
+function unchangedProfileAction(name: string, args: Record<string, unknown>, previous: Record<string, unknown> | undefined): boolean {
+  if (!previous) return false;
+  if (name === 'set_self_longnick') {
+    const next = String(args.longNick ?? args.long_nick ?? '').trim();
+    const prev = String(previous.longNick ?? previous.long_nick ?? '').trim();
+    return next === prev;
+  }
+  if (name === 'set_diy_online_status') {
+    return String(args.wording ?? '').trim() === String(previous.wording ?? '').trim()
+      && String(args.face_id ?? '') === String(previous.face_id ?? '')
+      && String(args.face_type ?? '') === String(previous.face_type ?? '');
+  }
+  return false;
+}
 
 /** SnowLuma uploads an image segment's bytes as they come, and QQ rejects AVIF (highway error 921), so ask Qzone's CDN for JPEG. */
 function jpegImages(value: unknown): unknown {
@@ -81,13 +120,19 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
           description: common.has(action.name)
             ? nativeToolDescription(action, usage[action.name])
             : action.summary ?? action.name,
-          parameters: action.inputSchema,
+          parameters: normalizeParameters(action),
           replay: 'never', executionMode: 'sequential',
           execute: async (_callId, parameters, signal) => {
             // Normalized before the action is recorded, so its record shows what was sent.
             const args = jpegImages(parameters) as Record<string, unknown>;
             runtime.check(signal);
             if (!allowed(action)) throw new Error('The operator has not enabled this SnowLuma interface.');
+            if (unchangedProfileAction(action.name, args, runtime.store.lastSuccessfulAction(nativeToolName(account.id, action.name))?.args)) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ unchanged: true, note: 'Already set to this value; no change needed.' }) }],
+                details: { noop: true },
+              };
+            }
             let actionId: string | undefined; let reused = false; let value: unknown;
             if (action.readOnly) {
               try { value = await runtime.query(action.name, args, signal); }

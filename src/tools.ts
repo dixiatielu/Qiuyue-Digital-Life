@@ -9,7 +9,7 @@ import { ChatRecord } from './record.js';
 import type { SemanticRecall } from './recall.js';
 import { PluginHost, type PluginTool } from './plugins.js';
 import { createPlugins } from './plugins/index.js';
-import { ensureCurrent, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
+import { ensureCurrent, jsonResult, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
 import { validatedMemoryTool } from './memory-tool.js';
 import { loadsToolsOnDemand, type ModelOwner } from './model.js';
 export { ensureCurrent, type ThoughtContext } from './tool-runtime.js';
@@ -166,7 +166,17 @@ export function createTools(config: Config, store: Store, context: () => Thought
         return { content: [{ type: 'text', text: caughtUp ? `${page.text}\nNewer messages come to you by themselves; you need not read again to wait for them. If you just want to read along, as people lurk (潜水) in a group, end your thought without a tool call.` : page.text }], details: {} };
       },
     },
-    tool('set_activity', 'Record or clear the current activity.', Type.Object({ activity: Type.String({ maxLength: 2000 }) }), args => { store.setActivity(args.activity, [...context().sources]); return store.settings(); }),
+    runtime.tool('set_activity', 'Change or clear the current activity when it actually changes. Do not call it to confirm an unchanged activity or to end a silent thought.', Type.Object({ activity: Type.String({ maxLength: 2000 }) }), args => {
+      const current = store.settings();
+      if (args.activity.trim() === current.activity.trim()) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ ...current, unchanged: true, note: 'Current activity is already set to this; end your thought without a tool call if nothing else to do.' }) }],
+          details: { noop: true },
+        };
+      }
+      store.setActivity(args.activity, [...context().sources]);
+      return jsonResult(store.settings());
+    }),
     tool('schedule_activity', 'Schedule a life activity or an accepted social commitment.', Type.Object({ title: string('Activity and associated people or groups', 1000), kind: Type.Union([Type.Literal('life'), Type.Literal('commitment')]), at: string('ISO time with timezone, for example 2026-10-28T09:00:00+08:00', 100), rest: Type.Optional(Type.Boolean({ description: 'You rest until this activity, as when going to sleep or taking a nap: no free-time wake comes before it, and group chat reaches you only where someone mentions, replies to, or pokes you' })) }), args => {
       const dueAt = Date.parse(args.at);
       if (!/(Z|[+-]\d{2}:\d{2})$/.test(args.at)) throw new Error('The time must include a timezone.');
@@ -176,9 +186,18 @@ export function createTools(config: Config, store: Store, context: () => Thought
       return store.schedule(args.title, args.kind, dueAt, [...context().sources], args.rest);
     }),
     tool('finish_activity', 'End a commitment or life plan: use status="done" when finished or "cancelled" when cancelled. "completed" is accepted as an alias of "done".', Type.Object({ id: string('Activity ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('cancelled'), Type.Literal('completed')]) }), args => { store.finishWake(args.id, args.status === 'completed' ? 'done' : args.status); return store.wakes(); }),
-    tool('update_pursuit', "Start something you pursue over days, such as a song you are learning, a series you follow, or a hobby project, or record where one stands now. Without id it starts a pursuit; with id it replaces that pursuit's progress. Setbacks and stalls are progress too.", Type.Object({ id: Type.Optional(string('ID of the pursuit to update', 100)), title: string('What you are pursuing', 200), progress: string('Where it stands now', 1000), fictional: Type.Boolean({ description: 'It belongs to fictional daily life' }) }), args => {
+    runtime.tool('update_pursuit', "Start something you pursue over days, such as a song you are learning, a series you follow, or a hobby project, or record where one stands now. Without id it starts a pursuit; with id it replaces that pursuit's progress. Setbacks and stalls are progress too. Only call it when starting a pursuit or when its progress actually changes.", Type.Object({ id: Type.Optional(string('ID of the pursuit to update', 100)), title: string('What you are pursuing', 200), progress: string('Where it stands now', 1000), fictional: Type.Boolean({ description: 'It belongs to fictional daily life' }) }), args => {
       if (!store.settings().lifeEnabled) throw new Error('Life mode is disabled; pursuits cannot be started or advanced.');
-      return store.updatePursuit(args, [...context().sources], config.life.allowFiction);
+      if (args.id) {
+        const existing = store.pursuits().find(item => item.id === args.id);
+        if (existing && existing.title.trim() === args.title.trim() && existing.progress.trim() === args.progress.trim() && (existing.fictional || !args.fictional)) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ ...existing, unchanged: true, note: 'This pursuit already has the same title and progress; no update needed.' }) }],
+            details: { noop: true },
+          };
+        }
+      }
+      return jsonResult(store.updatePursuit(args, [...context().sources], config.life.allowFiction));
     }),
     tool('finish_pursuit', 'End a pursuit: done when it is finished, dropped when you have given it up.', Type.Object({ id: string('Pursuit ID', 100), status: Type.Union([Type.Literal('done'), Type.Literal('dropped')]) }), args => { store.finishPursuit(args.id, args.status); return store.pursuits(); }),
   ];

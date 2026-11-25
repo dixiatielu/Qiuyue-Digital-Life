@@ -32,7 +32,7 @@ function smallWindow(f: ReturnType<typeof fixture>) {
  * previews, so a snapshot never shows it; a counter keeps each send its own.
  */
 let sends = 0;
-const longSend = (label: string, repeat = 1000) => answer(call('qq_main__send_group_msg', { group_id: 100, message: `${++sends} ${'old working fact '.repeat(repeat)}${label}` }));
+const longSend = (label: string, repeat = 1100) => answer(call('qq_main__send_group_msg', { group_id: 100, message: `${++sends} ${'old working fact '.repeat(repeat)}${label}` }));
 
 
 test('new runs preserve the exact preceding request prefix and what earlier replies did, not what they said', async () => {
@@ -431,7 +431,7 @@ test('history too large for one summary request is set aside without a summary c
     f.faux.setResponses(Array.from({ length: 4 }, () => longSend('Judgment from a roomy window.')));
     for (let index = 0; index < 4; index++) { event(f.store, `Observation ${index}`); await f.brain.run(f.store.claim(20)!); }
     // Still too small for the history in one summary request, with room for the previews of its four sends.
-    f.cfg.limits.contextTokens = 17900;
+    f.cfg.limits.contextTokens = 18500;
     const source = event(f.store, 'Observation after the window shrank');
     f.faux.setResponses([context => { assert.ok(!isSummary(context.messages)); return answer('Continue'); }]);
     await f.brain.run(f.store.claim(20)!);

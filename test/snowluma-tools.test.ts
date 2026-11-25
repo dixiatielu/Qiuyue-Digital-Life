@@ -23,9 +23,14 @@ test('generated native tools expose canonical native names and schemas directly'
       assert.match(action.name, /^[a-zA-Z0-9_-]{1,64}$/);
       const tool = f.tools.current().find(tool => tool.name === `qq_main__${action.name}`)!;
       assert.ok(tool, action.name);
-      // add_custom_face also takes the description it is saved with.
+      // add_custom_face also takes the description it is saved with; OneBot message fields gain explicit anyOf typing for constrained tool calling.
       if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, desc: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, desc: undefined } });
-      else assert.deepEqual(tool.parameters, action.inputSchema);
+      else if (['send_group_msg', 'send_private_msg', 'send_msg'].includes(action.name)) {
+        const msg = (tool.parameters as any).properties.message;
+        assert.ok(Array.isArray(msg.anyOf) && msg.anyOf.length === 3, action.name);
+        assert.equal(msg.description, (action.inputSchema as any).properties.message.description);
+        assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, message: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, message: undefined } });
+      } else assert.deepEqual(tool.parameters, action.inputSchema);
       const common = ['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name);
       // A seldom-used interface says what it is and no more, and is loaded on demand where the model's API can do that (ADR-0023).
       if (!common) assert.equal(tool.description.replaceAll('qq_main__', ''), action.summary ?? action.name);
@@ -357,6 +362,32 @@ test('usage budgets default to unlimited, support explicit caps, and reject inva
     }
     raw.limits.outputReserveTokens = null; assert.throws(load, /outputReserveTokens/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('set_diy_online_status and set_self_longnick return unchanged noop without dispatching when value matches last successful action', async () => {
+  const calls: { action: string; params: Record<string, unknown> }[] = [];
+  const f = fixture({ execute: async (action, params) => { calls.push({ action, params }); return { ok: true }; } });
+  f.brain.thought.lifeOnly = false;
+  try {
+    const statusTool = f.tools.current().find(tool => tool.name === 'qq_main__set_diy_online_status')!;
+    const nickTool = f.tools.current().find(tool => tool.name === 'qq_main__set_self_longnick')!;
+    const first = await statusTool.execute('c1', { face_id: 21, wording: '听歌中' });
+    assert.equal((first.details as any).noop, undefined);
+    assert.equal(calls.length, 1);
+    const repeat = await statusTool.execute('c2', { face_id: 21, wording: ' 听歌中 ' });
+    assert.equal((repeat.details as any).noop, true);
+    assert.match((repeat.content[0] as { text: string }).text, /"unchanged":true/);
+    assert.equal(calls.length, 1);
+    const changed = await statusTool.execute('c3', { face_id: 21, wording: '画画中' });
+    assert.equal((changed.details as any).noop, undefined);
+    assert.equal(calls.length, 2);
+
+    await nickTool.execute('n1', { longNick: '今天晴天' });
+    assert.equal(calls.length, 3);
+    const repeatNick = await nickTool.execute('n2', { long_nick: '今天晴天' });
+    assert.equal((repeatNick.details as any).noop, true);
+    assert.equal(calls.length, 3);
+  } finally { f.store.close(); }
 });
 
 const snowlumaCatalog = getSnowLumaCatalog().actions;

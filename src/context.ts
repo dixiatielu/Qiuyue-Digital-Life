@@ -143,6 +143,29 @@ export function foldReplies(messages: AgentMessage[]): { messages: AgentMessage[
   });
   return { messages: folded, changed };
 }
+/**
+ * Drop no-op or repeated calls from a finished thought before they can teach the model to repeat them (ADR-0024).
+ * Removes both each flagged tool call and its paired tool result so assistant/toolResult pairing stays intact.
+ */
+export function foldNoopCalls(messages: AgentMessage[], noopCallIds: ReadonlySet<string>): { messages: AgentMessage[]; changed: number } {
+  if (!noopCallIds.size) return { messages, changed: 0 };
+  let changed = 0;
+  const folded = messages.flatMap((message): AgentMessage[] => {
+    if (message.role === 'toolResult') {
+      if (!noopCallIds.has(message.toolCallId)) return [message];
+      changed++;
+      return [];
+    }
+    if (message.role === 'assistant') {
+      const kept = message.content.filter(block => block.type !== 'toolCall' || !noopCallIds.has(block.id));
+      if (kept.length === message.content.length) return [message];
+      changed++;
+      return kept.length ? [{ ...message, content: kept }] : [];
+    }
+    return [message];
+  });
+  return { messages: folded, changed };
+}
 /** Replace every image in observations and tool results with a note; the label before each names its event and index, or the face it shows. */
 export function foldImages(messages: AgentMessage[], imageViewer: (label: string) => string | undefined = () => undefined): { messages: AgentMessage[]; changed: number } {
   let changed = 0;
