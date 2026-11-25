@@ -651,3 +651,63 @@ test('deleting a source while a background summary is running prevents its resur
     assert.ok(!f.store.logs(100).some(log => log.kind === 'context_compacted'));
   } finally { release.resolve(); await rejected; f.store.close(); }
 });
+
+test('a fresh main working context seeds recent successful chat actions as alternating user and assistant turns without leaking forgotten or undeclared actions', async () => {
+  const f = fixture();
+  try {
+    const first = event(f.store, 'Remember to study for math');
+    f.faux.setResponses([answer(call('qq_main__send_group_msg', { group_id: 100, message: 'Go cram now' }))]);
+    await f.brain.run(f.store.claim(20)!);
+
+    const forgotten = event(f.store, 'Secret to forget completely');
+    f.faux.setResponses([answer(call('qq_main__send_group_msg', { group_id: 100, message: 'Secret reply to forget' }))]);
+    await f.brain.run(f.store.claim(20)!);
+    f.store.forget(forgotten.id);
+
+    // A non-chat / undeclared / unknown action must never be seeded.
+    const unknown = f.store.beginAction('u1', 'qq_main__send_group_msg', { group_id: 100, message: 'Unknown outcome' }, [first.id], [], null, 'qq:900:group:100').action;
+    f.store.finishAction(unknown.id, 'unknown', { reason: 'timeout' });
+    const undeclared = f.store.beginAction('p1', 'plugin:demo:like', { id: 'x1' }, [first.id], [], null, 'qq:900:group:100').action;
+    f.store.finishAction(undeclared.id, 'success', { ok: true });
+
+    // Force a fresh working context (as a prompt edit or restart with changed identity does).
+    f.cfg.persona = 'Qiuyue, updated persona to change working context identity.';
+    f.restart();
+    const fresh = event(f.store, 'Unrelated technical chatter');
+    let firstPrefix: Message[] = [];
+    f.faux.setResponses([context => {
+      firstPrefix = structuredClone(context.messages);
+      const roles = context.messages.map(message => message.role);
+      // Expect: system, seeded user, seeded assistant(toolCall), seeded toolResult, live observation(user), runtime snapshot(user).
+      assert.equal(roles[0], 'system');
+      assert.equal(roles[1], 'user');
+      assert.equal(roles[2], 'assistant');
+      assert.equal(roles[3], 'toolResult');
+      const seededUser = JSON.stringify(context.messages[1]);
+      const seededAssistant = context.messages[2]!;
+      const seededResult = context.messages[3]!;
+      assert.match(seededUser, /Remember to study for math/);
+      assert.equal(seededAssistant.role, 'assistant');
+      assert.ok(seededAssistant.content.some(block => block.type === 'toolCall' && block.name === 'qq_main__send_group_msg' && (block.arguments as any).message === 'Go cram now'));
+      assert.equal(seededResult.role, 'toolResult');
+      assert.equal(seededResult.isError, false);
+      const allText = JSON.stringify(context.messages);
+      const seededText = JSON.stringify(context.messages.slice(1, 4));
+      assert.doesNotMatch(allText, /Secret to forget completely|Secret reply to forget/);
+      assert.doesNotMatch(seededText, /plugin:demo:like|Unknown outcome/);
+      return answer('Quietly watching');
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+
+    // Subsequent silent run preserves the exact seeded prefix (warm cache) and does not cite seeded events as sources of a new action.
+    const next = event(f.store, 'Reply to me directly');
+    f.faux.setResponses([context => {
+      assert.deepEqual(context.messages.slice(0, firstPrefix.length), firstPrefix);
+      return answer(call('qq_main__send_group_msg', { group_id: 100, message: 'Here!' }));
+    }]);
+    await f.brain.run(f.store.claim(20)!);
+    const sent = f.store.actions().find(action => action.args.message === 'Here!')!;
+    assert.ok(sent.sources.includes(next.id));
+    assert.equal(f.store.event(fresh.id)?.status, 'processed');
+  } finally { f.store.close(); }
+});

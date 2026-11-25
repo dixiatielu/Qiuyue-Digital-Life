@@ -218,8 +218,8 @@ export class Monitor {
     for (const record of history.messages) {
       if (record.message.role === 'assistant' && textContent(record.message)) this.put({ id: record.id, at: record.at, type: 'assistant', title: ui('Model output · not sent to QQ', '模型输出 · 未发送到 QQ'), text: textContent(record.message), state: 'done' }, false);
       // A reply folded at the end of its thought is archived again after its results (ADR-0024); its calls are shown once.
-      if (record.message.role === 'assistant') for (const block of record.message.content) if (block.type === 'toolCall' && !this.items.has(`tool:${block.id}`)) this.put({ id: `tool:${block.id}`, at: record.at, type: 'tool', title: block.name, text: this.describe(block.arguments), state: 'interrupted' }, false);
-      if (record.message.role === 'toolResult') {
+      if (record.message.role === 'assistant') for (const block of record.message.content) if (block.type === 'toolCall' && !block.id.startsWith('seed_') && !this.items.has(`tool:${block.id}`)) this.put({ id: `tool:${block.id}`, at: record.at, type: 'tool', title: block.name, text: this.describe(block.arguments), state: 'interrupted' }, false);
+      if (record.message.role === 'toolResult' && !record.message.toolCallId.startsWith('seed_')) {
         const id = `tool:${record.message.toolCallId}`;
         this.put({ id, at: record.at, type: 'tool', title: record.message.toolName, text: this.items.get(id)?.text ?? ui('Previous tool result', '历史工具结果'), details: textContent(record.message), state: record.message.isError ? 'error' : 'done' }, false);
       }

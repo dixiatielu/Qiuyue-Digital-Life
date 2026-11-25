@@ -193,6 +193,12 @@ export class Store {
     const row = this.db.prepare('SELECT * FROM context_records WHERE id=?').get(recordId);
     return row ? { id: recordId, message: parse(row.message), sources: parse(row.source_ids) } : undefined;
   }
+  /** Latest archived assistant messages by insertion order (rowid B-tree), for reusing valid thought signatures when seeding a fresh context. */
+  recentAssistantMessages(limit = 200): AgentMessage[] {
+    return this.db.prepare('SELECT message FROM context_records ORDER BY rowid DESC LIMIT ?').all(limit)
+      .map(row => parse<AgentMessage>(row.message))
+      .filter(message => message.role === 'assistant');
+  }
   loadContext(identity: string): ContextCheckpoint | undefined {
     const row = this.db.prepare('SELECT * FROM working_context WHERE id=1 AND identity=? AND generation=?').get(identity, this.settings().generation);
     if (!row) return;
@@ -773,6 +779,15 @@ export class Store {
   action(row: Record<string, any>): Action { return { id: row.id, key: row.action_key, fingerprint: row.fingerprint, kind: row.kind, args: parse(row.args), sources: parse(row.source_ids), status: row.status, result: row.result ? parse(row.result) : null, createdAt: row.created_at, ...(row.conversation ? { conversation: row.conversation } : {}) }; }
   actions(limit = 20): Action[] { return this.db.prepare('SELECT * FROM actions ORDER BY created_at DESC LIMIT ?').all(limit).map(row => this.action(row)); }
   actionById(actionId: string): Action | undefined { const row = this.db.prepare('SELECT * FROM actions WHERE id=?').get(actionId); return row ? this.action(row) : undefined; }
+  /** Processed non-own events that triggered a completed action, in chronological order. */
+  actionTriggers(actionId: string): EnvironmentEvent[] {
+    return this.db.prepare("SELECT e.* FROM action_triggers t JOIN events e ON e.id=t.event_id WHERE t.action_id=? AND e.status='processed' AND coalesce(json_extract(e.source,'$.own'),0)=0 ORDER BY e.at,e.rowid").all(actionId).map(row => this.eventRow(row));
+  }
+  /** Latest processed non-own chat events in one conversation up to a timestamp, for seeding historical turns after a context reset. */
+  recentConversationEvents(conversation: string, beforeAt: number, limit: number): EnvironmentEvent[] {
+    const filter = this.recordFilter(conversation);
+    return this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND status='processed' AND at<=? AND coalesce(json_extract(source,'$.own'),0)=0 ORDER BY at DESC,rowid DESC LIMIT ?`).all(filter.target, beforeAt, limit).reverse().map(row => this.eventRow(row));
+  }
   /** One memory in everyday use, from before a time if given, chosen at random. */
   randomMemory(kinds: MemoryKind[], before = Number.MAX_SAFE_INTEGER): Memory | undefined {
     const row = this.db.prepare(`SELECT * FROM memories WHERE active=1 AND kind IN (${kinds.map(() => '?').join(',')}) AND created_at<? ORDER BY random() LIMIT 1`).get(...kinds, before);

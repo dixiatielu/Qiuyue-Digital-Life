@@ -166,7 +166,7 @@ export function createTools(config: Config, store: Store, context: () => Thought
         return { content: [{ type: 'text', text: caughtUp ? `${page.text}\nNewer messages come to you by themselves; you need not read again to wait for them. If you just want to read along, as people lurk (潜水) in a group, end your thought without a tool call.` : page.text }], details: {} };
       },
     },
-    runtime.tool('set_activity', 'Change or clear the current activity when it actually changes. Do not call it to confirm an unchanged activity or to end a silent thought.', Type.Object({ activity: Type.String({ maxLength: 2000 }) }), args => {
+    runtime.tool('set_activity', 'Change or clear the current activity when it actually changes.', Type.Object({ activity: Type.String({ maxLength: 2000 }) }), args => {
       const current = store.settings();
       if (args.activity.trim() === current.activity.trim()) {
         return {

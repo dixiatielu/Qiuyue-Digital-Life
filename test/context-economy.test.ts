@@ -330,7 +330,7 @@ test('identical repeated calls within one thought are blocked, end the thought, 
     await f.brain.run(f.store.claim(10)!);
     assert.equal(f.faux.state.callCount, 2);
     // The first inspect_actions stays; the blocked repeat and its error result are folded out.
-    const results = f.brain.agent.state.messages.filter(message => message.role === 'toolResult' && message.toolName === 'inspect_actions');
+    const results = f.brain.agent.state.messages.filter(message => message.role === 'toolResult').filter(message => message.toolName === 'inspect_actions');
     assert.equal(results.length, 1);
     assert.equal(results[0]!.isError, false);
 

@@ -2,7 +2,7 @@ import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend, modelBudget, modelRoute, modelUse, type ModelOwner } from './model.js';
 import { GEMINI_INTERACTIONS } from './gemini-interactions.js';
-import { createInitialSystemMessage, getCurrentTools, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent } from '@earendil-works/pi-ai';
+import { createInitialSystemMessage, getCurrentTools, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
@@ -556,12 +556,91 @@ export class PiBrain implements Brain {
     });
     return `Online activities available for your own life, with when you last did each. Life activities can be actual online activities like these, not only fictional daily life.\n${JSON.stringify(status)}`;
   }
+  /**
+   * Seed a fresh main working context with a few of her own recent chat actions interleaved with the surrounding chat
+   * events (ADR-0024). Starting with only consecutive user observations and zero assistant turns leaves thinking models
+   * out of distribution and pushes them to invent placeholder tool calls just to close silent turns.
+   */
+  private seedContext() {
+    if (this.config.memory.recentEvents <= 0) return;
+    const declared = new Set(this.tools.declared().map(tool => tool.name));
+    const actions = this.store.actions(40)
+      .filter(action => action.status === 'success'
+        && action.conversation !== undefined
+        && declared.has(action.kind)
+        && !(action.result && typeof action.result === 'object' && (action.result as { redacted?: unknown }).redacted === true))
+      .slice(0, 6)
+      .reverse();
+    if (!actions.length) return;
+    const model = this.agent.state.model;
+    const signatures = new Map<string, { id: string; thoughtSignature?: string }>();
+    for (const archived of this.store.recentAssistantMessages(200)) {
+      if (archived.role !== 'assistant' || archived.provider !== model.provider || archived.api !== model.api || archived.model !== model.id) continue;
+      for (const block of archived.content) {
+        if (block.type !== 'toolCall') continue;
+        const key = `${block.name}:${stableJson(block.arguments)}`;
+        if (!signatures.has(key) || (!signatures.get(key)!.thoughtSignature && block.thoughtSignature)) {
+          signatures.set(key, { id: block.id, ...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}) });
+        }
+      }
+    }
+    const emittedEvents = new Set<string>();
+    const usedCallIds = new Set<string>();
+    const turns: AgentMessage[][] = [];
+    for (const action of actions) {
+      const candidates = new Map<string, EnvironmentEvent>();
+      for (const item of [...this.store.actionTriggers(action.id), ...this.store.recentConversationEvents(action.conversation!, action.createdAt, 3)]) {
+        candidates.set(item.id, item);
+      }
+      const surrounding = [...candidates.values()].sort((a, b) => a.at - b.at);
+      if (!surrounding.length) continue;
+      const freshEvents = surrounding.filter(item => !emittedEvents.has(item.id));
+      for (const item of freshEvents) emittedEvents.add(item.id);
+      const match = signatures.get(`${action.kind}:${stableJson(action.args)}`);
+      const callId = match && !usedCallIds.has(match.id) ? match.id : `seed_${action.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      usedCallIds.add(callId);
+      const callBlock: ToolCall = { type: 'toolCall', id: callId, name: action.kind, arguments: action.args as ToolCall['arguments'], ...(match?.thoughtSignature ? { thoughtSignature: match.thoughtSignature } : {}) };
+      const resultMsg: ToolResultMessage = { role: 'toolResult', toolCallId: callId, toolName: action.kind, content: [{ type: 'text', text: JSON.stringify(actionSummary(action)) }], isError: false, timestamp: action.createdAt };
+      if (!freshEvents.length && turns.length) {
+        // Same-batch action with no intervening incoming events: append to the previous seeded assistant turn.
+        const previous = turns.at(-1)!;
+        const assistant = previous[1] as AssistantMessage;
+        assistant.content = [...assistant.content, callBlock];
+        assistant.timestamp = action.createdAt;
+        previous.push(resultMsg);
+        continue;
+      }
+      if (!freshEvents.length) continue;
+      const userMsg: Message = {
+        role: 'user',
+        content: [{ type: 'text', text: `Earlier conversation before this working context began (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, freshEvents, {}, 500)}` }],
+        timestamp: freshEvents.at(-1)!.at,
+      };
+      const assistantMsg: AssistantMessage = {
+        role: 'assistant',
+        content: [callBlock],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'toolUse',
+        timestamp: action.createdAt,
+      };
+      turns.push([userMsg, assistantMsg, resultMsg]);
+    }
+    const seedBudget = Math.min(4000, Math.floor(this.budget(model).budget * 0.15));
+    while (turns.length && estimateTokens(turns.flat()) > seedBudget) turns.shift();
+    if (!turns.length) return;
+    this.agent.state.messages = [...this.agent.state.messages, ...turns.flat()];
+  }
   /** Load the persisted working context unless this process already holds it for the current management state. */
   private prepare(generation: number) {
     if (this.contextGeneration !== generation) {
       this.resetContext();
       const saved = this.store.loadContext(this.identity);
-      if (saved) { try { this.restore(saved); } catch { this.resetContext(); } }
+      let restored = false;
+      if (saved) { try { this.restore(saved); restored = true; } catch { this.resetContext(); } }
+      if (!restored && this.owner === 'main') this.seedContext();
     }
     this.agent.state.tools = this.tools.declared();
     this.contextGeneration = generation;

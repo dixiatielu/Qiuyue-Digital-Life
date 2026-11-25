@@ -82,6 +82,54 @@ test('Gemini native runs a Pi tool cycle and replays thought signatures after a 
   }
 });
 
+test('Gemini fresh context after a prompt change seeds recent chat actions with their genuine thought signatures', async () => {
+  const requests: { body: any }[] = [];
+  const sendSignature = Buffer.from('real-send-thought-signature').toString('base64');
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    requests.push({ body: JSON.parse(Buffer.concat(chunks).toString()) });
+    const parts = requests.length === 1
+      ? [{ functionCall: { name: 'qq_main__send_group_msg', args: { group_id: 100, message: 'Akizuki' } }, thoughtSignature: sendSignature }]
+      : [{ text: 'Quiet' }];
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts }, finishReason: 'STOP', index: 0 }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10, thoughtsTokenCount: 5, totalTokenCount: 115 } })}\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  const cfg = config();
+  cfg.model = { ...gemini, baseUrl: `http://127.0.0.1:${address.port}/gateway/v1beta` };
+  const store = new Store(':memory:');
+  let brain: PiBrain;
+  const tools = createTools(cfg, store, { execute: async () => ({ message_id: 99 }) }, () => brain.thought);
+  const credential = (name: string) => name === gemini.apiKeyEnv ? 'native-test-key' : undefined;
+  try {
+    brain = new PiBrain(cfg, store, tools, undefined, undefined, undefined, credential);
+    event(store, 'How do you pronounce your name?');
+    await brain.run(store.claim(10)!);
+    assert.equal(requests.length, 1);
+
+    // Change persona to force a fresh working context identity on the same model.
+    cfg.persona = 'Qiuyue, refreshed persona.';
+    brain = new PiBrain(cfg, store, tools, undefined, undefined, undefined, credential);
+    event(store, 'Just chatting about compilers');
+    await brain.run(store.claim(10)!);
+    assert.equal(requests.length, 2);
+
+    const contents = requests[1]!.body.contents;
+    assert.equal(contents[0].role, 'user');
+    assert.match(JSON.stringify(contents[0]), /How do you pronounce your name/);
+    assert.equal(contents[1].role, 'model');
+    const seededCall = contents[1].parts.find((part: any) => part.functionCall);
+    assert.equal(seededCall.functionCall.name, 'qq_main__send_group_msg');
+    assert.equal(seededCall.thoughtSignature, sendSignature);
+    assert.equal(contents[2].role, 'user');
+    assert.ok(contents[2].parts.some((part: any) => part.functionResponse?.name === 'qq_main__send_group_msg'));
+  } finally {
+    store.close(); server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 const profile: ProviderProfile = { id: 'native', name: 'Gemini', api: 'google-generative-ai', baseUrl: 'https://gateway.example/google/v1beta/', apiKeyEnv: 'GEMINI_KEY' };
 
 test('Gemini model listings use native authentication, pagination and generation model names', async () => {
