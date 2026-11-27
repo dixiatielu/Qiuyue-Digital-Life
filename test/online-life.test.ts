@@ -49,8 +49,8 @@ function biliTransport(options: { noSubtitles?: boolean; subtitleFailure?: boole
         if (state.loseLikeResponse) throw new Error('Disconnected after changing remote state');
         return json({ code: 0 });
       }
-      case '/x/web-interface/popular': return json({ code: 0, data: { list: [{ bvid: video, title: 'Clouds', owner: { name: 'Painter' } }], no_more: true } });
-      case '/x/web-interface/wbi/search/type': return json({ code: 0, data: { result: [{ type: 'video', bvid: video, title: '<em>Clouds</em>', author: 'Painter' }, { type: 'ketang', bvid: '', title: 'Paid course' }], numPages: 2 } });
+      case '/x/web-interface/popular': return json({ code: 0, data: { list: [{ bvid: video, title: 'Clouds', owner: { name: 'Painter' }, tname: '绘画', duration: 435 }], no_more: true } });
+      case '/x/web-interface/wbi/search/type': return json({ code: 0, data: { result: [{ type: 'video', bvid: video, title: '<em>Clouds</em>', author: 'Painter', typename: '绘画', duration: '07:15' }, { type: 'ketang', bvid: '', title: 'Paid course' }], numPages: 2 } });
       case '/x/web-interface/wbi/view': return json({ code: 0, data: { bvid: video, aid: 42, title: 'Clouds', desc: 'Draw clouds', owner: { name: 'Painter' }, pic: 'https://i0.hdslb.com/cover.jpg', pages: [1, 2].map(page => ({ page, cid: 100 + page, part: `Part ${page}`, duration: 200 })) } });
       case '/x/player/wbi/v2': return options.subtitleFailure ? json({ code: -101 }) : json({ code: 0, data: { subtitle: { subtitles: options.noSubtitles ? [] : [{ lan: 'zh-CN', lan_doc: '中文', subtitle_url: options.externalSubtitle ? 'https://evil.example/steal' : '//i0.hdslb.com/subtitle.json' }] } } });
       case '/x/v2/reply/wbi/main': return options.commentFailure ? json({ code: -352 }) : json({ code: 0, data: { replies: [{ rpid: 12, member: { uname: 'A viewer' }, content: { message: 'Useful!' } }] } });
@@ -112,6 +112,9 @@ test('Bilibili discovery, real sources, saved intent and subtitle cursors surviv
   try {
     const found = await h.run('bili_browse', { query: 'clouds' });
     assert.equal(found.result.items[0].title, 'Clouds'); assert.equal(found.result.nextPage, 2);
+    assert.equal(found.result.items[0].category, '绘画'); assert.equal(found.result.items[0].durationSeconds, 435);
+    const popular = await h.run('bili_browse');
+    assert.equal(popular.result.items[0].category, '绘画'); assert.equal(popular.result.items[0].durationSeconds, 435);
     assert.equal((await h.run('bili_history')).items[0].readAt, undefined, 'a search preview is not a completed read');
     const read = await h.run('bili_read', { input: video });
     assert.equal(read.result.subtitles.lines.length, 80); assert.deepEqual(read.result.nextCursor, { part: 1, subtitleOffset: 80 });
@@ -176,7 +179,7 @@ function xhsTransport() {
       case '/api/v1/login/status': return json({ success: true, data: { is_logged_in: state.loggedIn } });
       case '/api/v1/feeds/list': case '/api/v1/feeds/search': return json({ success: true, data: { feeds: [
         { modelType: 'hot_query', id: 'non-note' },
-        { id: note, xsecToken: 'note-access-token', modelType: 'note', noteCard: { displayTitle: 'Cloud painting', user: { nickname: 'Artist' }, cover: { urlDefault: 'https://sns-webpic-qc.xhscdn.com/cover.jpg' } } },
+        { id: note, xsecToken: 'note-access-token', modelType: 'note', noteCard: { displayTitle: 'Cloud painting', type: 'normal', user: { nickname: 'Artist' }, cover: { urlDefault: 'https://sns-webpic-qc.xhscdn.com/cover.jpg' } } },
       ] } });
       case '/api/v1/feeds/favorite': {
         state.favorite = !JSON.parse(String(init?.body)).unfavorite;
@@ -202,6 +205,7 @@ test('Xiaohongshu reads text with attached images, retains private navigation to
   fastClock(t); const transport = xhsTransport(), h = await harness(t, 'xiaohongshu', transport.fetcher);
   try {
     const feed = await h.run('xhs_browse'); assert.equal(feed.result.items.length, 1); assert.equal(feed.result.nextPage, null);
+    assert.equal(feed.result.items[0].noteType, 'normal');
     assert.ok(!JSON.stringify(feed).includes('note-access-token'));
     await h.run('xhs_keep', { id: note, saved: true, note: 'Look at these colors later' });
     const read = await h.run('xhs_read', { input: note });

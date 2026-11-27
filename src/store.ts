@@ -776,6 +776,13 @@ export class Store {
     const row = this.db.prepare("SELECT json_extract(payload,'$.group_name') AS name FROM events WHERE conversation_ref=? AND json_extract(payload,'$.group_name') IS NOT NULL ORDER BY at DESC LIMIT 1").get(conversation);
     return row ? String(row.name) : undefined;
   }
+  /** Latest message timestamp and known group name for a conversation, using the conversation index. */
+  latestConversationActivity(conversation: string): { at: number; name?: string } | undefined {
+    const row = this.db.prepare("SELECT at, json_extract(payload,'$.group_name') AS name FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1").get(conversation);
+    if (!row) return;
+    const name = row.name ? String(row.name) : this.groupName(conversation);
+    return { at: Number(row.at), ...(name ? { name } : {}) };
+  }
   action(row: Record<string, any>): Action { return { id: row.id, key: row.action_key, fingerprint: row.fingerprint, kind: row.kind, args: parse(row.args), sources: parse(row.source_ids), status: row.status, result: row.result ? parse(row.result) : null, createdAt: row.created_at, ...(row.conversation ? { conversation: row.conversation } : {}) }; }
   actions(limit = 20): Action[] { return this.db.prepare('SELECT * FROM actions ORDER BY created_at DESC LIMIT ?').all(limit).map(row => this.action(row)); }
   actionById(actionId: string): Action | undefined { const row = this.db.prepare('SELECT * FROM actions WHERE id=?').get(actionId); return row ? this.action(row) : undefined; }

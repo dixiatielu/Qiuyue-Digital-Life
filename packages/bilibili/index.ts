@@ -14,6 +14,13 @@ export function signBilibili(parameters: Record<string, string | number>, img: s
 }
 const text = (value: unknown, max = 1000) => String(value ?? '').replace(/<[^>]*>/g, '').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').slice(0, max);
 const imageUrl = (value: unknown) => typeof value === 'string' ? value.startsWith('//') ? `https:${value}` : value : undefined;
+function parseDuration(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.round(value);
+  if (typeof value !== 'string') return undefined;
+  const parts = value.trim().split(':');
+  if (parts.length < 2 || parts.length > 3 || !parts.every(part => /^\d+$/.test(part))) return undefined;
+  return parts.reduce((total, part) => total * 60 + Number(part), 0);
+}
 export function bilibiliReference(input: string): { bvid?: string; aid?: string; part?: number; short?: string } {
   if (/^BV[0-9A-Za-z]{10}$/.test(input)) return { bvid: input };
   if (/^av\d+$/i.test(input)) return { aid: input.slice(2) };
@@ -63,7 +70,14 @@ export class BilibiliReader implements OnlineReader {
   }
   private item(value: any): ReadingItem {
     if (!/^BV[0-9A-Za-z]{10}$/.test(value.bvid)) throw new Error('Bilibili returned an invalid video ID.');
-    return { id: value.bvid, title: text(value.title, 300), url: `https://www.bilibili.com/video/${value.bvid}`, author: text(value.owner?.name ?? value.author, 100), description: text(value.desc ?? value.description, 1500), cover: imageUrl(value.pic) };
+    const category = text(value.tname ?? value.typename, 80) || undefined;
+    const durationSeconds = parseDuration(value.duration);
+    return {
+      id: value.bvid, title: text(value.title, 300), url: `https://www.bilibili.com/video/${value.bvid}`,
+      author: text(value.owner?.name ?? value.author, 100), description: text(value.desc ?? value.description, 1500), cover: imageUrl(value.pic),
+      ...(category ? { category } : {}),
+      ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+    };
   }
   async browse(query: string | undefined, page: number, signal?: AbortSignal) {
     if (query !== undefined && !query.trim()) throw new Error('A search query must not be blank.');
@@ -199,9 +213,10 @@ export function setup(ctx: PluginContext) {
   const options = ctx.settings as NetworkSettings & { cookieEnv: string; favoriteFolderId: number };
   const reader = new BilibiliReader(new PlatformNetwork(ctx.id, ctx.storage, options), ctx.storage, () => ctx.credential(options.cookieEnv), options.favoriteFolderId);
   registerOnlineReading(ctx, 'bili', reader, {
-    browse: 'Find Bilibili videos by your own query, or omit query to browse popular videos. Popular is not a personalized feed.',
+    browse: 'Find Bilibili videos by your own query, or omit query to browse generic popular videos (not a personalized feed). Items may include category and durationSeconds.',
     read: 'Read a Bilibili BV/av ID, video URL or b23.tv link: description, one chunk of subtitles and a sample of comments. This does not play or listen to the video. Cover images can be inspected with view_event_image using the returned sourceId and cover URL.',
     activity: 'Browse Bilibili for something that interests you, or continue something kept in bili_history; stop, keep it to yourself, or share a genuine find',
+    browseGuidance: 'Searching by your own topics usually fits your interests better than the generic popular chart, which is not personalized.',
   });
 }
 

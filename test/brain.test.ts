@@ -276,7 +276,28 @@ test('life wakes show when available online activities were last done, other obs
     assert.ok(prompts[1]!.includes('2026-10-27T12:00:00.000Z'));
     assert.ok(prompts[1]!.includes('Practicing a new song') && prompts[1]!.includes('Humming along'));
     assert.ok(prompts[1]!.includes(new Date(diary.createdAt).toISOString()));
-    assert.ok(prompts[1]!.includes('Post to your Qzone') && !prompts[1]!.includes('Look things up or read online'));
+    assert.ok(prompts[1]!.includes('Post to your Qzone') && prompts[1]!.includes('Share a light moment or find in a quiet group chat') && !prompts[1]!.includes('Look things up or read online'));
+    assert.ok(prompts[1]!.includes('Group chats right now: 100: just active.'));
+  } finally { f.store.close(); }
+});
+
+test('life wakes report per-group quiet duration for configured groups with history', async t => {
+  const now = Date.parse('2026-11-26T10:40:00Z');
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const f = fixture();
+  try {
+    f.cfg.adapters[0]!.groups = [100, 200, 300, 400];
+    f.restart();
+    f.store.setSetting('lifeEnabled', true);
+    f.store.receive(qqEvent({ key: 'g100', kind: 'message', at: now - 18 * 60_000, text: 'hi', payload: { message_type: 'group', group_id: 100, group_name: 'Tech', user_id: 1, raw_message: 'hi' } }, f.store), true);
+    f.store.receive(qqEvent({ key: 'g200', kind: 'message', at: now - (4 * 60 + 48) * 60_000, text: 'food', payload: { message_type: 'group', group_id: 200, group_name: 'Food', user_id: 2, raw_message: 'food' } }, f.store), true);
+    f.store.receive(qqEvent({ key: 'g300', kind: 'message', at: now - 5 * 86_400_000, text: 'old', payload: { message_type: 'group', group_id: 300, group_name: 'Archive', user_id: 3, raw_message: 'old' } }, f.store), true);
+    f.store.schedule('Free time', 'life', now); f.store.enqueueDue();
+    let prompt = '';
+    f.faux.setResponses([context => { prompt = JSON.stringify(context.messages.findLast(message => JSON.stringify(message).includes('New environment observations'))); return answer('Quiet'); }]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.ok(prompt.includes('Group chats right now: 100 (Tech): quiet 18m; 200 (Food): quiet 4h48m; 300 (Archive): quiet 5d.'));
+    assert.ok(!prompt.includes('400'));
   } finally { f.store.close(); }
 });
 

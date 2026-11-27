@@ -49,8 +49,10 @@ export class XiaohongshuReader implements OnlineReader {
   }
   private item(id: string, note: any, token?: string): ReadingItem {
     if (!idPattern.test(id)) throw new Error('Xiaohongshu returned an invalid note ID.');
+    const noteType = text(note.type, 50) || undefined;
     return { id, title: text(note.title ?? note.displayTitle, 300), author: text(note.user?.nickname ?? note.user?.nickName, 100),
       url: `https://www.xiaohongshu.com/explore/${id}`, description: text(note.desc, 2000), cover: picture(note.cover ?? note.imageList?.[0]),
+      ...(noteType ? { noteType } : {}),
       ...(token ? { locator: { token } } : {}),
     };
   }
@@ -122,9 +124,10 @@ export function setup(ctx: PluginContext) {
   const options = ctx.settings as NetworkSettings & { baseUrl: string; tokenEnv: string };
   const reader = new XiaohongshuReader(new PlatformNetwork(ctx.id, ctx.storage, options), ctx.storage, options.baseUrl, () => ctx.credential(options.tokenEnv));
   registerOnlineReading(ctx, 'xhs', reader, {
-    browse: 'Browse Xiaohongshu recommendations or search for a topic. This service returns one bounded batch; only page 1 is supported.',
+    browse: 'Browse Xiaohongshu recommendations or search for a topic. This service returns one bounded batch; only page 1 is supported. Each item may include noteType ("normal" image/text notes deliver text and actual pictures in xhs_read; "video" notes cannot be played or heard and only provide text, comments, and a cover image).',
     read: 'Read a discovered Xiaohongshu note ID or full URL: text, sampled comments and actual images together in one response. imageDelivery identifies attached, failed and omitted images; no extra viewing call is needed for attached images. Reading text is not watching a video.',
     activity: 'Browse Xiaohongshu pictures and notes that interest you, or revisit something kept in xhs_history; stop, keep it to yourself, or share a genuine find',
+    browseGuidance: 'Search by topics you genuinely enjoy, or occasionally browse recommendations without a query; prefer "normal" image/text notes when you want to see full visual content rather than a video cover alone.',
   });
 }
 

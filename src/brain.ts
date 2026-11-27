@@ -18,6 +18,7 @@ import { ChatRecord, observationText, recordTime } from './record.js';
 import { waitFor } from './async.js';
 import { memoriesInView, type SemanticRecall } from './recall.js';
 import type { OnlineActivity } from './plugins.js';
+import { conversationRef } from './identity.js';
 
 /** Built-in online activities; plugins contribute their own activities through the host. */
 const onlineActivities: OnlineActivity[] = [
@@ -616,9 +617,34 @@ export class PiBrain implements Brain {
     const surfaced = [this.store.randomMemory(['experience', 'note', 'fiction'], now - 86_400_000), this.store.randomMemory(['impression'])].filter((memory): memory is Memory => memory !== undefined);
     for (const memory of surfaced) this.thought.sources.add(memory.id);
     if (surfaced.length) parts.push(`What happens to come to mind; follow it or let it pass:\n${JSON.stringify(surfaced.map(memory => ({ id: memory.id, kind: memory.kind, ...(memory.scope ? { scope: memory.scope } : {}), title: memory.title, content: memory.content.slice(0, 300), fictional: memory.fictional, createdAt: new Date(memory.createdAt).toISOString() })))}`);
+    const groups = this.groupQuietness(now);
+    if (groups) parts.push(groups);
     const online = this.onlineLife();
     if (online) parts.push(online);
     return parts.join('\n\n');
+  }
+  private formatQuiet(ms: number) {
+    const minutes = Math.max(0, Math.floor(ms / 60_000));
+    if (minutes < 1) return 'just active';
+    if (minutes < 60) return `quiet ${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return minutes % 60 ? `quiet ${hours}h${minutes % 60}m` : `quiet ${hours}h`;
+    return `quiet ${Math.floor(hours / 24)}d`;
+  }
+  /** How long each configured group chat has been quiet, so a life wake need not guess which chats are in a lull (ADR-0014). */
+  private groupQuietness(now: number): string | undefined {
+    const entries: string[] = [];
+    for (const adapter of this.config.adapters) {
+      const platform = adapter.driver === 'snowluma' ? 'qq' : adapter.driver;
+      for (const groupId of adapter.groups) {
+        const ref = conversationRef({ platform, accountId: adapter.accountId }, 'group', String(groupId));
+        const latest = this.store.latestConversationActivity(ref);
+        if (!latest) continue;
+        const label = latest.name ? `${groupId} (${latest.name})` : String(groupId);
+        entries.push(`${label}: ${this.formatQuiet(now - latest.at)}`);
+      }
+    }
+    return entries.length ? `Group chats right now: ${entries.join('; ')}.` : undefined;
   }
   /** When each available online activity was last done, so a life wake knows what it can actually do. */
   private onlineLife() {

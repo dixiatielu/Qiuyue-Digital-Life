@@ -7,6 +7,7 @@ export type NetworkSettings = typeof networkDefaults;
 export interface ReadingItem {
   id: string; title: string; url: string; author: string;
   description?: string; cover?: string; locator?: Record<string, string>;
+  noteType?: string; category?: string; durationSeconds?: number;
 }
 export interface ReadingEntry extends ReadingItem {
   discoveredAt: number; readAt?: number; sourceId?: string;
@@ -124,9 +125,14 @@ export class ReadingHistory {
   }
 }
 
-export function registerOnlineReading(ctx: PluginContext, prefix: string, reader: OnlineReader, descriptions: { browse: string; read: string; activity: string }) {
+export function registerOnlineReading(ctx: PluginContext, prefix: string, reader: OnlineReader, descriptions: { browse: string; read: string; activity: string; browseGuidance?: string }) {
   const history = new ReadingHistory(ctx.storage), platform = ctx.id;
-  ctx.activity({ activity: descriptions.activity, tools: [`${prefix}_browse`, `${prefix}_read`], instructions: 'Browse according to your own interests; there is no need to manufacture something to talk about. Besides searching by topic, you can occasionally browse without a query to see what comes up. Previews are not full reading experiences, and share only what you actually read or saw. You can stop when uninterested, keep it to yourself, or casually share a genuine find—with its original link and a brief reaction—in a fitting group chat, private chat, or Qzone post without waiting for someone else to bring it up; keep sharing occasional and natural rather than routine. New items and comments on this platform are seen by checking, not pushed to you.' });
+  const browseHint = descriptions.browseGuidance ? ` ${descriptions.browseGuidance}` : '';
+  ctx.activity({
+    activity: descriptions.activity,
+    tools: [`${prefix}_browse`, `${prefix}_read`],
+    instructions: `Browse according to your own interests; there is no need to manufacture something to talk about.${browseHint} Previews are not full reading experiences, and share only what you actually read or saw. When something you read genuinely catches your eye or reminds you of a group or friend, casually dropping its original link with a brief reaction into a quiet group chat, private chat, or Qzone post is a natural part of being an ordinary peer—not interrupting or over-talking; let it stand whether or not anyone replies, and keep sharing occasional rather than routine. Liking or favoriting only updates the platform account and does not enter your memory; if you want to recall a good find later (for instance when chats are busy now), save a short note with remember including its sourceId and URL. New items and comments on this platform are seen by checking, not pushed to you.`,
+  });
   ctx.activity({ activity: `Resume your ${platform} reading`, tools: [`${prefix}_history`], instructions: 'Local history helps you find something again and continue where you left off. It is navigation state, not new evidence or a full live account favorites listing.' });
   ctx.activity({ activity: `Manage your ${platform} favorites`, tools: [`${prefix}_keep`], instructions: 'Favorite something you want to return to, or unfavorite it when your interest changes. These are real account changes; choose for your interests, not to fill a quota or deliberately train recommendations.' });
   ctx.activity({ activity: `Like something on ${platform}`, tools: [`${prefix}_like`], instructions: 'Like content you enjoy, or unlike it when your interest changes. Likes are real account interactions that may influence recommendations; choose according to your own interests. There is no quota or obligation to like each item.' });
@@ -142,7 +148,7 @@ export function registerOnlineReading(ctx: PluginContext, prefix: string, reader
   });
   ctx.tool({
     name: `${prefix}_read`, readOnly: true, experienceKind: 'reading',
-    description: descriptions.read + ` Omitting restart resumes the saved reading cursor; restart:true starts again. Use ${prefix}_like to like something, ${prefix}_keep to favorite it on your platform account and ${prefix}_history to find it.`,
+    description: descriptions.read + ` Omitting restart resumes the saved reading cursor; restart:true starts again. Use ${prefix}_like to like something, ${prefix}_keep to favorite it on your platform account, and ${prefix}_history to find it. Likes and favorites do not put the item in your memory: if a genuine find strikes you as worth keeping for later, save a brief note with remember (with this result's sourceId and URL), or casually share its original link and a short reaction in a quiet group chat, private chat, or Qzone post.`,
     parameters: { type: 'object', properties: { input: { type: 'string', minLength: 1, maxLength: 2000, description: 'An item ID or platform URL' }, restart: { type: 'boolean' } }, required: ['input'], additionalProperties: false },
     async execute({ input, restart = false }, call) {
       const reading = await reader.read(input, history.get(input), restart, call.signal); call.signal.throwIfAborted();
