@@ -75,7 +75,7 @@ To let the digital life recall memories by what people are talking about, set `e
 
 ### Image generation (`drawing`)
 
-To let the digital life generate images with `imagen`, including photorealistic photos, illustrations, stickers, and diagrams, set `enabled` to `true` and point `baseUrl` and `model` at an OpenAI-compatible `/images/generations` endpoint, with its credential named by `apiKeyEnv`. Generation takes half a minute or more, so an image comes back to the digital life as an observation when it is done, and requests give up after `timeoutMs`. Generated images are kept in `dir` (`data/drawings` beside the configuration by default) long term in the gallery, independently of chat-memory retention. There is no limit on how often it generates images; watch the endpoint's quota.
+To let the digital life generate or edit images with `imagen`, including photorealistic photos, illustrations, stickers, diagrams, and reference-guided edits or new compositions (up to 5 reference images from the gallery or from chat/feed events, plus optional transparent backgrounds), set `enabled` to `true` and point `baseUrl` and `model` at an OpenAI-compatible `/images/generations` and `/images/edits` endpoint, with its credential named by `apiKeyEnv`. Generation takes half a minute or more, so an image comes back to the digital life as an observation when it is done, and requests give up after `timeoutMs`. Generated images are kept in `dir` (`data/drawings` beside the configuration by default) long term in the gallery, independently of chat-memory retention. There is no limit on how often it generates images; watch the endpoint's quota.
 
 ### Autonomous life (`life`)
 

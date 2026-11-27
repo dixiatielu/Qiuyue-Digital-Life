@@ -6,7 +6,7 @@ const size = value => value < 1024 * 1024 ? `${Math.round(value / 1024)} KB` : `
 const name = item => item.title || t('Untitled image', '未命名作品');
 const outcomes = () => ({ success: t('Confirmed', '已成功'), failed: t('Failed', '失败'), unknown: t('Unconfirmed', '结果不确定'), pending: t('In progress', '进行中') });
 
-function DrawingDetails({ id, onClose, onChange, canEdit }) {
+function DrawingDetails({ id, onClose, onChange, onSelect, canEdit }) {
   const [item, setItem] = useState();
   const [draft, setDraft] = useState();
   const [error, setError] = useState();
@@ -51,7 +51,9 @@ function DrawingDetails({ id, onClose, onChange, canEdit }) {
             <div class="row wrap"><label class="check"><input type="checkbox" checked=${draft.favorite} onChange=${event => field('favorite', event.currentTarget.checked)} />${t('Favorite', '收藏')}</label><label class="check"><input type="checkbox" checked=${draft.archived} onChange=${event => field('archived', event.currentTarget.checked)} />${t('Archived', '归档')}</label></div>
           </fieldset>
           ${!canEdit ? html`<p class="muted small">${t('Start the service to organize works.', '启动服务后可整理作品。')}</p>` : null}
-          <details open><summary>${t('Creation prompt', '创作提示词')}</summary><p class="gallery-prose">${item.prompt || t('Unknown', '未知')}</p><p class="muted small">${t('Image model', '绘画模型')}：${item.model || t('Unknown', '未知')}</p></details>
+          <details open><summary>${t('Creation prompt', '创作提示词')}</summary><p class="gallery-prose">${item.prompt || t('Unknown', '未知')}</p><p class="muted small">${t('Image model', '绘画模型')}：${item.model || t('Unknown', '未知')}${item.transparentBackground ? html` · <${Badge}>${t('Transparent background', '透明背景')}<//>` : null}</p>
+            ${item.references?.length ? html`<div class="gallery-refs"><div class="muted small">${t('Reference images', '参考图片')}</div><ul>${item.references.map((ref, idx) => html`<li key=${idx} class="small"><span>${t(`Image ${idx + 1}`, `图 ${idx + 1}`)}：</span>${ref.drawingId ? html`<button type="button" class="link" onClick=${() => onSelect?.(ref.drawingId)}>${ref.drawingId}</button>` : html`<code>${ref.eventId}${ref.url ? ` (${ref.url})` : ` #${ref.index}`}</code>`}</li>`)}</ul></div>` : null}
+          </details>
         </form>
       </div>
       <div class="gallery-history"><h3>${t('Creation context', '创作来源')}</h3>${item.sources.length ? item.sources.map(source => html`<div class="gallery-source"><div class="muted small">${source.conversation || '—'} · ${source.name || source.person || ''} · ${date(source.at)}</div><p>${source.text || t('Original record is unavailable.', '原始记录不可用。')}</p></div>`) : html`<p class="muted">${t('No recorded social context.', '没有已记录的聊天来源。')}</p>`}
@@ -109,6 +111,6 @@ export function GalleryPage({ overview }) {
       </button>`)}</div>` : html`<div class="gallery-empty"><span aria-hidden="true">◌</span><h2>${stats?.total ? t('No matching works', '没有找到匹配的作品') : t('A place for her creations', '留一处地方，放她的作品')}</h2><p>${stats?.total ? t('Try another subject or widen the filters.', '换个关键词，或扩大筛选范围。') : t('Finished images appear here automatically.', '生成完成的图片会自动收进来。')}</p></div>`}
       <div class="row between gallery-pagination"><button class="ghost" disabled=${offset === 0 || state.loading} onClick=${() => setOffset(value => Math.max(0, value - 24))}>${t('Previous', '上一页')}</button><span class="muted small">${Math.floor(offset / 24) + 1} / ${Math.max(1, Math.ceil(state.data.total / 24))}</span><button class="ghost" disabled=${state.data.nextOffset === null || state.loading} onClick=${() => setOffset(state.data.nextOffset)}>${t('Next', '下一页')}</button></div>
     `}
-    ${selected ? html`<${DrawingDetails} key=${selected} id=${selected} onClose=${() => setSelected(undefined)} onChange=${refresh} canEdit=${overview.daemon.running} />` : null}
+    ${selected ? html`<${DrawingDetails} key=${selected} id=${selected} onClose=${() => setSelected(undefined)} onChange=${refresh} onSelect=${setSelected} canEdit=${overview.daemon.running} />` : null}
   `;
 }

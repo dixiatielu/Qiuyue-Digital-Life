@@ -259,7 +259,7 @@ export function ModelsPage() {
       ]} />
     </div><div hidden=${tab !== 'drawing'}>
     <${Endpoint} form=${form} profiles=${list} section="drawing" title=${t('Drawing', '画画')}
-      help=${t('An OpenAI-compatible /images/generations endpoint for the drawing plugin. Drawings take half a minute or more and are not limited in number; mind the endpoint quota.', '供画画插件使用的兼容 OpenAI 的 /images/generations 接口。画一张图要半分钟以上，次数不设上限，请留意接口额度。')}
+      help=${t('An OpenAI-compatible /images/generations and /images/edits endpoint for the drawing plugin. Drawings take half a minute or more and are not limited in number; mind the endpoint quota.', '供画画插件使用的兼容 OpenAI 的 /images/generations 与 /images/edits 接口。画一张图要半分钟以上，次数不设上限，请留意接口额度。')}
       fields=${[{ path: 'timeoutMs', type: 'ms', label: t('Timeout (ms)', '超时（毫秒）') }, { path: 'dir', label: t('Folder for drawings', '保存目录') }]} />
     </div><div hidden=${tab !== 'credentials'}><${Secrets} secrets=${secrets} /></div>
     <${SaveBar} form=${form} onSaved=${() => { profiles.reload(); secrets.reload(); }} />`;

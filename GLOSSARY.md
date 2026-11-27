@@ -161,7 +161,7 @@ A period the digital life marks for itself, until an activity it has scheduled, 
 _Avoid_: quiet hours fixed by the operator, Agent pause
 
 **Generated Image**:
-An image the digital life creates from its own description, including a photorealistic photo, illustration, sticker, or diagram, as it likes or because someone asked and it chose to. It sees the result before deciding whether to send, post, or keep it.
+An image the digital life creates from its own description, optionally guided by reference images, including a photorealistic photo, illustration, sticker, or diagram, as it likes or because someone asked and it chose to. It sees the result before deciding whether to send, post, or keep it.
 _Avoid_: an image-generation service for group members, an automatic reply
 
 **Gallery**:

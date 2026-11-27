@@ -1,10 +1,68 @@
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { TSchema } from 'typebox';
 import type { Config } from './config.js';
-import type { Action, Memory } from './domain.js';
+import type { Action, EnvironmentEvent, Memory } from './domain.js';
 import { Store, type RevisionReach } from './store.js';
 import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName } from './platform.js';
 import { PluginHost } from './plugins.js';
+import { fetchImage } from './web.js';
+
+/** Every http(s) URL in an event's strings, with HTML's &amp; decoded, so an image named in a tool result can be viewed or referenced by its exact URL. */
+export function urlsIn(value: unknown, found = new Set<string>()): Set<string> {
+  if (typeof value === 'string') for (const match of value.replaceAll('&amp;', '&').matchAll(/https?:\/\/[\w\-.~:/?#@!$&()*+,;=%]+/g)) found.add(match[0]);
+  else if (value && typeof value === 'object') for (const item of Object.values(value)) urlsIn(item, found);
+  return found;
+}
+
+export interface ResolvedEventImage {
+  event: EnvironmentEvent;
+  label: string;
+  url?: string;
+  unavailable: string;
+  load(signal?: AbortSignal): Promise<{ data: Buffer; mimeType: string }>;
+  onShown?(): void;
+}
+
+/** Validate and resolve an image inside an event (plugin-provided, message segment, or exact URL in payload), deferring any network read to load(). */
+export function resolveEventImage(
+  store: Store,
+  plugins: Pick<PluginHost, 'images'>,
+  args: { id: string; index?: number; url?: string },
+  loadUrl: typeof fetchImage = fetchImage,
+): ResolvedEventImage {
+  if ((args.index === undefined) === (args.url === undefined)) throw new Error('Specify exactly one of index or url.');
+  if (args.index !== undefined && (!Number.isSafeInteger(args.index) || args.index < 0)) throw new Error('Image index must be a non-negative integer.');
+  const event = store.event(store.resolve(args.id));
+  if (!event) throw new Error('The experience does not exist or has been deleted.');
+  const provided = args.index !== undefined ? plugins.images(event)[args.index] : undefined;
+  if (provided) {
+    return {
+      event, label: provided.label, unavailable: provided.unavailable, onShown: provided.onShown,
+      load: async signal => {
+        const picture = await provided.load(signal);
+        if (!picture) throw new Error(provided.unavailable);
+        return picture;
+      },
+    };
+  }
+  let url: string;
+  if (args.url !== undefined) {
+    url = String(args.url).replaceAll('&amp;', '&');
+    if (!urlsIn(event.payload).has(url)) throw new Error('That URL does not appear in the event.');
+  } else {
+    const segments = event.payload.message;
+    const found = (Array.isArray(segments) ? segments.filter(segment => segment.type === 'image')[args.index!] : undefined)?.data?.url;
+    if (typeof found !== 'string') throw new Error('The image does not exist or has no readable URL.');
+    url = found;
+  }
+  return {
+    event, url, label: `Image ${args.url !== undefined ? url : args.index} from event ${event.id}`, unavailable: 'The image could not be read.',
+    load: async signal => {
+      const result = await loadUrl(url, signal);
+      return { data: result.data, mimeType: result.type };
+    },
+  };
+}
 
 /** A review hands revisions affecting unfinished matters back to the conversations (ADR-0012). */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; /** A review that goes back over old memories (ADR-0027). */ revisiting?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
@@ -21,7 +79,7 @@ export const jsonResult = (result: unknown): AgentToolResult<any> => ({ content:
 
 /** Shared execution rules for built-in and plugin tools. Plugins never create their own action receipts. */
 export class ToolRuntime {
-  constructor(readonly config: Config, readonly store: Store, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate' | 'nativeDefinition' | 'nativeAllowed' | 'nativeExecute' | 'chatTarget'> = new PluginHost([]), private namespace?: string) {}
+  constructor(readonly config: Config, readonly store: Store, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate' | 'nativeDefinition' | 'nativeAllowed' | 'nativeExecute' | 'chatTarget' | 'images'> = new PluginHost([]), private namespace?: string) {}
   scoped(instance: string) { return new ToolRuntime(this.config, this.store, this.context, this.extensions, instance); }
   private name(name: string) { return this.namespace ? nativeToolName(this.namespace, name) : name; }
   private dispatch(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -30,6 +88,7 @@ export class ToolRuntime {
     return result;
   }
   resolveMedia(value: unknown): unknown { return this.extensions.resolveMedia(value); }
+  resolveEventImage(args: { id: string; index?: number; url?: string }): ResolvedEventImage { return resolveEventImage(this.store, this.extensions, args); }
   decorate(tool: AgentTool): AgentTool {
     const decorated = this.extensions.decorate({ ...tool, name: this.name(tool.name) }, this);
     return { ...decorated, name: tool.name };

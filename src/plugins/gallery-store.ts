@@ -8,9 +8,12 @@ import { closestLine, unit } from '../embedding.js';
 export const drawingIdPattern = /^drawing:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const formats: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
 export interface DrawingSource { id: string; at?: number; conversation?: string; person?: string; name?: string; text?: string }
+export interface DrawingReference { drawingId?: string; eventId?: string; index?: number; url?: string }
 export interface GalleryDrawing {
   id: string; title: string; description: string; prompt: string; model?: string; tags: string[]; note: string;
-  createdAt: number; timeSource: 'generation' | 'file'; sources: DrawingSource[]; favorite: boolean; archived: boolean;
+  createdAt: number; timeSource: 'generation' | 'file'; sources: DrawingSource[];
+  references?: DrawingReference[]; transparentBackground?: boolean;
+  favorite: boolean; archived: boolean;
   extension: string; bytes: number; width?: number; height?: number; previewError?: string;
   revision: number; seenAt?: number; deletedAt?: number;
 }
@@ -108,15 +111,17 @@ export class DrawingLibrary {
         name: source?.actorName || payload.sender?.card || payload.sender?.nickname || undefined, text: String(row.text).slice(0, 400) };
     });
   }
-  async save(id: string, data: Buffer, extension: string, info: { prompt: string; model: string; createdAt: number; sources: DrawingSource[] }) {
+  async save(id: string, data: Buffer, extension: string, info: { prompt: string; model: string; createdAt: number; sources: DrawingSource[]; references?: DrawingReference[]; transparentBackground?: boolean }) {
     this.initialize();
     if (this.get(id)) return;
     mkdirSync(this.dir, { recursive: true });
     const path = this.file(id, extension), temporary = `${path}.${crypto.randomUUID()}.tmp`;
     try { writeFileSync(temporary, data); renameSync(temporary, path); } finally { rmSync(temporary, { force: true }); }
     // Commit the original and its provenance before deriving expendable previews.
+    const { references, transparentBackground, ...base } = info;
     const item: GalleryDrawing = { id, title: '', description: '', note: '', tags: [], favorite: false, archived: false, extension,
-      bytes: data.length, timeSource: 'generation', revision: 1, ...info };
+      bytes: data.length, timeSource: 'generation', revision: 1, ...base,
+      ...(references?.length ? { references } : {}), ...(transparentBackground ? { transparentBackground: true } : {}) };
     this.put(item);
     await this.preview(item, data);
   }

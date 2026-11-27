@@ -75,7 +75,7 @@ Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 to
 
 ### 图像生成 (`drawing`)
 
-如需让数字生命通过 `imagen` 生成图片（包括写实照片、插画、表情包和示意图），将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 `/images/generations` 接口，凭据名称由 `apiKeyEnv` 指定。生成一张图要半分钟以上，完成后会作为一条观察回到数字生命那里；请求超过 `timeoutMs` 即放弃。生成的图片保存在 `dir`（默认是配置文件旁的 `data/drawings`），由作品库长期保存，不随聊天记忆过期清理。生成次数不设上限，请自行留意接口额度。
+如需让数字生命通过 `imagen` 生成或基于参考图修改、再创作图片（包括写实照片、插画、表情包和示意图，支持最多 5 张作品库或聊天/动态事件里的参考图，以及可选透明背景），将 `enabled` 设为 `true`，并把 `baseUrl` 和 `model` 指向兼容 OpenAI 的 `/images/generations` 与 `/images/edits` 接口，凭据名称由 `apiKeyEnv` 指定。生成一张图要半分钟以上，完成后会作为一条观察回到数字生命那里；请求超过 `timeoutMs` 即放弃。生成的图片保存在 `dir`（默认是配置文件旁的 `data/drawings`），由作品库长期保存，不随聊天记忆过期清理。生成次数不设上限，请自行留意接口额度。
 
 ### 自主生活 (`life`)
 

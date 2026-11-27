@@ -297,6 +297,10 @@ details summary { cursor:pointer; color:var(--muted); margin:8px 0; }
 .gallery-form label.check { flex-direction:row; align-items:center; }
 .gallery-form textarea { resize:vertical; }
 .gallery-prose { font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.gallery-refs { margin-top:8px; }
+.gallery-refs ul { margin:4px 0 0; padding-left:18px; display:grid; gap:4px; }
+.gallery-refs code { overflow-wrap:anywhere; }
+.gallery-refs button.link { padding:0; border:0; background:none; color:var(--accent); font:inherit; text-decoration:underline; cursor:pointer; }
 .gallery-history { border-top:1px solid var(--line); margin-top:24px; padding-top:12px; }
 .gallery-history h3 { font-size:14px; font-weight:600; }
 .gallery-source { border-left:2px solid var(--accent-line); padding:3px 12px; margin-bottom:12px; }

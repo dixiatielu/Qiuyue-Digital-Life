@@ -3,7 +3,6 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Config } from './config.js';
 import { Store, entryTitle } from './store.js';
 import type { EnvironmentEvent } from './domain.js';
-import { fetchImage } from './web.js';
 import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
 import type { SemanticRecall } from './recall.js';
@@ -15,12 +14,6 @@ import { loadsToolsOnDemand, type ModelOwner } from './model.js';
 export { ensureCurrent, type ThoughtContext } from './tool-runtime.js';
 
 const string = (description: string, maxLength = 6000) => Type.String({ description, minLength: 1, maxLength });
-/** Every http(s) URL in an event's strings, with HTML's &amp; decoded, so an image named in a tool result can be viewed by its exact URL. */
-function urlsIn(value: unknown, found = new Set<string>()): Set<string> {
-  if (typeof value === 'string') for (const match of value.replaceAll('&amp;', '&').matchAll(/https?:\/\/[\w\-.~:/?#@!$&()*+,;=%]+/g)) found.add(match[0]);
-  else if (value && typeof value === 'object') for (const item of Object.values(value)) urlsIn(item, found);
-  return found;
-}
 export const FIND_TOOLS = 'find_tools';
 export interface ToolSet {
   /** Every enabled tool: what the digital life may do. */
@@ -59,31 +52,12 @@ export function createTools(config: Config, store: Store, context: () => Thought
       parameters: Type.Object({ id: string('Event ID', 100), index: Type.Optional(Type.Integer({ minimum: 0 })), url: Type.Optional(string('Image URL as it appears in the event', 2000)) }), replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
-        if ((args.index === undefined) === (args.url === undefined)) throw new Error('Specify exactly one of index or url.');
-        const event = store.event(store.resolve(args.id));
-        if (!event) throw new Error('The experience does not exist or has been deleted.');
-        const provided = args.index !== undefined ? plugins.images(event)[args.index] : undefined;
-        if (provided) {
-          const picture = await provided.load(signal);
-          if (!picture) throw new Error(provided.unavailable);
-          ensureCurrent(store, context(), signal);
-          context().sources.add(event.id);
-          provided.onShown?.();
-          return { content: [{ type: 'text', text: provided.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType }], details: {} };
-        }
-        let url: unknown;
-        if (args.url !== undefined) {
-          url = String(args.url).replaceAll('&amp;', '&');
-          if (!urlsIn(event.payload).has(url as string)) throw new Error('That URL does not appear in the event.');
-        } else {
-          const segments = event.payload.message;
-          url = (Array.isArray(segments) ? segments.filter(segment => segment.type === 'image')[args.index] : undefined)?.data?.url;
-          if (typeof url !== 'string') throw new Error('The image does not exist or has no readable URL.');
-        }
-        const result = await fetchImage(url as string, signal);
+        const resolved = runtime.resolveEventImage(args);
+        const picture = await resolved.load(signal);
         ensureCurrent(store, context(), signal);
-        context().sources.add(event.id);
-        return { content: [{ type: 'text', text: `Image ${args.url !== undefined ? url : args.index} from event ${event.id}` }, { type: 'image', data: result.data.toString('base64'), mimeType: result.type }], details: {} };
+        context().sources.add(resolved.event.id);
+        resolved.onShown?.();
+        return { content: [{ type: 'text', text: resolved.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType }], details: {} };
       },
     },
     tool('inspect_actions', 'View recent action outcomes; specify an id to read the full record in chunks.', Type.Object({ id: Type.Optional(string('Action ID', 100)), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), args => {
