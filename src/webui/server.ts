@@ -249,6 +249,7 @@ export class WebUi {
       if (typeof body.content !== 'string' || !body.content.trim()) throw new HttpError(400, 'Correction content is required.');
       return this.control(['memory', 'correct', decodeURIComponent(params[0]!), body.content]);
     });
+    this.on('POST', '/api/memory/:id/retire', ({ params }) => this.control(['memory', 'retire', decodeURIComponent(params[0]!)]));
     this.on('POST', '/api/memory/:id/forget', ({ params, body }) => this.control(['memory', 'forget', decodeURIComponent(params[0]!)], body.yes === true));
 
     this.on('GET', '/api/providers', () => ({ providers: this.providers.list(this.files.raw()) }));

@@ -94,6 +94,20 @@ function Correct({ entry, onClose, onDone }) {
   <//>`;
 }
 
+function Retire({ entry, onClose, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const retire = async () => {
+    setBusy(true);
+    try { await api(`/api/memory/${encodeURIComponent(entry.id)}/retire`, { method: 'POST', body: {} }); toast(t('Retired; history and sources are kept.', '已停用，历史记录与依据均保留。'), 'ok'); onDone(); }
+    catch (error) { failed(error); } finally { setBusy(false); }
+  };
+  return html`<${Modal} title=${`${t('Retire', '停用')}: ${entry.title}`} onClose=${onClose}
+    footer=${html`<button class="ghost" onClick=${onClose}>${t('Cancel', '取消')}</button><button class="primary" disabled=${busy} onClick=${retire}>${t('Retire entry', '确认停用')}</button>`}>
+    <p class="muted small">${t('Retiring removes this entry from active use without deleting its history, sources, or sibling entries. It interrupts the thought under way.', '停用会让该条目退出日常使用，但完整保留历史版本、原始依据及其他关联条目。此操作会中断正在进行的思考。')}</p>
+    <${Markdown} text=${entry.content} />
+  <//>`;
+}
+
 function Forget({ entry, onClose, onDone }) {
   const plan = useAsync(() => api(`/api/memory/${encodeURIComponent(entry.id)}/forget`, { method: 'POST', body: {} }), [entry.id]);
   const [busy, setBusy] = useState(false);
@@ -130,7 +144,7 @@ function Development() {
   const close = () => setDialog(null);
   const done = () => { setDialog(null); list.reload(); };
   return html`<div>
-    <p class="muted">${t('What she has formed herself from experience: habits, practices she has noticed around her, and impressions of people. You can inspect, correct, and forget each one; the persona file still takes precedence.', '她从经历中自己形成的：习惯、她注意到的周围人的惯例、对人的印象。你可以查看、修正或删除每一条；人格文件仍然优先。')}</p>
+    <p class="muted">${t('What she has formed herself from experience: habits, practices she has noticed around her, and impressions of people. You can inspect, correct, retire, and forget each one; the persona file still takes precedence.', '她从经历中自己形成的：习惯、她注意到的周围人的惯例、对人的印象。你可以查看、修正、停用或删除每一条；人格文件仍然优先。')}</p>
     <div class="row wrap filters">
       <${Tabs} value=${kind} onChange=${setKind} tabs=${[['', `${t('All', '全部')} ${entries.length}`], ...['habit', 'practice', 'impression'].map(item => [item, `${kindLabel(item)} ${entries.filter(entry => entry.kind === item).length}`])]} />
       <input type="search" placeholder=${t('Search', '搜索')} value=${query} onInput=${event => setQuery(event.currentTarget.value)} />
@@ -143,11 +157,13 @@ function Development() {
         <span class="spacer"></span>
         <button class="ghost tiny" onClick=${() => setDialog({ type: 'detail', entry })}>${t('Details', '详情')}</button>
         <button class="ghost tiny" onClick=${() => setDialog({ type: 'correct', entry })}>${t('Correct', '修正')}</button>
+        <button class="ghost tiny" onClick=${() => setDialog({ type: 'retire', entry })}>${t('Retire', '停用')}</button>
         <button class="ghost tiny danger" onClick=${() => setDialog({ type: 'forget', entry })}>${t('Forget', '删除')}</button></footer>
     </article>`)}</div>
     ${!shown.length ? html`<p class="muted">${t('Nothing here.', '没有内容。')}</p>` : null}
     ${dialog?.type === 'detail' ? html`<${MemoryDetail} id=${dialog.entry.id} onClose=${close} />` : null}
     ${dialog?.type === 'correct' ? html`<${Correct} entry=${dialog.entry} onClose=${close} onDone=${done} />` : null}
+    ${dialog?.type === 'retire' ? html`<${Retire} entry=${dialog.entry} onClose=${close} onDone=${done} />` : null}
     ${dialog?.type === 'forget' ? html`<${Forget} entry=${dialog.entry} onClose=${close} onDone=${done} />` : null}
   </div>`;
 }

@@ -506,7 +506,7 @@ test('model assignments round-trip through the page with readiness, inheritance 
 }));
 
 test('with no daemon the page refuses control and memory changes instead of opening the life database', () => page(async (call, dir) => {
-  for (const [path, body] of [['/api/control', { args: ['pause'] }], ['/api/memory/m%3A1/forget', { yes: true }], ['/api/memory/m%3A1/correct', { content: 'Corrected' }]] as const) {
+  for (const [path, body] of [['/api/control', { args: ['pause'] }], ['/api/memory/m%3A1/forget', { yes: true }], ['/api/memory/m%3A1/correct', { content: 'Corrected' }], ['/api/memory/m%3A1/retire', {}]] as const) {
     const refused = await call(path, { method: 'POST', body });
     assert.equal(refused.status, 409); assert.match(JSON.stringify(refused.body), /daemon is not running/);
   }

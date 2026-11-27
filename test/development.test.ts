@@ -75,10 +75,21 @@ test('development is bounded per kind and scope for the digital life but not for
     const corrected = handleControl(store, { args: ['memory', 'correct', merged.id, 'w'.repeat(80)] }) as { id: string; scope: string };
     assert.equal(corrected.scope, "conversation:qq:900:group:100");
     assert.throws(() => store.retireMemory(say(store, 7, 'x').id), /Only a current habit/);
-    store.retireMemory(corrected.id);
+    const generationBefore = store.settings().generation;
+    const retired = handleControl(store, { args: ['memory', 'retire', corrected.id] }) as { id: string; active: boolean };
+    assert.deepEqual(retired, { ...store.memory(corrected.id)!, active: false });
+    assert.equal(store.settings().generation, generationBefore + 1);
     assert.deepEqual(store.development(["conversation:qq:900:group:100"]).map(memory => memory.id), [habit.id]);
     assert.equal(store.memory(corrected.id)?.active, false);
     assert.ok(store.logs().some(log => log.kind === 'memory_retired'));
+    // Batch retire validates every ID before writing and retires all atomically without touching sources.
+    const extra = store.writeMemory({ kind: 'impression', title: 'P7', content: 'Likes tea', importance: 5, scope: 'person:qq:user:7', sources: [source.id] }, false, limits);
+    assert.throws(() => handleControl(store, { args: ['memory', 'retire', habit.id, corrected.id] }), /Only a current habit, practice, or impression can be retired/);
+    assert.equal(store.memory(habit.id)?.active, true);
+    const batch = handleControl(store, { args: ['memory', 'retire', habit.id, extra.id] }) as { id: string; active: boolean }[];
+    assert.deepEqual(batch.map(item => [item.id, item.active]), [[habit.id, false], [extra.id, false]]);
+    assert.equal(store.event(source.id)?.id, source.id);
+    assert.equal(store.development(["conversation:qq:900:group:100", 'person:qq:user:7']).length, 0);
   } finally { store.close(); }
 });
 
@@ -596,8 +607,9 @@ test('review waits for a quiet moment and lists the chats it has not read', asyn
     // Checked here rather than in the callback, where the runtime would record a failed assertion as review_stopped and the test would still pass.
     assert.ok(!f.store.logs(50).some(log => log.kind === 'review_stopped'));
     assert.match(review, /memory_maintenance.*apart from your conversations.*schedule it as a commitment.*Unreviewed chat records: \S*group:100: 2 new messages since .*read_chat_record.*person=self/);
-    // What happened comes before form: corrections, unstated outcomes, and one person's ways kept in their impression.
-    assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*leave it unstated.*into your impression of them/);
+    // What happened comes before form: corrections, unstated outcomes, anti-overfitting, and one person's ways kept in their impression.
+    assert.match(review, /asked of you and whether you did it.*corrected, questioned, or contradicted you.*leave it unstated.*Most reviews need no new habit or practice.*into your impression of them/);
+    assert.doesNotMatch(review, /Count your own reactions/);
     // The prompt is the review's instructions: it arrives whole, not cut off with a pointer to read_event.
     assert.match(review, /retire entries that no longer hold\./); assert.doesNotMatch(review, /chars; read_event/);
   } finally { await runtime.stop(); f.store.close(); }

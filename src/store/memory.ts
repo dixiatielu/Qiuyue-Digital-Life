@@ -189,7 +189,8 @@ export class MemoryStore {
   retireMemory(memoryId: string): Memory {
     const memory = this.memory(memoryId);
     if (!memory?.active || !isDevelopment(memory.kind)) throw new Error('Only a current habit, practice, or impression can be retired.');
-    this.host.transaction(() => { this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(memoryId); this.host.log('memory_retired', { id: memoryId, kind: memory.kind, scope: memory.scope }); });
+    const write = () => { this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(memoryId); this.host.log('memory_retired', { id: memoryId, kind: memory.kind, scope: memory.scope }); };
+    if (this.db.isTransaction) write(); else this.host.transaction(write);
     return { ...memory, active: false };
   }
 

@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 import { Store } from './store.js';
 import type { Config } from './config.js';
 import type { LifeRuntime } from './runtime.js';
-import { errorText } from './domain.js';
+import { errorText, isDevelopment } from './domain.js';
 import type { DisplayCursor, Monitor } from './monitor.js';
 
 export interface ControlRequest { args: string[]; yes?: boolean; cursor?: DisplayCursor }
@@ -33,6 +33,20 @@ export function handleControl(store: Store, request: ControlRequest, runtime?: L
     if (sub === 'forget') {
       if (!request.yes) return { affectedIds: store.forgetPlan(memoryId), message: ui('This also deletes the original sources and derived content and may affect other memories, activities, and commitments. Review the affected records, then use --yes to proceed.', '此操作也清除依据的原始来源及其派生内容，可能影响其他记忆、活动和承诺。检查后使用 --yes 执行。') };
       runtime?.abort(); return { forgotten: store.forget(memoryId) };
+    }
+    if (sub === 'retire') {
+      const ids = [...new Set(rest)];
+      for (const id of ids) {
+        const memory = store.memory(id);
+        if (!memory?.active || !isDevelopment(memory.kind)) throw new Error(`Only a current habit, practice, or impression can be retired: ${id}`);
+      }
+      runtime?.abort();
+      const retired = store.transaction(() => {
+        const items = ids.map(id => store.retireMemory(id));
+        store.bumpGeneration();
+        return items;
+      });
+      return ids.length === 1 ? retired[0] : retired;
     }
     if (sub === 'correct') {
       const memory = store.memory(memoryId); if (!memory) throw new Error('Memory does not exist.');
