@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { fauxAssistantMessage as answer, fauxToolCall as call, type Message } from '@earendil-works/pi-ai';
 import { Store } from '../src/store.js';
 import { handleControl } from '../src/control.js';
-import { EmbeddingClient, SemanticRecall, memoryLines, queryText } from '../src/recall.js';
+import { EmbeddingClient, SemanticRecall, adaptiveThreshold, memoryLines, queryText } from '../src/recall.js';
 import { event, fixture } from './helpers.js';
 import { topics, embeddingConfig } from './embedding-helpers.js';
 
@@ -231,5 +231,59 @@ test('what comes to mind is counted once a thought, with how alike it was, and t
     store.forget(song.id);
     assert.equal(store.recalls(song.id), undefined);
     assert.equal(Number(store.db.prepare('SELECT count(*) AS n FROM memory_recalls').get()!.n), 0);
+  } finally { await recall.stop(); store.close(); }
+});
+
+test('adaptive threshold rescues strong low-baseline matches, suppresses high-baseline noise, and caps spontaneous notes', async () => {
+  assert.equal(adaptiveThreshold([0.4, 0.5, 0.6], 0.65), 0.65, 'small corpora use the configured baseline');
+  // Low background (median 0.42, small MAD): adaptive threshold drops to the clamped floor (0.56).
+  const low = adaptiveThreshold([...Array.from({ length: 24 }, (_, i) => 0.40 + (i % 5) * 0.01), 0.59], 0.65);
+  assert.ok(low < 0.60 && low >= 0.56, `expected low adaptive threshold, got ${low}`);
+  // High background (median 0.61, MAD ~0.03): adaptive threshold rises above baseline up to the clamped ceiling (0.68).
+  const high = adaptiveThreshold([...Array.from({ length: 24 }, (_, i) => 0.56 + (i % 5) * 0.025), 0.67], 0.65);
+  assert.ok(high >= 0.67 && high <= 0.681, `expected high adaptive threshold, got ${high}`);
+
+  // Spontaneous recall caps note/fiction to 1 slot so experiences are not crowded out.
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+  const note1 = remember(store, '日记一', '练夜曲副歌又卡壳了', 'note');
+  const note2 = remember(store, '日记二', '今晚继续练夜曲副歌', 'note');
+  const exp = remember(store, '群聊', '群里聊起夜曲怎么唱', 'experience');
+  const recall = new SemanticRecall(embeddingConfig({ limit: 3 }), store, topics());
+  try {
+    recall.start(); await recall.idle();
+    const asked = event(store, '夜曲怎么样了');
+    await recall.idle();
+    const got = recall.recall([asked]).map(item => item.memory.id);
+    assert.equal(got.filter(id => id === note1.id || id === note2.id).length, 1);
+    assert.ok(got.includes(exp.id));
+    // Deliberate search still returns both notes.
+    const searched = (await recall.search('夜曲练习', 8)).map(memory => memory.id);
+    assert.ok(searched.includes(note1.id) && searched.includes(note2.id) && searched.includes(exp.id));
+  } finally { await recall.stop(); store.close(); }
+});
+
+test('quoted messages enrich incoming recall queries, long messages are truncated, and a rejected message does not wipe its batch', async () => {
+  const store = new Store(':memory:'); store.bindPlatformAccount('qq_main', { platform: 'qq', accountId: String(900) });
+  const song = remember(store, '经历', '练夜曲的副歌又破音了，有点烦', 'experience');
+  const embedder = topics('topics', texts => texts.some(text => text.includes('BAD_INPUT')) ? Object.assign(new Error('HTTP 422'), { status: 422 }) : undefined);
+  const recall = new SemanticRecall(embeddingConfig(), store, embedder);
+  try {
+    recall.start(); await recall.idle();
+    const original = store.receive(qqEvent({ key: 'q-orig', kind: 'message', at: Date.now(), text: '那首夜曲怎么样了', groupId: 100, actorId: 7, payload: { message_id: 777, message_type: 'group', message: [{ type: 'text', data: { text: '那首夜曲怎么样了' } }] } }, store))!;
+    const reply = store.receive(qqEvent({ key: 'q-reply', kind: 'message', at: Date.now() + 100, text: '[Quoted message 777]确实', groupId: 100, actorId: 8, payload: { message_id: 778, message_type: 'group', message: [{ type: 'reply', data: { id: '777' } }, { type: 'text', data: { text: '确实' } }] } }, store))!;
+    await recall.idle();
+    assert.ok(original.id);
+    assert.deepEqual(recall.recall([reply]).map(item => item.memory.id), [song.id]);
+    assert.ok(embedder.calls.flat().includes('那首夜曲怎么样了 确实'));
+
+    // One 422-rejected message in a burst is isolated; the sibling message still embeds and recall is not paused.
+    const bad = event(store, 'BAD_INPUT 触发422');
+    const longGood = event(store, `夜曲${'啊'.repeat(1500)}`);
+    await recall.idle();
+    assert.deepEqual(recall.recall([bad]), []);
+    assert.deepEqual(recall.recall([longGood]).map(item => item.memory.id), [song.id]);
+    assert.ok(embedder.calls.flat().some(text => text.startsWith('夜曲') && text.length === 1000));
+    const errs = store.logs(20).filter(log => log.kind === 'recall_error').map(log => log.data as { eventId?: string });
+    assert.ok(errs.some(err => err.eventId === bad.id));
   } finally { await recall.stop(); store.close(); }
 });

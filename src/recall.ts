@@ -7,6 +7,25 @@ export { EmbeddingClient, type Embedder } from './embedding.js';
 
 const BATCH = 10;
 const KEPT_MESSAGES = 2000;
+const MAX_QUERY_CHARS = 1000;
+const MAX_QUOTED_CHARS = 200;
+/** Per-query MAD threshold activates once the recallable corpus is large enough to estimate its background distribution reliably. */
+const ADAPTIVE_MIN_MEMORIES = 20;
+const ADAPTIVE_Z = 2.6;
+const ADAPTIVE_DROP = 0.09;
+const ADAPTIVE_RISE = 0.03;
+const ADAPTIVE_TOP_GAP = 0.09;
+const MAX_SPONTANEOUS_NOTES = 1;
+
+/** Robust per-query similarity threshold clamped around the model's calibrated baseline. */
+export function adaptiveThreshold(similarities: number[], baseline: number): number {
+  if (similarities.length < ADAPTIVE_MIN_MEMORIES) return baseline;
+  const sorted = [...similarities].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)]!;
+  const deviations = sorted.map(value => Math.abs(value - median)).sort((a, b) => a - b);
+  const mad = (deviations[Math.floor(deviations.length / 2)]! * 1.4826) || 0.04;
+  return Math.max(baseline - ADAPTIVE_DROP, Math.min(baseline + ADAPTIVE_RISE, median + ADAPTIVE_Z * mad));
+}
 
 /** A memory's lines: one diary entry often holds several unrelated things. Headers ending in a colon and very short lines say too little alone. Some entries were written with a literal \n for line breaks. */
 export function memoryLines(memory: Pick<Memory, 'content'>): string[] {
@@ -58,10 +77,10 @@ export class SemanticRecall implements SemanticSource {
   async stop() { this.unsubscribe?.(); clearTimeout(this.retry); this.controller.abort(); await Promise.allSettled([this.embedding, this.indexing]); }
   /** Settles once arrived messages and written memories are embedded. */
   async idle() { while (this.embedding || this.indexing) await Promise.allSettled([this.embedding, this.indexing]); }
-  /** The memories the messages of a thought most call to mind: at most embedding.limit, each at least embedding.threshold alike. Revised versions and development never come up this way. */
+  /** The memories the messages of a thought most call to mind: at most embedding.limit, gated by a per-query adaptive MAD threshold around embedding.threshold, capping diary/fiction entries so they do not crowd out experiences. Revised versions and development never come up this way. */
   recall(events: EnvironmentEvent[]): Recollection[] {
     const queries = this.queries(events);
-    return queries.length ? this.closest(queries, this.store.recallableIds(), this.config.embedding.threshold, this.config.embedding.limit) : [];
+    return queries.length ? this.spontaneous(queries, this.store.recallableIds(), this.config.embedding.threshold, this.config.embedding.limit) : [];
   }
   /**
    * A deliberate search: memories alike in meaning, fused by rank with those sharing the query's exact words, such as names and QQ numbers,
@@ -82,6 +101,42 @@ export class SemanticRecall implements SemanticSource {
     const found = new Map<string, Memory & { matchedLine?: string }>([...lexical.map(memory => [memory.id, memory] as const), ...semantic.map(({ memory, line }) => [memory.id, { ...memory, matchedLine: line }] as const)]);
     return [...scores].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([id]) => found.get(id)!);
   }
+  /** Spontaneous recall: per-query adaptive threshold around config.threshold, ranked by margin above that threshold, with at most MAX_SPONTANEOUS_NOTES diary/fiction slots. */
+  private spontaneous(queries: Float32Array[], ids: Set<string>, threshold: number, limit: number): Recollection[] {
+    const candidates: [string, Line[]][] = [];
+    for (const [id, lines] of this.lines) if (ids.has(id)) candidates.push([id, lines]);
+    if (!candidates.length) return [];
+    const adaptive = candidates.length >= ADAPTIVE_MIN_MEMORIES;
+    const picked = new Map<string, { id: string; line: string; similarity: number; margin: number }>();
+    for (const query of queries) {
+      const scored = candidates.map(([id, lines]) => ({ id, ...closestLine([query], lines) }));
+      const dynThreshold = adaptive ? adaptiveThreshold(scored.map(item => item.similarity), threshold) : threshold;
+      let top1 = -1;
+      for (const item of scored) if (item.similarity > top1) top1 = item.similarity;
+      for (const item of scored) {
+        if (item.similarity < dynThreshold) continue;
+        if (adaptive && top1 - item.similarity > ADAPTIVE_TOP_GAP) continue;
+        const margin = item.similarity - dynThreshold;
+        const previous = picked.get(item.id);
+        if (!previous || margin > previous.margin || (margin === previous.margin && item.similarity > previous.similarity)) {
+          picked.set(item.id, { ...item, margin });
+        }
+      }
+    }
+    const ranked = [...picked.values()].sort((a, b) => b.margin - a.margin || b.similarity - a.similarity);
+    const out: Recollection[] = [];
+    let notes = 0;
+    for (const { id, line, similarity } of ranked) {
+      const memory = this.store.memory(id);
+      if (!memory) continue;
+      const isNoteOrFiction = memory.kind === 'note' || memory.kind === 'fiction';
+      if (isNoteOrFiction && notes >= MAX_SPONTANEOUS_NOTES) continue;
+      if (isNoteOrFiction) notes++;
+      out.push({ memory, line, similarity });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
   /** Memories among ids whose closest line is at least threshold alike to any query, most alike first. */
   private closest(queries: Float32Array[], ids: Set<string>, threshold: number, limit: number): Recollection[] {
     const found: { id: string; line: string; similarity: number }[] = [];
@@ -94,13 +149,32 @@ export class SemanticRecall implements SemanticSource {
       const memory = this.store.memory(id); return memory ? [{ memory, line, similarity }] : [];
     });
   }
+  private quotedText(event: EnvironmentEvent, faces: Record<string, string>): string {
+    const conversation = event.source?.conversation;
+    if (!conversation) return '';
+    const fromText = /\[Quoted message (-?\d+)\]/.exec(event.text)?.[1];
+    const fromSegment = Array.isArray(event.payload.message)
+      ? (event.payload.message as { type?: unknown; data?: { id?: unknown } }[]).find(seg => seg?.type === 'reply' && seg.data?.id != null)?.data?.id
+      : undefined;
+    const replyId = fromText ?? (fromSegment !== undefined ? String(fromSegment) : undefined);
+    if (!replyId) return '';
+    const target = this.store.messageById(conversation, replyId);
+    if (!target) return '';
+    const targetFaces = target.text.includes('[face ') && !Object.keys(faces).length ? this.emojiNames() : faces;
+    return queryText(target.text, targetFaces, this.config.embedding.selfNames).slice(0, MAX_QUOTED_CHARS);
+  }
   private observe(event: EnvironmentEvent) {
     if (event.kind !== 'message' || !event.source?.actor || ownEvent(event) || this.messages.has(event.id) || this.waiting.has(event.id) || Date.now() < this.pausedUntil) return;
     const faces = event.text.includes('[face ') ? this.emojiNames() : {};
-    const text = queryText(event.text, faces, this.config.embedding.selfNames);
+    const own = queryText(event.text, faces, this.config.embedding.selfNames);
+    const quoted = own ? this.quotedText(event, faces) : '';
+    const text = (quoted ? `${quoted} ${own}` : own).slice(0, MAX_QUERY_CHARS);
     if ([...text].length < 2) return;
     this.waiting.set(event.id, text);
     this.drain();
+  }
+  private trimMessages() {
+    for (const id of this.messages.keys()) { if (this.messages.size <= KEPT_MESSAGES) break; this.messages.delete(id); }
   }
   private drain() {
     this.embedding ??= this.embedWaiting().finally(() => { this.embedding = undefined; if (this.waiting.size) this.drain(); });
@@ -108,12 +182,32 @@ export class SemanticRecall implements SemanticSource {
   private async embedWaiting() {
     while (this.waiting.size && !this.controller.signal.aborted) {
       const batch = [...this.waiting].slice(0, BATCH);
+      for (const [id] of batch) this.waiting.delete(id);
       try {
         const vectors = await this.embedder.embed(batch.map(([, text]) => text), this.controller.signal);
         batch.forEach(([id], index) => this.messages.set(id, unit(vectors[index]!)));
-        for (const id of this.messages.keys()) { if (this.messages.size <= KEPT_MESSAGES) break; this.messages.delete(id); }
-      } catch (error) { this.waiting.clear(); this.fail(error, { stage: 'message' }); return; }
-      finally { for (const [id] of batch) this.waiting.delete(id); }
+        this.trimMessages();
+      } catch (error) {
+        if (this.rejects(error)) {
+          if (batch.length > 1) {
+            for (const [id, text] of batch) {
+              if (this.controller.signal.aborted) return;
+              try {
+                const [vector] = await this.embedder.embed([text], this.controller.signal);
+                this.messages.set(id, unit(vector!));
+                this.trimMessages();
+              } catch (itemError) {
+                if (this.rejects(itemError)) { this.store.log('recall_error', { stage: 'message', eventId: id, message: errorText(itemError) }); continue; }
+                this.waiting.clear(); this.fail(itemError, { stage: 'message' }); return;
+              }
+            }
+          } else {
+            this.store.log('recall_error', { stage: 'message', eventId: batch[0]![0], message: errorText(error) });
+          }
+          continue;
+        }
+        this.waiting.clear(); this.fail(error, { stage: 'message' }); return;
+      }
     }
   }
   private index() {
