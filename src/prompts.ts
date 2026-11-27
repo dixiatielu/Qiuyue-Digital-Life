@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
-import type { Config } from './config.js';
-import type { ActivityPrompt } from './plugins.js';
+import type { UserActivity } from './plugin-sdk.js';
+
+export interface PromptConfig {
+  persona: string;
+  life: { allowFiction: boolean };
+  systemPrompt?: string;
+}
+export interface ActivityPrompt extends UserActivity { plugin: string; instructions: string }
 
 export const builtinSystemPrompt = readFileSync(new URL('./prompts/system.md', import.meta.url), 'utf8');
 // Separates operator instructions from generated runtime state.
@@ -17,7 +23,7 @@ function onDemand(tools: readonly { name: string; summary: string }[]) {
   return tools.length ? `\n\nTools loaded on demand. These are yours to use like any other, but their parameters are declared only once you ask: call find_tools with the names you want, several at once, and they are callable from your next step and stay available. A call to one you have not loaded fails as not found, and loads it for the step after.\n${tools.map(tool => `- ${tool.name}: ${tool.summary}`).join('\n')}` : '';
 }
 
-export function systemInstructions(config: Pick<Config, 'persona' | 'life' | 'systemPrompt'>, activities: readonly ActivityPrompt[] = [], deferred: readonly { name: string; summary: string }[] = []): string {
+export function systemInstructions(config: PromptConfig, activities: readonly ActivityPrompt[] = [], deferred: readonly { name: string; summary: string }[] = []): string {
   const template = (config.systemPrompt ?? builtinSystemPrompt).trimEnd();
   const prompt = template.replace(currentContext, '');
   const base = prompt

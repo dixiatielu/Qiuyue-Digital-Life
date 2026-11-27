@@ -295,3 +295,149 @@ test('a configured account that cannot connect stops startup, while an optional 
     assert.deepEqual(left, ['optional']); assert.deepEqual(optional.installed().map(plugin => plugin.id), []);
   } finally { store.close(); }
 });
+
+test('Telegram social actions end a thought only on success, skip stale sends, and validate operation lists', async () => {
+  const { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } = await import('@earendil-works/pi-ai');
+  const { PiBrain } = await import('../src/brain.js');
+  const { createTools: createAllTools } = await import('../src/tools.js');
+  const store = new Store(':memory:');
+  try {
+    assert.throws(() => nativeAdapterPlugin({
+      instance: 'bad_adapter', platform: 'example', accountId: '1', version: 'v1',
+      actions: [{ name: 'sendMessage', inputSchema: { type: 'object' }, readOnly: false }],
+      staleActions: ['unknownOp'],
+      execute: async () => ({}),
+    }, store), /staleActions must list operations/);
+    assert.throws(() => nativeAdapterPlugin({
+      instance: 'bad_adapter', platform: 'example', accountId: '1', version: 'v1',
+      actions: [{ name: 'sendMessage', inputSchema: { type: 'object' }, readOnly: false }],
+      endsThoughtActions: ['unknownOp'],
+      execute: async () => ({}),
+    }, store), /endsThoughtActions must list operations/);
+
+    let failNext: 'failed' | 'unknown' | false = false;
+    let firstSendStarted!: () => void;
+    const started = new Promise<void>(resolve => { firstSendStarted = resolve; });
+    let releaseFirstSend!: () => void;
+    const hold = new Promise<void>(resolve => { releaseFirstSend = resolve; });
+    let sendCalls = 0;
+
+    const tgScoped = tg({ tools: { allow: ['sendMessage', 'setMessageReaction'], deny: [] } });
+    const adapter = telegramAdapter(tgScoped, () => '900:test', (async (url, init) => {
+      const op = String(url).split('/').at(-1);
+      if (op === 'getMe') return response({ id: 900, username: 'qiuyue_bot' });
+      if (op === 'getWebhookInfo') return response({ url: '' });
+      if (op === 'sendMessage') {
+        sendCalls++;
+        const body = JSON.parse(String(init?.body));
+        if (body.text === 'hold') { firstSendStarted(); await hold; }
+        if (failNext === 'failed') {
+          failNext = false;
+          return new Response(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request' }), { status: 400, headers: { 'content-type': 'application/json' } });
+        }
+        if (failNext === 'unknown') {
+          failNext = false;
+          throw new Error('socket hang up');
+        }
+        return response({ message_id: 100 + sendCalls, chat: { id: 7, type: 'private' } });
+      }
+      return response({});
+    }) as typeof fetch);
+
+    const cfg = config(); cfg.adapters = [tgScoped];
+    const host = new PluginHost([nativeAdapterPlugin(adapter, store)]);
+    await host.start();
+    const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
+    let brain!: InstanceType<typeof PiBrain>;
+    const tools = createAllTools(cfg, store, () => brain.thought, undefined, host);
+    brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: (m, c, o) => models.streamSimple(m, c, { ...o, cacheRetention: 'none' }) });
+
+    // 1. A successful Telegram sendMessage ends the thought in one model call (no extra follow-up turn).
+    store.receive({ key: 'tg:1', kind: 'message', at: Date.now(), text: 'Hi', payload: { update_id: 1 }, source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: 'telegram:900:private:7', conversationType: 'private', actor: 'telegram:user:7', own: false, addressed: true, attention: 'normal' } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall('tg_main__sendMessage', { chat_id: 7, text: 'Hello!' })]),
+      fauxAssistantMessage('Should not be called'),
+    ]);
+    await brain.run(store.claim(10)!);
+    assert.equal(faux.state.callCount, 1);
+
+    // 2. A failed or unknown Telegram sendMessage does NOT end the thought, so the model sees the outcome and decides again (ADR-0008).
+    for (const mode of ['failed', 'unknown'] as const) {
+      const beforeCalls: number = faux.state.callCount;
+      failNext = mode;
+      store.receive({ key: `tg:${mode}`, kind: 'message', at: Date.now() + 1, text: `Try ${mode}`, payload: { update_id: mode === 'failed' ? 2 : 3 }, source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: 'telegram:900:private:7', conversationType: 'private', actor: 'telegram:user:7', own: false, addressed: true, attention: 'normal' } });
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall('tg_main__sendMessage', { chat_id: 7, text: `Will ${mode}` })]),
+        fauxAssistantMessage(`Observed ${mode} outcome`),
+      ]);
+      await brain.run(store.claim(10)!);
+      assert.equal(faux.state.callCount, beforeCalls + 2);
+    }
+
+    // 3. While the first send runs, a newer addressed Telegram message marks the second send stale and skips it.
+    store.receive({ key: 'tg:4', kind: 'message', at: Date.now() + 2, text: 'Wait', payload: { update_id: 4 }, source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: 'telegram:900:private:7', conversationType: 'private', actor: 'telegram:user:7', own: false, addressed: true, attention: 'normal' } });
+    faux.setResponses([
+      fauxAssistantMessage([
+        fauxToolCall('tg_main__sendMessage', { chat_id: 7, text: 'hold' }),
+        fauxToolCall('tg_main__sendMessage', { chat_id: 7, text: 'stale-second' }),
+      ]),
+      fauxAssistantMessage('Decided again after newer message'),
+    ]);
+    const running = brain.run(store.claim(10)!);
+    await started;
+    const newer = store.receive({ key: 'tg:5', kind: 'message', at: Date.now() + 3, text: 'Actually never mind', payload: { update_id: 5 }, source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: 'telegram:900:private:7', conversationType: 'private', actor: 'telegram:user:7', own: false, addressed: true, attention: 'normal' } })!;
+    assert.equal(await brain.steer({ batchId: 'b:steer', events: [newer] }), true);
+    releaseFirstSend();
+    await running;
+    assert.equal(store.actions().some(action => action.args.text === 'stale-second'), false);
+    await host.stop();
+  } finally { store.close(); }
+});
+
+test('drawing:<uuid> resolves to a Telegram multipart upload and records gallery usage without counting text mentions', async () => {
+  const { DrawingLibrary } = await import('../src/plugins/gallery-store.js');
+  const { galleryPlugin } = await import('../src/plugins/gallery.js');
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-tg-drawing-'));
+  const store = new Store(':memory:');
+  const cfg = config(); cfg.adapters = [tg()]; cfg.drawing.dir = dir;
+  const library = new DrawingLibrary(store.db, dir);
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+  const drawingId = `drawing:${crypto.randomUUID()}`;
+  let uploadForm: FormData | undefined;
+  let textBody: Record<string, unknown> | undefined;
+  const adapter = telegramAdapter(tg(), () => '900:test', (async (url, init) => {
+    const op = String(url).split('/').at(-1);
+    if (op === 'getMe') return response({ id: 900, username: 'qiuyue_bot' });
+    if (op === 'getWebhookInfo') return response({ url: '' });
+    if (op === 'sendPhoto') {
+      uploadForm = init?.body as FormData;
+      return response({ message_id: 77, chat: { id: -100123, type: 'supergroup' } });
+    }
+    if (op === 'sendMessage') {
+      textBody = JSON.parse(String(init?.body));
+      return response({ message_id: 78, chat: { id: -100123, type: 'supergroup' } });
+    }
+    return response({});
+  }) as typeof fetch);
+  const host = new PluginHost([galleryPlugin(cfg, store), nativeAdapterPlugin(adapter, store)]);
+  try {
+    await library.save(drawingId, png, 'png', { prompt: 'starry sky', model: 'test', createdAt: Date.now(), sources: [] });
+    const h = bind(store, host);
+    await host.start();
+    const sent = await h.run('tg_main__sendPhoto', { chat_id: -100123, photo: drawingId, caption: 'Look!' });
+    assert.equal(sent.outcome.status, 'success');
+    // Persisted action keeps the compact permanent ID; outbound request carries multipart upload bytes.
+    assert.equal(store.actionById(sent.outcome.id)!.args.photo, drawingId);
+    assert.ok(uploadForm instanceof FormData);
+    assert.equal(uploadForm.get('photo'), 'attach://upload_0');
+    const uploaded = uploadForm.get('upload_0') as File;
+    assert.equal(uploaded.name, `${drawingId.slice('drawing:'.length)}.png`);
+    assert.deepEqual(Buffer.from(await uploaded.arrayBuffer()), png);
+    // Mentioning the ID inside text leaves the text intact and does not count as sharing the picture.
+    await h.run('tg_main__sendMessage', { chat_id: -100123, text: `I drew ${drawingId}` });
+    assert.equal(textBody?.text, `I drew ${drawingId}`);
+    const uses = library.detail(drawingId)!.uses;
+    assert.equal(uses.length, 1);
+    assert.equal(uses[0]!.kind, 'tg_main__sendPhoto');
+  } finally { await host.stop(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+});

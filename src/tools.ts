@@ -7,7 +7,6 @@ import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
 import type { SemanticRecall } from './recall.js';
 import { PluginHost, type PluginTool } from './plugins.js';
-import { createPlugins } from './plugins/index.js';
 import { ensureCurrent, jsonResult, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
 import { validatedMemoryTool } from './memory-tool.js';
 import { loadsToolsOnDemand, type ModelOwner } from './model.js';
@@ -40,7 +39,7 @@ export function forReview(tools: ToolSet): ToolSet {
   return tools.only(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name), 'review');
 }
 
-export function createTools(config: Config, store: Store, context: () => ThoughtContext, recall?: SemanticRecall, plugins = createPlugins(config, store, recall)): ToolSet {
+export function createTools(config: Config, store: Store, context: () => ThoughtContext, recall?: SemanticRecall, plugins: PluginHost = new PluginHost([])): ToolSet {
   /** What bounds her own writes; operator corrections pass none. */
   const limits = { ...config.development, experienceChars: config.memory.experienceChars };
   const runtime = new ToolRuntime(config, store, context, plugins);

@@ -1,7 +1,7 @@
 import { parseConversationRef, parsePersonRef } from '../identity.js';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { alive } from './daemon.js';
+import { alive } from './process.js';
 import type { Memory } from '../domain.js';
 import { developmentKinds } from '../domain.js';
 import { DrawingLibrary, type DrawingQuery } from '../plugins/gallery-store.js';

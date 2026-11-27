@@ -32,13 +32,13 @@ export function handleControl(store: Store, request: ControlRequest, runtime?: L
     if (sub === 'show') return store.memory(memoryId) ?? store.event(memoryId) ?? null;
     if (sub === 'forget') {
       if (!request.yes) return { affectedIds: store.forgetPlan(memoryId), message: ui('This also deletes the original sources and derived content and may affect other memories, activities, and commitments. Review the affected records, then use --yes to proceed.', '此操作也清除依据的原始来源及其派生内容，可能影响其他记忆、活动和承诺。检查后使用 --yes 执行。') };
-      runtime?.brain.abort(); return { forgotten: store.forget(memoryId) };
+      runtime?.abort(); return { forgotten: store.forget(memoryId) };
     }
     if (sub === 'correct') {
       const memory = store.memory(memoryId); if (!memory) throw new Error('Memory does not exist.');
       const content = rest.slice(1).join(' '); if (!content) throw new Error('Correction content is required.');
       if ([...content].length > 12000 || !memory.active) throw new Error('Correction content is too long, or the record is not the current version.');
-      runtime?.brain.abort();
+      runtime?.abort();
       const source = store.receive({ key: `correction:${crypto.randomUUID()}`, kind: 'operator_correction', at: Date.now(), text: content, payload: { supersedes: memory.id } }, true)!;
       const reach = store.revisionReach(memory.id);
       const corrected = store.writeMemory({ ...memory, content, sources: [source.id], supersedes: memory.id }, true);

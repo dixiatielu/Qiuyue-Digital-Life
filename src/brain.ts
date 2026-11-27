@@ -1,15 +1,13 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
-import { createModelBackend, effectiveThinkingLevel, modelBudget, modelRoute, modelUse, shouldMergeConsecutiveUsers, type ModelOwner } from './model.js';
-import { GEMINI_INTERACTIONS } from './gemini-interactions.js';
+import { createModelBackend, initialThinkingLevel, modelBudget, modelRoute, modelUse, shouldMergeConsecutiveUsers, withToolLoader, type ModelOwner } from './model.js';
 import { createInitialSystemMessage, getCurrentTools, isContextOverflow, isRecoverableLength, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
 import type { EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
 import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
-import { Store, digest, eventRef } from './store.js';
-import { fetchImage } from './web.js';
+import { Store, digest } from './store.js';
 import { normalizeImageBlocks, prepareModelImage } from './image.js';
 import { ensureCurrent, FIND_TOOLS, type ThoughtContext, type ToolSet } from './tools.js';
 import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldNoopCalls, foldReplies, foldToolResults, IMAGE_TOKENS, portableMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
@@ -132,22 +130,15 @@ export class PiBrain implements Brain {
   constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential, private owner: ModelOwner = 'main', compactionBackend?: { model: Model<any>; stream: StreamFn }) {
     const use = modelUse(config, owner);
     const { model, stream: transport } = backend ?? createModelBackend(use.thinking, credential);
-    // A transport of our own must be told which tool loads the others; Pi's render a transcript's tool additions themselves (ADR-0023).
-    const loading = (send: StreamFn): StreamFn => !tools.loading.enabled ? send : (target, context, options) => target.api === GEMINI_INTERACTIONS ? send(target, context, { ...options, toolLoader: FIND_TOOLS } as typeof options) : send(target, context, options);
+    // Transports that load tools dynamically are told which tool loads the others (ADR-0023).
+    const loading = (send: StreamFn): StreamFn => tools.loading.enabled ? withToolLoader(send, FIND_TOOLS) : send;
     const stream = loading(transport);
     this.stream = stream;
     const summary = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential, { requireVision: false }) : undefined);
     this.summaryBackend = summary && { model: summary.model, stream: loading(summary.stream) };
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
-    const requestedThinking = use.thinking.thinkingLevel ?? 'off';
-    const initialThinking = model.reasoning
-      ? (requestedThinking !== 'off'
-          ? effectiveThinkingLevel(model, requestedThinking)
-          : model.api === 'anthropic-messages' && model.thinkingLevelMap?.off === null
-            ? effectiveThinkingLevel(model, 'off')
-            : 'off')
-      : requestedThinking;
+    const initialThinking = initialThinkingLevel(model, use.thinking.thinkingLevel ?? 'off');
     const mergeUsers = shouldMergeConsecutiveUsers(use.thinking, model);
     this.agent = new Agent({
       initialState: { model, systemPrompt: this.instructions(), tools: tools.declared(), thinkingLevel: initialThinking },
@@ -386,14 +377,7 @@ export class PiBrain implements Brain {
     );
     const sameRoute = this.route(model) === this.route(ownerModel);
     const compactionMergeUsers = shouldMergeConsecutiveUsers(use.compaction, model);
-    const requestedCompactionLevel = use.compactionThinkingLevel;
-    const effectiveCompactionLevel = model.reasoning
-      ? (requestedCompactionLevel !== 'off'
-          ? effectiveThinkingLevel(model, requestedCompactionLevel)
-          : model.api === 'anthropic-messages' && model.thinkingLevelMap?.off === null
-            ? effectiveThinkingLevel(model, 'off')
-            : 'off')
-      : requestedCompactionLevel;
+    const effectiveCompactionLevel = initialThinkingLevel(model, use.compactionThinkingLevel);
     const replacement = (text: string) => {
       const summary: Message = { role: 'user', content: framing + text + references, timestamp: Date.now() };
       const compacted = [system, ...pinned, summary, ...kept];
@@ -552,7 +536,12 @@ export class PiBrain implements Brain {
     let count = 0;
     const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.contextTokens * 0.4;
     // Plugin-produced pictures are seen before incoming chat images, within the same context budget.
-    for (const event of observation.events) for (const image of this.tools.plugins.images(event).filter(image => image.autoView)) {
+    const eventImages = observation.events.flatMap(event => this.tools.plugins.images(event).filter(image => image.autoView));
+    const orderedImages = [
+      ...eventImages.filter(image => (image.priority ?? 'primary') !== 'message'),
+      ...eventImages.filter(image => image.priority === 'message'),
+    ];
+    for (const image of orderedImages) {
       if (!fits()) { content.push({ type: 'text', text: image.deferred }); continue; }
       let picture;
       try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
@@ -560,24 +549,6 @@ export class PiBrain implements Brain {
       const prepared = await prepareModelImage(picture.data, picture.mimeType, this.agent.state.model);
       content.push({ type: 'text', text: image.label }, { type: 'image', data: prepared.data.toString('base64'), mimeType: prepared.mimeType });
       image.onShown?.();
-    }
-    for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
-      const ref = eventRef(event.id);
-      const saved = this.tools.plugins.imageCaption(segment.data ?? {});
-      const url = segment.data?.url;
-      // A line leaves the URL out, so saving the image as a sticker or sending it on takes it from its label.
-      const from = typeof url === 'string' ? `; url: ${url}` : '';
-      if (!fits()) {
-        content.push({ type: 'text', text: `Image ${index} from ${ref}${saved} was not loaded due to the context limit; use view_event_image to view it${from}` }); continue;
-      }
-      // As with plugin pictures, an image that could not be shown gives its place to the next.
-      if (typeof url !== 'string') { count--; content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} has no readable URL; the original event is retained.` }); continue; }
-      try {
-        const image = await fetchImage(url, this.controller.signal);
-        const prepared = await prepareModelImage(image.data, image.type, this.agent.state.model);
-        // The label outlives the image, which is folded when the thought ends.
-        content.push({ type: 'text', text: `The following is image ${index} from ${ref}${saved}${from}` }, { type: 'image', data: prepared.data.toString('base64'), mimeType: prepared.mimeType });
-      } catch { count--; content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} could not be read${from}` }); }
     }
     // Supplementary plugin pictures follow the images in the chat and use the same budget.
     for (const image of this.tools.plugins.supplementalImages(observation.events, this.thought)) {

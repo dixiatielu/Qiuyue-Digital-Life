@@ -13,7 +13,7 @@ export function scopePlugin(plugin: LifePlugin, instance: string, actions: reado
   const scoped: LifePlugin = {
     ...plugin,
     ...(plugin.observation ? { observation: (events, thought) => plugin.observation!(events.filter(matches), thought).map(instructions) } : {}),
-    ...(plugin.images ? { images: event => matches(event) ? plugin.images!(event) : [] } : {}),
+    ...(plugin.images ? { images: (event, helpers) => matches(event) ? plugin.images!(event, helpers) : [] } : {}),
     ...(plugin.supplementalImages ? { supplementalImages: (events, thought) => plugin.supplementalImages!(events.filter(matches), thought) } : {}),
     ...(plugin.imageViewer ? { imageViewer: label => { const name = plugin.imageViewer!(label); return name ? qualify(name) : undefined; } } : {}),
     // The program's own events, such as a rest backlog, belong to no account; the faces in their records still need names.
@@ -27,6 +27,7 @@ export function scopePlugin(plugin: LifePlugin, instance: string, actions: reado
       definition: (name: string) => { const raw = local(name); return raw ? plugin.nativeActions!.definition(raw) : undefined; },
       allowed: (name: string) => { const raw = local(name); return !!raw && plugin.nativeActions!.allowed(raw); },
       execute: (name: string, args: Record<string, unknown>, signal?: AbortSignal) => adapter.execute(local(name)!, args, signal),
+      ...(plugin.nativeActions.encodeMedia ? { encodeMedia: (name: string, media: import('../plugins.js').ResolvedMedia) => { const raw = local(name); return raw ? plugin.nativeActions!.encodeMedia!(raw, media) : undefined; } } : {}),
     } } : {}),
     reviewTools: plugin.reviewTools?.map(qualify),
     chatActions: plugin.chatActions?.map(qualify),

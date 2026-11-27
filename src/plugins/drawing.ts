@@ -7,7 +7,7 @@ import { eventRef, type Store } from '../store.js';
 import type { LifePlugin } from '../plugins.js';
 import type { ToolRuntime } from '../tool-runtime.js';
 import { ui } from '../ui-language.js';
-import { DrawingLibrary, drawingIdPattern, type DrawingReference, type DrawingSource } from './gallery-store.js';
+import { DrawingLibrary, drawingIdPattern, resolveDrawingMedia, type DrawingReference, type DrawingSource } from './gallery-store.js';
 
 export const MAX_REFERENCE_IMAGES = 5;
 export interface ReferenceImageData { data: Buffer; mimeType: string; filename?: string }
@@ -192,6 +192,7 @@ export class Drawings {
     });
   }
   image(id: string) { return this.library.image(id); }
+  media(id: string) { return this.library.media(id); }
   markSeen(id: string) { this.library.markSeen(id); }
   async stop() { this.stopping = true; for (const controller of this.running.values()) controller.abort(); await Promise.allSettled(this.work); }
   async idle() { await Promise.allSettled(this.work); }
@@ -274,12 +275,7 @@ export function drawingPlugin(drawings: Drawings, enabled: () => boolean = () =>
       const id = String(event.payload.drawingId); const ref = eventRef(event.id);
       return [{ label: `The following is your generated image ${id} from ${ref}`, unavailable: `There is no picture, or its file has been removed: ${id}.`, deferred: `Your generated image ${id} from ${ref} was not loaded due to the context limit; use view_event_image with index 0 to view it.`, autoView: event.payload.error === undefined, load: () => drawings.image(id), onShown: () => drawings.markSeen(id) }];
     },
-    resolveMedia: value => {
-      if (!drawingIdPattern.test(value)) return;
-      const picture = drawings.image(value);
-      if (!picture) throw new Error(`Image ${value} does not exist or has been removed.`);
-      return `base64://${picture.data.toString('base64')}`;
-    },
+    resolveMedia: value => resolveDrawingMedia(drawings, value),
     start: () => drawings.recover(), stop: () => drawings.stop(), idle: () => drawings.idle(),
   };
 }

@@ -29,8 +29,14 @@ import {
 } from '@earendil-works/pi-ai/providers/compat-schema';
 import { Type, type TObject } from 'typebox';
 import { Check } from 'typebox/value';
-import type { Config } from './config.js';
 import { summaryEnvelope } from './context.js';
+
+export interface ModelSystemConfig {
+  model: ModelConfig;
+  review?: { model?: ModelConfig; limits?: { contextTokens?: number; outputReserveTokens?: number } };
+  limits: { contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
+  compaction: { model?: ModelConfig; contextTokens?: number; summaryMaxTokens: number };
+}
 
 const emptyCompatSchema = Type.Object({});
 const apis = {
@@ -159,6 +165,23 @@ export function effectiveThinkingLevel(model: Model<Api>, requested: ModelThinki
   return clampThinkingLevel(model, requested);
 }
 
+/** Initial Agent thinking level for a model, handling providers where `off` must clamp to a minimum level. */
+export function initialThinkingLevel(model: Model<Api>, requested: ModelThinkingLevel = 'off'): ModelThinkingLevel {
+  if (!model.reasoning) return requested;
+  if (requested !== 'off') return effectiveThinkingLevel(model, requested);
+  return model.api === 'anthropic-messages' && model.thinkingLevelMap?.off === null
+    ? effectiveThinkingLevel(model, 'off')
+    : 'off';
+}
+
+/** Attach the tool-loader name for transports that require it (such as Gemini Interactions API, ADR-0023). */
+export function withToolLoader<S extends (target: Model<any>, context: any, options?: any) => any>(send: S, toolLoader?: string): S {
+  if (!toolLoader) return send;
+  return ((target, context, options) => target.api === GEMINI_INTERACTIONS
+    ? send(target, context, { ...options, toolLoader })
+    : send(target, context, options)) as S;
+}
+
 /** Whether consecutive user turns should be merged on the wire for this model. */
 export function shouldMergeConsecutiveUsers(config: ModelConfig, model: Model<Api>): boolean {
   if (config.mergeConsecutiveUsers !== undefined) return config.mergeConsecutiveUsers;
@@ -167,7 +190,7 @@ export function shouldMergeConsecutiveUsers(config: ModelConfig, model: Model<Ap
 }
 
 /** Whole-model inheritance and context policies, shared by the brains and management interfaces. */
-export function modelUse(config: Config, owner: ModelOwner) {
+export function modelUse<T extends ModelSystemConfig>(config: T, owner: ModelOwner) {
   const thinkingSource: ModelPath = owner === 'review' && config.review?.model ? 'review.model' : 'model';
   const thinking = thinkingSource === 'review.model' ? config.review!.model! : config.model;
   const limits = { ...config.limits, ...(owner === 'review' ? config.review?.limits : {}) };
@@ -204,7 +227,7 @@ export function addsToolsInPlace(model: Model<Api>): boolean {
  * avoids tool bloat and schema-count caps (ADR-0023). Operators can opt into `in-place-only` or `never`.
  * False when the model cannot be resolved; starting with it fails elsewhere, with the reason.
  */
-export function loadsToolsOnDemand(config: Config, owner: ModelOwner): boolean {
+export function loadsToolsOnDemand(config: ModelSystemConfig, owner: ModelOwner): boolean {
   const selected = modelUse(config, owner).thinking;
   const mode = selected.deferredTools ?? 'auto';
   if (mode === 'never') return false;
@@ -226,7 +249,7 @@ export function atModelPath<T>(path: ModelPath, work: () => T): T {
   }
 }
 
-export function independentModelUses(config: Config) {
+export function independentModelUses(config: ModelSystemConfig) {
   return Boolean(config.review?.model || Object.keys(config.review?.limits ?? {}).length || config.compaction.model || config.compaction.contextTokens !== undefined);
 }
 
@@ -248,7 +271,7 @@ export interface ModelUseSummary {
 }
 
 /** Offline model/capability/budget checks; an optional reader adds credential readiness without disclosing values. */
-export function modelReadiness(config: Config, credential?: CredentialReader) {
+export function modelReadiness(config: ModelSystemConfig, credential?: CredentialReader) {
   const problems: string[] = [];
   const warnings: string[] = [];
   const uses: ModelUseSummary[] = [];

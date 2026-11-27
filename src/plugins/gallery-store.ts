@@ -93,6 +93,14 @@ export class DrawingLibrary {
     }
     return this.original(id, item.extension);
   }
+  /** Full media descriptor (bytes, MIME type, on-disk path and filename) for cross-platform adapter encoding. */
+  media(id: string): { data: Buffer; mimeType: string; path: string; filename: string } | undefined {
+    const item = this.get(id);
+    if (!item || item.deletedAt) return;
+    const picture = this.original(id, item.extension);
+    if (!picture) return;
+    return { ...picture, path: this.file(id, item.extension), filename: `${id.slice('drawing:'.length)}.${item.extension}` };
+  }
   /** Recover only a tracked generation interrupted between committing its file and catalog entry. */
   async recoverGeneration(id: string, info: Parameters<DrawingLibrary['save']>[3]) {
     if (this.get(id)) return;
@@ -172,9 +180,10 @@ export class DrawingLibrary {
   /** Where each of these pictures was sent, found in one pass over the actions rather than one pass per picture. */
   private usages(ids: string[]) {
     const found = new Map<string, { id: string; kind: string; status: string; at: number; target: string }[]>(ids.map(id => [id, []]));
+    const mediaFields = new Set(['file', 'images', 'photo', 'document', 'sticker', 'animation', 'media', 'thumbnail']);
     // Inspect only media fields, so mentioning an ID in a text message is not counted as sharing the picture.
     const media = (value: any, key: string, into: Set<string>): void => {
-      if (typeof value === 'string') { if (['file', 'images'].includes(key) && found.has(value)) into.add(value); }
+      if (typeof value === 'string') { if (mediaFields.has(key) && found.has(value)) into.add(value); }
       else if (Array.isArray(value)) for (const item of value) media(item, key, into);
       else if (value && typeof value === 'object') for (const [name, child] of Object.entries(value)) media(child, name, into);
     };
@@ -245,4 +254,12 @@ export class DrawingLibrary {
     }
     return scores;
   }
+}
+
+/** Shared resolver for drawing:<uuid> references across drawing and gallery plugins. */
+export function resolveDrawingMedia(library: Pick<DrawingLibrary, 'media'>, value: string) {
+  if (!drawingIdPattern.test(value)) return;
+  const asset = library.media(value);
+  if (!asset) throw new Error(`Image ${value} does not exist or has been removed.`);
+  return asset;
 }

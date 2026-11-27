@@ -40,8 +40,15 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
     schemas.set(name, sanitizeToolSchema(compactSchema(action.inputSchema) as TSchema));
   }
   for (const name of [...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny]) if (!actions.has(nativeToolName(adapter.instance, name))) throw new Error(`Unknown native interface: ${name}`);
-  if (adapter.frequent !== undefined && (!Array.isArray(adapter.frequent) || adapter.frequent.some(name => typeof name !== 'string' || !actions.has(nativeToolName(adapter.instance, name))))) throw new Error('frequent must list operations of this adapter.');
-  const frequent = adapter.frequent && new Set(adapter.frequent);
+  const operationSet = (field: string, list: string[] | undefined) => {
+    if (list !== undefined && (!Array.isArray(list) || list.some(name => typeof name !== 'string' || !actions.has(nativeToolName(adapter.instance, name))))) {
+      throw new Error(`${field} must list operations of this adapter.`);
+    }
+    return list ? new Set(list) : undefined;
+  };
+  const frequent = operationSet('frequent', adapter.frequent);
+  const stale = operationSet('staleActions', adapter.staleActions);
+  const ending = operationSet('endsThoughtActions', adapter.endsThoughtActions);
   const controller = new AbortController();
   let active = false;
   const allowed = (name: string) => !!actions.get(name) && permits(permissions, actions.get(name)!.name);
@@ -61,19 +68,40 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
   const stop = () => stopped ??= (async () => { active = false; controller.abort(); await adapter.stop?.(); })();
   return {
     id: `adapter-${adapter.instance.replaceAll('_', '-')}`, contextVersion: adapter.version,
-    nativeActions: { accounts: [identity], instances: [{ instance: adapter.instance, ...identity }], definition: name => actions.get(name), allowed, execute },
+    nativeActions: {
+      accounts: [identity],
+      instances: [{ instance: adapter.instance, ...identity }],
+      definition: name => actions.get(name),
+      allowed,
+      execute,
+      ...(adapter.encodeMedia ? { encodeMedia: (_name, media) => adapter.encodeMedia!(media) } : {}),
+    },
     reviewTools: [...actions].filter(([, action]) => action.readOnly).map(([name]) => name),
     chatActions: [...actions].filter(([, action]) => !action.readOnly).map(([name]) => name),
+    ...(stale ? { staleActions: [...actions].filter(([, action]) => stale.has(action.name)).map(([name]) => name) } : {}),
     chatTarget,
+    ...(ending ? {
+      endsThought: (tool, details) => {
+        const action = actions.get(tool);
+        if (!action || !ending.has(action.name)) return false;
+        const status = (details as { outcome?: string } | undefined)?.outcome;
+        return status === undefined || status === 'success';
+      },
+    } : {}),
     images: event => event.source?.platform === adapter.platform && event.source.accountId === adapter.accountId ? (adapter.images?.(event) ?? []).map(image => ({
+      priority: 'message' as const,
       label: image.label, autoView: image.autoView ?? true, unavailable: 'This platform image is unavailable; its appearance has not been perceived.', deferred: `Use view_event_image with event ${event.id} and its image index to see it.`,
       load: async signal => { if (!active) throw new Error('Adapter is inactive.'); const loaded = await image.load(AbortSignal.any([controller.signal, ...(signal ? [signal] : [])])); return { ...loaded, data: Buffer.from(loaded.data) }; },
     })) : [],
     tools: runtime => [...actions].map(([name, action]) => ({
-      ...runtime.jsonTool(name, `[${adapter.platform} account ${adapter.accountId}; ${adapter.instance}; API ${adapter.version}] ${(action.summary ?? action.name).split('\n')[0]}\nNative operation: ${action.name}. ${action.invariants.join(' ')} Parameters and results follow the native API; find_tools returns the full parameter documentation.`, schemas.get(name)!, async (args, signal) => {
+      ...runtime.tool(name, `[${adapter.platform} account ${adapter.accountId}; ${adapter.instance}; API ${adapter.version}] ${(action.summary ?? action.name).split('\n')[0]}\nNative operation: ${action.name}. ${action.invariants.join(' ')} Parameters and results follow the native API; find_tools returns the full parameter documentation.`, schemas.get(name)!, async (args, signal) => {
         const validated = validateNativeArgs(name, schemas.get(name)!, args);
-        return action.readOnly ? runtime.record(`adapter:${adapter.instance}:${action.name}`, await runtime.query(name, validated, signal))
-          : runtime.action(name, validated, dispatch => dispatch(name, runtime.resolveMedia(validated) as Record<string, unknown>), signal);
+        if (action.readOnly) {
+          const result = runtime.record(`adapter:${adapter.instance}:${action.name}`, await runtime.query(name, validated, signal));
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: {} };
+        }
+        const result = await runtime.action(name, validated, dispatch => dispatch(name, runtime.resolveMedia(validated, name) as Record<string, unknown>), signal);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { outcome: result.outcome.status } };
       }), available: () => allowed(name), ...(frequent && !frequent.has(action.name) ? { defer: true } : {}),
       // The declaration omits repeated prose; the catalog's own entry has it.
       documentation: () => action,

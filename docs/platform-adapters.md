@@ -63,7 +63,7 @@ Telegram strings retain native file IDs, URLs, and `attach://` references. To up
 }
 ```
 
-Uploads also work inside `media` arrays. The default per-file limit is 50,000,000 bytes (`maxFileBytes`). Incoming photos, image documents and sticker thumbnails can be viewed through the normal image path; downloading them requires `getFile` permission. Bot-token URLs stay inside the adapter. SnowLuma paths continue to refer to the SnowLuma server.
+Uploads also work inside `media` arrays, and permanent `drawing:<uuid>` IDs resolve automatically to local multipart uploads while retaining the compact ID in the action ledger. The default per-file limit is 50,000,000 bytes (`maxFileBytes`). Incoming photos, image documents and sticker thumbnails can be viewed through the normal image path; downloading them requires `getFile` permission. Bot-token URLs stay inside the adapter. SnowLuma paths continue to refer to the SnowLuma server.
 
 ## Reception and identity
 
@@ -111,10 +111,13 @@ ctx.adapter({
   version: "example-api-2026-11",
   actions: completeCatalog.actions,
   frequent: ["sendMessage", "getMessages"], // optional
+  staleActions: ["sendMessage"], // optional: skip if a newer addressed message arrives in that chat
+  endsThoughtActions: ["sendMessage"], // optional: end the thought once a batch of ending actions succeeds
   permissions: { allow: "*", deny: [] },
   execute: (operation, parameters, signal) => client.call(operation, parameters, signal),
   conversation: (operation, args) => args.channel_id
     ? { type: "channel", id: String(args.channel_id) } : undefined,
+  encodeMedia: media => media.path ? { file: media.path, filename: media.filename, contentType: media.mimeType } : undefined, // optional
   start: async context => {
     // Validate the logged-in account, then publish every relevant native event.
     // context.publish accepts raw payload, conversation, actor, own and addressed.

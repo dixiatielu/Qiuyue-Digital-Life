@@ -2,7 +2,8 @@ import type { AdapterConfig, Config } from '../config.js';
 import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
 import { nativeToolName } from '../platform.js';
 import { errorResult } from '../tool-runtime.js';
-import { preferJpeg } from '../web.js';
+import { eventRef } from '../store.js';
+import { fetchImage, preferJpeg } from '../web.js';
 import { sanitizeToolSchema } from '../schema.js';
 import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
 
@@ -147,7 +148,7 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
       };
       /** One external action: recorded before it is sent and deduplicated, with an unconfirmed outcome kept as unknown (ADR-0008). */
       async function act(name: string, args: Record<string, unknown>, signal?: AbortSignal) {
-        const sent = runtime.resolveMedia(args) as Record<string, unknown>;
+        const sent = runtime.resolveMedia(args, name) as Record<string, unknown>;
         return runtime.action(name, args, dispatch => dispatch(name, sent), signal);
       }
       const native = new Map(snowlumaCatalog.map(action => [action.name, nativeTool(action)]));
@@ -201,5 +202,33 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
     chatActions: [...socialActions], staleActions: [...socialActions],
     chatTarget: (_tool, args) => snowlumaChat(args, account.accountId),
     endsThought: tool => socialActions.has(tool),
+    images: (event, helpers) => {
+      if (!Array.isArray(event.payload.message)) return [];
+      const ref = eventRef(event.id);
+      return event.payload.message
+        .filter((segment): segment is { type: string; data?: Record<string, unknown> } => Boolean(segment && typeof segment === 'object' && segment.type === 'image'))
+        .map((segment, index) => {
+          const saved = helpers?.imageCaption(segment.data ?? {}) ?? '';
+          const url = segment.data?.url;
+          // A line leaves the URL out, so saving the image as a sticker or sending it on takes it from its label.
+          const from = typeof url === 'string' ? `; url: ${url}` : '';
+          return {
+            priority: 'message' as const,
+            label: `The following is image ${index} from ${ref}${saved}${from}`,
+            viewLabel: `Image ${index} from event ${event.id}`,
+            deferred: `Image ${index} from ${ref}${saved} was not loaded due to the context limit; use view_event_image to view it${from}`,
+            unavailable: typeof url === 'string'
+              ? `Image ${index} in ${ref}${saved} could not be read${from}`
+              : `Image ${index} in ${ref}${saved} has no readable URL; the original event is retained.`,
+            ...(typeof url === 'string' ? {} : { missingReason: 'The image does not exist or has no readable URL.' }),
+            autoView: true,
+            load: async signal => {
+              if (typeof url !== 'string') return undefined;
+              const image = await fetchImage(url, signal);
+              return { data: image.data, mimeType: image.type };
+            },
+          };
+        });
+    },
   };
 }

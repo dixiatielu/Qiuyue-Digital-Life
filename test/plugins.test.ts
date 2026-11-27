@@ -175,3 +175,33 @@ test('a startup failure still permits shutdown of plugins whose startup was inco
   await host.stop();
   assert.deepEqual(calls, ['start-first', 'stop-first', 'stop-broken', 'stop-later']);
 });
+
+test('primary plugin pictures are loaded before incoming message images within maxImages', async () => {
+  const primaryImg = Buffer.from('primary-art');
+  const chatImg = Buffer.from('chat-photo');
+  const f = fixture(undefined, undefined, undefined, () => [
+    {
+      id: 'primary-art', tools: () => [],
+      images: event => event.kind === 'art_ready' ? [{ label: 'Primary art', unavailable: 'Missing', deferred: 'Deferred primary', autoView: true, load: () => ({ data: primaryImg, mimeType: 'image/png' }) }] : [],
+    },
+    {
+      id: 'chat-photos', tools: () => [],
+      images: event => event.kind === 'chat_photo' ? [{ priority: 'message', label: 'Chat photo', unavailable: 'Missing', deferred: 'Deferred chat photo', autoView: true, load: () => ({ data: chatImg, mimeType: 'image/png' }) }] : [],
+    },
+  ]);
+  try {
+    f.cfg.limits.maxImages = 1;
+    const now = Date.now();
+    // Chat photo arrives earlier in the same observation than the primary plugin picture.
+    f.store.receive(qqEvent({ key: 'chat:1', kind: 'chat_photo', at: now, text: '[photo]', payload: { origin: 'external' } }, f.store));
+    f.store.receive(qqEvent({ key: 'art:1', kind: 'art_ready', at: now + 1, text: 'Art ready', payload: { origin: 'self' } }, f.store));
+    f.faux.setResponses([context => {
+      const text = JSON.stringify(context);
+      assert.ok(text.includes(primaryImg.toString('base64')));
+      assert.ok(!text.includes(chatImg.toString('base64')));
+      assert.ok(text.includes('Deferred chat photo'));
+      return answer('Viewed primary');
+    }]);
+    await f.brain.run(f.store.claim(10)!);
+  } finally { f.store.close(); }
+});

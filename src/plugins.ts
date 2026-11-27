@@ -1,17 +1,18 @@
 import type { NativeActionDefinition } from './platform.js';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
-import type { ThoughtContext, ToolRuntime } from './tool-runtime.js';
+import type { ThoughtContext, ToolImage, ToolRuntime } from './tool-runtime.js';
 import { waitFor } from './async.js';
-import type { UserActivity } from './plugin-sdk.js';
+import type { AdapterMediaAsset, UserActivity } from './plugin-sdk.js';
+import type { ActivityPrompt } from './prompts.js';
 import { sanitizeToolSchema } from './schema.js';
+export type { ActivityPrompt } from './prompts.js';
 
 export interface OnlineActivity extends UserActivity {
   memoryKind?: MemoryKind;
   insertBefore?: string;
   currentValue?: { tool: string; read(args: Record<string, unknown>): unknown };
 }
-export interface ActivityPrompt extends UserActivity { plugin: string; instructions: string }
 function availableActivities(activities: OnlineActivity[], available: ReadonlySet<string>) {
   return activities.map(item => ({ ...item, tools: item.tools.filter(name => available.has(name)) })).filter(item => item.tools.length);
 }
@@ -22,14 +23,15 @@ export interface PluginTool extends AgentTool {
   /** What find_tools adds to the declaration when asked about this tool: results, examples, constraints, or parameter prose the declaration leaves out. */
   documentation?(): unknown;
 }
-export interface PluginImage {
-  label: string;
-  unavailable: string;
-  deferred: string;
-  autoView: boolean;
-  load(signal?: AbortSignal): { data: Buffer; mimeType: string } | undefined | Promise<{ data: Buffer; mimeType: string } | undefined>;
-  onShown?(): void;
+export type PluginImage = ToolImage;
+export interface ImageHelpers {
+  imageCaption(image: Record<string, unknown>): string;
 }
+export interface ResolvedMedia extends AdapterMediaAsset {
+  readonly data: Buffer;
+}
+export type MediaEncoder = (media: ResolvedMedia) => unknown;
+export const encodeBase64Uri: MediaEncoder = media => `base64://${media.data.toString('base64')}`;
 /** One complete capability: tools and the hooks required to take part in the digital life's experiences. */
 export interface LifePlugin {
   id: string;
@@ -41,7 +43,7 @@ export interface LifePlugin {
   essential?: boolean;
   enabled?(): boolean;
   tools(runtime: ToolRuntime): PluginTool[];
-  nativeActions?: { accounts?: readonly import('./identity.js').PlatformIdentity[]; instances?: readonly import('./plugin-sdk.js').AdapterInfo[]; definition(name: string): NativeActionDefinition | undefined; allowed(name: string): boolean; execute?(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> };
+  nativeActions?: { accounts?: readonly import('./identity.js').PlatformIdentity[]; instances?: readonly import('./plugin-sdk.js').AdapterInfo[]; definition(name: string): NativeActionDefinition | undefined; allowed(name: string): boolean; execute?(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>; encodeMedia?(name: string, media: ResolvedMedia): unknown };
   reviewTools?: string[];
   emojiNames?(events?: EnvironmentEvent[], signal?: AbortSignal): Record<string, string> | Promise<Record<string, string>>;
   knownEmojiNames?(): Record<string, string>;
@@ -58,8 +60,8 @@ export interface LifePlugin {
   chatActions?: string[];
   staleActions?: string[];
   chatTarget?(tool: string, args: unknown): string | undefined;
-  images?(event: EnvironmentEvent): PluginImage[];
-  resolveMedia?(value: string): string | undefined;
+  images?(event: EnvironmentEvent, helpers?: ImageHelpers): PluginImage[];
+  resolveMedia?(value: string): string | ResolvedMedia | undefined;
   start?(): void | Promise<void>;
   stop?(): void | Promise<void>;
   /** Stop scheduling background work while a replacement is prepared; return a resume function. */
@@ -213,18 +215,35 @@ export class PluginHost {
       const chat = plugin.chatTarget?.(tool, args); if (chat) return chat;
     }
   }
-  images(event: EnvironmentEvent): PluginImage[] { return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.images?.(event) ?? []); }
+  images(event: EnvironmentEvent): PluginImage[] {
+    const helpers: ImageHelpers = { imageCaption: image => this.imageCaption(image) };
+    return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.images?.(event, helpers) ?? []);
+  }
+  private mediaEncoder(actionName?: string): MediaEncoder {
+    if (actionName) {
+      for (const plugin of this.plugins) {
+        if (this.enabled(plugin) && plugin.nativeActions?.definition(actionName) && plugin.nativeActions.encodeMedia) {
+          const encode = plugin.nativeActions.encodeMedia;
+          return media => encode(actionName, media);
+        }
+      }
+    }
+    return encodeBase64Uri;
+  }
   /** Resolve references only in outgoing parameters; stored action arguments retain their small, stable IDs. */
-  resolveMedia(value: unknown): unknown {
+  resolveMedia(value: unknown, actionName?: string): unknown {
+    return this.resolveMediaWith(value, this.mediaEncoder(actionName));
+  }
+  private resolveMediaWith(value: unknown, encode: MediaEncoder): unknown {
     if (typeof value === 'string') {
       for (const plugin of this.plugins) if (this.enabled(plugin)) {
         const resolved = plugin.resolveMedia?.(value);
-        if (resolved !== undefined) return resolved;
+        if (resolved !== undefined) return typeof resolved === 'string' ? resolved : encode(resolved);
       }
       return value;
     }
-    if (Array.isArray(value)) return value.map(item => this.resolveMedia(item));
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.resolveMedia(item)]));
+    if (Array.isArray(value)) return value.map(item => this.resolveMediaWith(item, encode));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.resolveMediaWith(item, encode)]));
     return value;
   }
   async start(onError?: (plugin: LifePlugin, error: unknown) => void) {

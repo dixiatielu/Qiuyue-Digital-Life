@@ -4,7 +4,7 @@ import type { SemanticSource } from '../embedding.js';
 import { errorText } from '../domain.js';
 import type { LifePlugin } from '../plugins.js';
 import type { Store } from '../store.js';
-import { DrawingLibrary, drawingIdPattern, drawingText, validateDrawingQuery, type DrawingQuery } from './gallery-store.js';
+import { DrawingLibrary, drawingIdPattern, drawingText, resolveDrawingMedia, validateDrawingQuery, type DrawingQuery } from './gallery-store.js';
 
 /** Indexing belongs to this plugin instance; disposal and a failed reload leave no duplicate workers. */
 export class GalleryRecall {
@@ -99,11 +99,7 @@ export function galleryPlugin(config: Config, store: Store, semantics?: Semantic
         autoView: event.payload.error === undefined, load: () => library.image(id), onShown: () => library.markSeen(id) }];
     },
     imageViewer: label => { const match = /drawing:[0-9a-f-]{36}/.exec(label); return match ? `view_drawing with id ${match[0]}` : undefined; },
-    resolveMedia: value => {
-      if (!drawingIdPattern.test(value)) return;
-      const picture = library.image(value); if (!picture) throw new Error(`Image ${value} does not exist or has been removed.`);
-      return `base64://${picture.data.toString('base64')}`;
-    },
+    resolveMedia: value => resolveDrawingMedia(library, value),
     manage: (command, args) => {
       if (typeof args.id !== 'string' || !Number.isSafeInteger(args.revision)) throw new Error('A drawing ID and revision are required.');
       if (command === 'update') { const item = library.update(args.id, args.changes, args.revision); changed(args.id); return item; }

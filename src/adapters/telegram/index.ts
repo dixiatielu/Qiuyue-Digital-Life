@@ -64,6 +64,12 @@ export class TelegramClient {
   }
 }
 
+const telegramSocialActions = [
+  'sendMessage', 'sendPhoto', 'sendAnimation', 'sendSticker', 'sendDocument', 'sendVideo', 'sendVideoNote', 'sendVoice', 'sendAudio',
+  'sendMediaGroup', 'sendLocation', 'sendVenue', 'sendContact', 'sendPoll', 'sendDice', 'sendLivePhoto', 'sendRichMessage',
+  'forwardMessage', 'forwardMessages', 'copyMessage', 'copyMessages', 'setMessageReaction',
+];
+
 export function telegramAdapter(config: AdapterConfig, credential: CredentialReader, fetcher: typeof fetch = fetch): NativeAdapterDefinition {
   const token = credential(config.tokenEnv) ?? '';
   const client = new TelegramClient(config.url ?? 'https://api.telegram.org', token, fetcher, config.maxFileBytes);
@@ -127,6 +133,10 @@ export function telegramAdapter(config: AdapterConfig, credential: CredentialRea
   };
   return {
     instance: config.id, platform: 'telegram', accountId: config.accountId, version: `@grammyjs/types ${catalog.source.version}`, actions: catalog.actions, permissions: config.tools,
+    staleActions: telegramSocialActions, endsThoughtActions: telegramSocialActions,
+    encodeMedia: media => media.path
+      ? { file: media.path, ...(media.filename ? { filename: media.filename } : {}), contentType: media.mimeType }
+      : `base64://${Buffer.from(media.data).toString('base64')}`,
     conversation: (_operation, args) => {
       if (args.chat_id === undefined) return;
       const target = String(args.chat_id);

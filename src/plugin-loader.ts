@@ -221,7 +221,7 @@ class PluginScope {
                   list: () => { check(); return toolInspector.list(); },
                   allowed: (instance, operation) => { check(); return toolInspector.allowed(instance, operation); },
                   query: (instance, operation, parameters) => { check(); const name = nativeToolName(instance, operation); if (!runtime.definition(name).readOnly) throw new Error('Use adapters.action for external writes.'); return runtime.query(name, parameters, combined); },
-                  action: (instance, operation, parameters) => { write(); const name = nativeToolName(instance, operation); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
+                  action: (instance, operation, parameters) => { write(); const name = nativeToolName(instance, operation); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters, name) as Record<string, unknown>), combined); },
                   perform: (kind, parameters, run, options) => {
                     write();
                     if (typeof kind !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(kind)) throw new Error('An action kind must be a local identifier.');
@@ -236,7 +236,7 @@ class PluginScope {
                         if (dispatched) throw new Error('adapters.perform may dispatch at most one native action per recorded action.');
                         dispatched = true;
                         const name = nativeToolName(instance, operation);
-                        return dispatch(name, runtime.resolveMedia(actionArgs) as Record<string, unknown>);
+                        return dispatch(name, runtime.resolveMedia(actionArgs, name) as Record<string, unknown>);
                       }, combined),
                       combined,
                       undefined,
@@ -262,7 +262,7 @@ class PluginScope {
       ...base, requiresRestart: adapters.length > 0,
       tools: runtime => [...base.tools(runtime), ...adapters.flatMap(adapter => adapter.tools(runtime))],
       reviewTools: [...base.reviewTools ?? [], ...adapters.flatMap(adapter => adapter.reviewTools ?? [])],
-      images: event => adapters.flatMap(adapter => adapter.images?.(event) ?? []),
+      images: (event, helpers) => adapters.flatMap(adapter => adapter.images?.(event, helpers) ?? []),
       chatActions: [...base.chatActions ?? [], ...adapters.flatMap(adapter => adapter.chatActions ?? [])],
       staleActions: [...base.staleActions ?? [], ...adapters.flatMap(adapter => adapter.staleActions ?? [])],
       chatTarget: (name, args) => base.chatTarget?.(name, args) ?? adapters.map(adapter => adapter.chatTarget?.(name, args)).find(Boolean),
@@ -273,6 +273,12 @@ class PluginScope {
         definition: name => adapters.map(adapter => adapter.nativeActions?.definition(name)).find(Boolean),
         allowed: name => adapters.some(adapter => adapter.nativeActions?.definition(name) && adapter.nativeActions.allowed(name)),
         execute: (name, args, signal) => { const adapter = adapters.find(adapter => adapter.nativeActions?.definition(name)); if (!adapter) throw new Error('Unknown native operation.'); return adapter.nativeActions!.execute!(name, args, signal); },
+        ...(adapters.some(adapter => adapter.nativeActions?.encodeMedia) ? {
+          encodeMedia: (name, media) => {
+            const adapter = adapters.find(item => item.nativeActions?.definition(name));
+            return adapter?.nativeActions?.encodeMedia ? adapter.nativeActions.encodeMedia(name, media) : `base64://${media.data.toString('base64')}`;
+          },
+        } : {}),
       },
       start: async () => { await base.start?.(); for (const adapter of adapters) await adapter.start?.(); },
       stop: () => this.stop(),

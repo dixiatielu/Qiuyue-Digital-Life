@@ -209,7 +209,8 @@ export class LifeRuntime {
     try { await waitFor(this.idle(), signal); signal.throwIfAborted(); if (this.stopped) throw new Error('The runtime is stopping.'); return await change(); }
     finally { this.maintenance = false; void this.tick(); }
   }
-  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.brain.abort(); this.reviewer?.abort(); await this.idle(); }
+  abort() { this.brain.abort(); this.reviewer?.abort(); }
+  async stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); this.abort(); await this.idle(); }
   control(command: string, value?: boolean) {
     this.store.transaction(() => {
       if (command === 'pause' || command === 'resume') this.store.setSetting('paused', command === 'pause');
@@ -217,7 +218,7 @@ export class LifeRuntime {
       else throw new Error('Unknown control command.');
       this.store.bumpGeneration(true);
     });
-    this.brain.abort(); this.reviewer?.abort();
+    this.abort();
     if (command === 'resume') this.retryAfter = 0;
     if (command === 'life' && value && !this.store.wakes().some(wake => wake.kind === 'life')) this.store.schedule('Plan your own life according to your current persona and interests.', 'life', Date.now());
     this.store.log('control', { command, value });

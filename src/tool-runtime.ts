@@ -3,9 +3,46 @@ import type { TSchema } from 'typebox';
 import type { Config } from './config.js';
 import type { Action, EnvironmentEvent, Memory } from './domain.js';
 import { Store, type RevisionReach } from './store.js';
-import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName } from './platform.js';
-import { PluginHost } from './plugins.js';
+import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName, type NativeActionDefinition } from './platform.js';
+import type { AdapterInfo } from './plugin-sdk.js';
 import { fetchImage } from './web.js';
+
+export interface ToolImage {
+  label: string;
+  /** Optional alternate label used when viewed explicitly via view_event_image; defaults to label. */
+  viewLabel?: string;
+  unavailable: string;
+  deferred: string;
+  autoView: boolean;
+  /** Plugin-produced pictures ('primary', default) are seen before incoming chat images ('message'). */
+  priority?: 'primary' | 'message';
+  /** If set, explicit lookup via resolveEventImage fails synchronously with this reason (e.g. missing URL). */
+  missingReason?: string;
+  load(signal?: AbortSignal): { data: Buffer; mimeType: string } | undefined | Promise<{ data: Buffer; mimeType: string } | undefined>;
+  onShown?(): void;
+}
+export interface ToolExtensions {
+  resolveMedia(value: unknown, actionName?: string): unknown;
+  decorate(original: AgentTool, runtime: ToolRuntime): AgentTool;
+  nativeDefinition(name: string): NativeActionDefinition;
+  nativeAllowed(name: string): boolean;
+  hasNativeAllowed(name: string): boolean;
+  nativeExecute(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | undefined;
+  adapters(): readonly AdapterInfo[];
+  chatTarget(tool: string, args: unknown, staleOnly?: boolean): string | undefined;
+  images(event: EnvironmentEvent): ToolImage[];
+}
+const emptyExtensions: ToolExtensions = {
+  resolveMedia: value => value,
+  decorate: original => original,
+  nativeDefinition: name => { throw new Error(`Unknown native interface: ${name}`); },
+  nativeAllowed: name => { throw new Error(`Unknown native interface: ${name}`); },
+  hasNativeAllowed: () => false,
+  nativeExecute: () => undefined,
+  adapters: () => [],
+  chatTarget: () => undefined,
+  images: () => [],
+};
 
 /** Every http(s) URL in an event's strings, with HTML's &amp; decoded, so an image named in a tool result can be viewed or referenced by its exact URL. */
 export function urlsIn(value: unknown, found = new Set<string>()): Set<string> {
@@ -23,10 +60,10 @@ export interface ResolvedEventImage {
   onShown?(): void;
 }
 
-/** Validate and resolve an image inside an event (plugin-provided, message segment, or exact URL in payload), deferring any network read to load(). */
+/** Validate and resolve an image inside an event (plugin/adapter-provided or exact URL in payload), deferring any network read to load(). */
 export function resolveEventImage(
   store: Store,
-  plugins: Pick<PluginHost, 'images'>,
+  plugins: Pick<ToolExtensions, 'images'>,
   args: { id: string; index?: number; url?: string },
   loadUrl: typeof fetchImage = fetchImage,
 ): ResolvedEventImage {
@@ -34,10 +71,12 @@ export function resolveEventImage(
   if (args.index !== undefined && (!Number.isSafeInteger(args.index) || args.index < 0)) throw new Error('Image index must be a non-negative integer.');
   const event = store.event(store.resolve(args.id));
   if (!event) throw new Error('The experience does not exist or has been deleted.');
-  const provided = args.index !== undefined ? plugins.images(event)[args.index] : undefined;
-  if (provided) {
+  if (args.index !== undefined) {
+    const provided = plugins.images(event)[args.index];
+    if (!provided) throw new Error('The image does not exist or has no readable URL.');
+    if (provided.missingReason) throw new Error(provided.missingReason);
     return {
-      event, label: provided.label, unavailable: provided.unavailable, onShown: provided.onShown,
+      event, label: provided.viewLabel ?? provided.label, unavailable: provided.unavailable, onShown: provided.onShown,
       load: async signal => {
         const picture = await provided.load(signal);
         if (!picture) throw new Error(provided.unavailable);
@@ -45,18 +84,10 @@ export function resolveEventImage(
       },
     };
   }
-  let url: string;
-  if (args.url !== undefined) {
-    url = String(args.url).replaceAll('&amp;', '&');
-    if (!urlsIn(event.payload).has(url)) throw new Error('That URL does not appear in the event.');
-  } else {
-    const segments = event.payload.message;
-    const found = (Array.isArray(segments) ? segments.filter(segment => segment.type === 'image')[args.index!] : undefined)?.data?.url;
-    if (typeof found !== 'string') throw new Error('The image does not exist or has no readable URL.');
-    url = found;
-  }
+  const url = String(args.url).replaceAll('&amp;', '&');
+  if (!urlsIn(event.payload).has(url)) throw new Error('That URL does not appear in the event.');
   return {
-    event, url, label: `Image ${args.url !== undefined ? url : args.index} from event ${event.id}`, unavailable: 'The image could not be read.',
+    event, url, label: `Image ${url} from event ${event.id}`, unavailable: 'The image could not be read.',
     load: async signal => {
       const result = await loadUrl(url, signal);
       return { data: result.data, mimeType: result.type };
@@ -79,7 +110,7 @@ export const jsonResult = (result: unknown): AgentToolResult<any> => ({ content:
 
 /** Shared execution rules for built-in and plugin tools. Plugins never create their own action receipts. */
 export class ToolRuntime {
-  constructor(readonly config: Config, readonly store: Store, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate' | 'nativeDefinition' | 'nativeAllowed' | 'hasNativeAllowed' | 'nativeExecute' | 'adapters' | 'chatTarget' | 'images'> = new PluginHost([]), private namespace?: string) {}
+  constructor(readonly config: Config, readonly store: Store, readonly context: () => ThoughtContext, private extensions: ToolExtensions = emptyExtensions, private namespace?: string) {}
   scoped(instance: string) { return new ToolRuntime(this.config, this.store, this.context, this.extensions, instance); }
   private name(name: string) { return this.namespace ? nativeToolName(this.namespace, name) : name; }
   private dispatch(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -88,7 +119,7 @@ export class ToolRuntime {
     return result;
   }
   adapters() { return this.extensions.adapters(); }
-  resolveMedia(value: unknown): unknown { return this.extensions.resolveMedia(value); }
+  resolveMedia(value: unknown, actionName?: string): unknown { return this.extensions.resolveMedia(value, actionName ? this.name(actionName) : undefined); }
   resolveEventImage(args: { id: string; index?: number; url?: string }): ResolvedEventImage { return resolveEventImage(this.store, this.extensions, args); }
   decorate(tool: AgentTool): AgentTool {
     const decorated = this.extensions.decorate({ ...tool, name: this.name(tool.name) }, this);

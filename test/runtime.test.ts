@@ -442,3 +442,22 @@ test('a life plan that was woken and never finished does not hold free time back
   assert.equal(freeTimeDue({ ...view, plans: [{ ...plan, status: 'pending' }] }, free), false);
   assert.equal(freeTimeDue({ ...view, plans: [{ ...plan, status: 'pending', dueAt: now + free.gapMs / 2 }] }, free), false);
 });
+
+test('memory forget and correct through control abort both main brain and reviewer', async () => {
+  const { handleControl } = await import('../src/control.js');
+  const cfg = config(); const store = new Store(':memory:');
+  let brainAborts = 0; let reviewAborts = 0;
+  const stub = (onAbort: () => void): Brain => ({
+    streaming: false, thought: thought(),
+    run: async () => {}, review: async () => {}, steer: async () => false, consolidate: async () => {}, abort: onAbort,
+  });
+  const runtime = new LifeRuntime(cfg, store, stub(() => { brainAborts++; }), stub(() => { reviewAborts++; }));
+  try {
+    const source = event(store, 'Note this');
+    const memory = store.writeMemory({ kind: 'experience', title: 'Moment', content: 'Something happened', importance: 5, sources: [source.id] }, false);
+    const corrected = handleControl(store, { args: ['memory', 'correct', memory.id, 'Corrected fact'] }, runtime) as { id: string };
+    assert.equal(brainAborts, 1); assert.equal(reviewAborts, 1);
+    handleControl(store, { args: ['memory', 'forget', corrected.id], yes: true }, runtime);
+    assert.equal(brainAborts, 2); assert.equal(reviewAborts, 2);
+  } finally { await runtime.stop(); store.close(); }
+});

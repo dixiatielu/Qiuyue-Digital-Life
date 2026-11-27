@@ -108,6 +108,13 @@ export interface PluginDefinition extends PluginManifest {
 }
 export const definePlugin = <T extends PluginDefinition>(definition: T): T => definition;
 
+/** Resolved local media asset passed to platform adapters for native encoding (e.g. multipart upload or base64 URI). */
+export interface AdapterMediaAsset {
+  readonly data: Uint8Array;
+  readonly mimeType: string;
+  readonly path?: string;
+  readonly filename?: string;
+}
 /** Stable platform identity is independent of the adapter implementation. */
 export interface NativeAdapterDefinition {
   instance: string;
@@ -118,9 +125,15 @@ export interface NativeAdapterDefinition {
   actions: { name: string; summary?: string; inputSchema: JsonSchema; readOnly: boolean; invariants?: string[] }[];
   /** Operations in everyday use. When given, the others are loaded on demand where the model's API can do that; every operation stays callable either way. */
   frequent?: string[];
+  /** Operations skipped when a newer addressed message arrives in the same chat before they run (ADR-0002). */
+  staleActions?: string[];
+  /** Operations that end the thought once a batch made only of ending actions succeeds (ADR-0028). */
+  endsThoughtActions?: string[];
   permissions?: { allow: '*' | string[]; deny: string[] };
   execute(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
   conversation?(operation: string, args: Record<string, unknown>): { type: import('./identity.js').ConversationType; id: string } | undefined;
+  /** Encode a resolved local media reference (such as a gallery drawing ID) into this platform's native parameter format. */
+  encodeMedia?(media: AdapterMediaAsset): unknown;
   /** Images come from the event's actual native media, and are loaded only when shown. */
   images?(event: PluginEvent): { label: string; autoView?: boolean; load(signal: AbortSignal): Promise<{ data: Uint8Array; mimeType: string }> }[];
   start?(context: AdapterContext): void | Promise<void>;
