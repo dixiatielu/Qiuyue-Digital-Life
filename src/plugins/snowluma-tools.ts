@@ -3,30 +3,61 @@ import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
 import { nativeToolName } from '../platform.js';
 import { errorResult } from '../tool-runtime.js';
 import { preferJpeg } from '../web.js';
+import { sanitizeToolSchema } from '../schema.js';
 import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
 
 const oneBotSegment = {
   type: 'object',
   properties: {
     type: { type: 'string' },
-    data: { type: 'object', additionalProperties: true },
+    data: { type: 'object' },
   },
   required: ['type', 'data'],
 };
-/** Gemini's VALIDATED tool-calling mode flattens nested objects inside untyped fields; type OneBot `message` explicitly (ADR-0023). */
+const forwardNode = {
+  type: 'object',
+  properties: {
+    type: { type: 'string' },
+    data: { type: 'object' },
+  },
+};
+const flashFile = {
+  anyOf: [
+    { type: 'string' },
+    { type: 'object', properties: { file: { type: 'string' }, name: { type: 'string' } }, required: ['file'] },
+  ],
+};
+/** Type untyped SnowLuma fields explicitly and sanitize schemas for cross-provider tool calling (ADR-0023). */
 function normalizeParameters(action: SnowLumaActionDefinition) {
   const schema = action.inputSchema as Record<string, any>;
   const props = schema?.properties;
-  if (!props || typeof props !== 'object') return action.inputSchema;
+  if (!props || typeof props !== 'object') return sanitizeToolSchema(action.inputSchema);
   let changed = false;
   const nextProps: Record<string, unknown> = { ...props };
   for (const [key, value] of Object.entries(props)) {
-    if (key === 'message' && value && typeof value === 'object' && !('type' in value) && !('anyOf' in value) && !('oneOf' in value) && typeof (value as { description?: unknown }).description === 'string' && (value as { description: string }).description.includes('OneBot message')) {
+    if (!value || typeof value !== 'object' || 'type' in value || 'anyOf' in value || 'oneOf' in value) continue;
+    const desc = typeof (value as { description?: unknown }).description === 'string' ? (value as { description: string }).description : '';
+    if (key === 'message' && desc.includes('OneBot message')) {
       nextProps[key] = { ...value, anyOf: [{ type: 'string' }, { type: 'array', items: oneBotSegment }, oneBotSegment] };
+      changed = true;
+    } else if ((key === 'messages' || key === 'message') && /forward_msg$/.test(action.name)) {
+      nextProps[key] = { ...value, type: 'array', items: forwardNode };
+      changed = true;
+    } else if (key === 'news' && /forward_msg$/.test(action.name)) {
+      nextProps[key] = { ...value, type: 'array', items: { anyOf: [{ type: 'object', properties: { text: { type: 'string' } } }, { type: 'string' }] } };
+      changed = true;
+    } else if (key === 'files' && action.name === 'create_flash_task') {
+      nextProps[key] = { ...value, anyOf: [...flashFile.anyOf, { type: 'array', items: flashFile }] };
+      changed = true;
+    } else if (key === 'headers' && action.name === 'download_file') {
+      nextProps[key] = { ...value, anyOf: [{ type: 'object', additionalProperties: { type: 'string' } }, { type: 'array', items: { type: 'string' } }, { type: 'string' }] };
+      changed = true;
+    } else if (key === 'busid' && action.name === 'get_group_file_url') {
+      nextProps[key] = { ...value, anyOf: [{ type: 'integer' }, { type: 'string' }] };
       changed = true;
     }
   }
-  return changed ? ({ ...schema, properties: nextProps } as typeof action.inputSchema) : action.inputSchema;
+  return sanitizeToolSchema((changed ? { ...schema, properties: nextProps } : action.inputSchema) as typeof action.inputSchema);
 }
 function unchangedProfileAction(name: string, args: Record<string, unknown>, previous: Record<string, unknown> | undefined): boolean {
   if (!previous) return false;
@@ -73,6 +104,7 @@ const activities: OnlineActivity[] = [
   { activity: 'Browse, like, comment on, or add to group albums', tools: ['get_group_album_list', 'get_group_album_media_list', 'set_group_album_media_like', 'do_group_album_comment', 'upload_image_to_qun_album'], instructions: 'Group albums can hold shared photos and your own pictures. Choose among the available operations, respecting the group and the pictures\' original sharing scope.' },
   { activity: 'Check in to a group', tools: ['set_group_sign', 'get_group_signed_list'], instructions: 'Checking in can be a small habit in a group you spend time in. It is optional, not a daily obligation.' },
   { activity: "Like a friend's QQ profile", tools: ['send_like'], instructions: 'A profile like can be a small greeting to someone you know; it does not need a follow-up message.' },
+  { activity: 'Share a light moment or find in a quiet group chat', tools: ['send_group_msg'], instructions: 'During a quiet spell or natural lull, you can casually drop a brief line, a picture you drew, or an original link with a short reaction about something you genuinely came across—without waiting for someone else to bring it up. Keep it occasional and natural, and let it stand whether or not anyone replies.' },
   { activity: 'Start a private chat with or poke someone you know', tools: ['send_private_msg', 'friend_poke', 'send_poke'], instructions: 'You may initiate contact when you want to talk. Consider the relationship, timing, and whether the other person welcomes it; a poke can notify and interrupt them.' },
   { activity: 'Change your QQ signature', tools: ['set_self_longnick'], instructions: 'Your signature can reflect an interest or mood and can stay for a long time; there is no need to change it at every wake.', currentValue: { tool: 'set_self_longnick', read: args => args.longNick ?? args.long_nick } },
   { activity: 'Set a custom online status', tools: ['set_diy_online_status'], instructions: 'Your online status can describe your current mood or activity. Change it when you want it to reflect something different.', currentValue: { tool: 'set_diy_online_status', read: args => args.wording } },

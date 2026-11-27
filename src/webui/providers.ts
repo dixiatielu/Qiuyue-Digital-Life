@@ -4,7 +4,7 @@ import { writeAtomic } from './files.js';
 import { normalizeContext } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Config } from '../config.js';
-import { createModelBackend, validateModelConfig, type ModelConfig } from '../model.js';
+import { compatKeysForApi, createModelBackend, supportedThinkingLevels, validateModelConfig, type ModelConfig } from '../model.js';
 import { EmbeddingClient } from '../embedding.js';
 import { hash } from './files.js';
 
@@ -101,9 +101,9 @@ export async function remoteModels(profile: ProviderProfile, request: typeof fet
 }
 
 /** Send one short request to a model configuration and report what came back. */
-export async function testModel(config: ModelConfig, timeoutMs = 60_000, credential: CredentialReader = environmentCredential) {
+export async function testModel(config: ModelConfig, timeoutMs = 60_000, credential: CredentialReader = environmentCredential, options: { requireVision?: boolean } = {}) {
   validateModelConfig(config);
-  const { model, stream } = createModelBackend(config, credential);
+  const { model, stream } = createModelBackend(config, credential, options);
   const started = Date.now();
   const context = normalizeContext({ systemPrompt: 'This is a connection test. Reply with OK.', messages: [{ role: 'user', content: 'ping', timestamp: started }] });
   const reasoning = config.thinkingLevel === 'off' ? undefined : config.thinkingLevel;
@@ -122,6 +122,22 @@ export async function testEmbedding(config: Config['embedding'], credential: Cre
 /** The models Pi already knows, for choosing one without a custom endpoint. */
 export function catalog(provider?: string) {
   const models = builtinModels();
-  if (!provider) return { providers: models.getProviders().map(item => item.id).sort() };
-  return { models: models.getModels(provider).map(model => ({ id: model.id, name: model.name, input: model.input, reasoning: model.reasoning, contextWindow: model.contextWindow, maxTokens: model.maxTokens })) };
+  if (!provider) {
+    return {
+      providers: models.getProviders().map(item => item.id).sort(),
+      compatKeysByApi: Object.fromEntries(providerApis.map(api => [api, compatKeysForApi(api)])),
+    };
+  }
+  return {
+    models: models.getModels(provider).map(model => ({
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      input: model.input,
+      reasoning: model.reasoning,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      supportedThinkingLevels: supportedThinkingLevels(model),
+    })),
+  };
 }

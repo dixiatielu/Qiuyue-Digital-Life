@@ -11,6 +11,7 @@ import { StickerStore } from '../src/plugins/stickers-store.js';
 import { StickerRecall, stickerLines } from '../src/plugins/stickers-recall.js';
 import { stickersPlugin } from '../src/plugins/stickers.js';
 import { findSnowLumaAction } from '../src/adapters/snowluma/catalog.js';
+import { sanitizeToolSchema } from '../src/schema.js';
 import { deferred, event, fixture } from './helpers.js';
 import { topics, embeddingConfig } from './embedding-helpers.js';
 
@@ -114,7 +115,7 @@ test('a sticker is described as it is saved, in the same call and batch as a sen
     // Without modify_custom_face, the save takes no description.
     f.cfg.adapters[0]!.tools = { allow: '*', deny: ['modify_custom_face'] };
     const add = f.tools.current().find(tool => tool.name === "qq_main__add_custom_face")!;
-    assert.deepEqual(add.parameters, findSnowLumaAction('add_custom_face').inputSchema);
+    assert.deepEqual(add.parameters, sanitizeToolSchema(findSnowLumaAction('add_custom_face').inputSchema));
     assert.match(add.description, /after a successful save, use its returned emoji_id with qq_main__modify_custom_face/);
   } finally { f.store.close(); }
 });
@@ -205,7 +206,7 @@ test('disabling sticker enhancement restores native tools and blocks a held enha
     const enhanced = current('add_custom_face');
     assert.ok('desc' in (enhanced.parameters as any).properties);
     f.cfg.plugins['qq-main-qq-stickers'] = false;
-    assert.deepEqual(current('add_custom_face').parameters, findSnowLumaAction('add_custom_face').inputSchema);
+    assert.deepEqual(current('add_custom_face').parameters, sanitizeToolSchema(findSnowLumaAction('add_custom_face').inputSchema));
     assert.doesNotMatch(current('add_custom_face').description, /alreadySaved|Pass desc/);
     await assert.rejects(enhanced.execute('held', { file: 'a', desc: 'a cat' }), /disabled/);
     assert.equal(f.store.actions().length, 0);

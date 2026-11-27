@@ -7,6 +7,7 @@ import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, webuiSettings, type Config } from '../config.js';
 import { modelReadiness, modelUse } from '../model.js';
+import { probeModel } from '../probe.js';
 import { callControl } from '../control.js';
 import { errorText } from '../domain.js';
 import { configuredPluginIds, pluginIds } from '../plugins/index.js';
@@ -242,7 +243,14 @@ export class WebUi {
     this.on('PUT', '/api/providers', ({ body }) => ({ providers: this.providers.save(body.providers) }));
     this.on('POST', '/api/providers/models', ({ body }) => { return remoteModels(body.provider as ProviderProfile, fetch, this.files.credentials().get).then(models => ({ models })); });
     this.on('GET', '/api/catalog', ({ url }) => catalog(url.searchParams.get('provider') ?? undefined));
-    this.on('POST', '/api/test/model', ({ body }) => { return testModel(body.model, 60_000, this.files.credentials().get); });
+    this.on('POST', '/api/test/model', ({ body }) => { return testModel(body.model, 60_000, this.files.credentials().get, { requireVision: body.requireVision !== false }); });
+    this.on('POST', '/api/probe/model', ({ body }) => {
+      return probeModel(body.model, {
+        credential: this.files.credentials().get,
+        requireVision: body.requireVision !== false,
+        checkMidConvoTools: body.checkMidConvoTools !== false,
+      });
+    });
     this.on('POST', '/api/test/embedding', ({ body }) => {
       return testEmbedding({ enabled: true, apiKeyEnv: 'MODEL_API_KEY', threshold: 0.65, searchThreshold: 0.55, limit: 3, stickerThreshold: 0.65, stickerLimit: 3, timeoutMs: 15_000, selfNames: [], ...body.embedding }, this.files.credentials().get);
     });

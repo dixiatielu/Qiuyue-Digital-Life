@@ -100,7 +100,9 @@ test('custom gateway handles real Pi tool cycles and preserves the remote model 
       assert.equal(request.body.max_tokens, 8192);
       assert.ok(request.body.tools.some((tool: any) => tool.function.name === 'set_activity'));
       assert.ok(request.body.tools.some((tool: any) => tool.function.name === "qq_main__send_custom_face"));
-      assert.equal(request.body.tools.length, tools.current().length);
+      // Universal deferred tools (ADR-0023): seldom-used tools stay out of the declaration until requested.
+      assert.equal(request.body.tools.length, tools.declared().length);
+      assert.ok(request.body.tools.length < tools.current().length);
       assert.ok(request.body.tools.some((tool: any) => tool.function.name === 'search_drawings'));
       assert.deepEqual(request.body.tools, requests[0]!.body.tools);
     }

@@ -1,10 +1,11 @@
-import { Check } from 'typebox/value';
+import { validateToolArguments, type ToolCall } from '@earendil-works/pi-ai';
 import type { TSchema } from 'typebox';
 import type { LifePlugin } from '../plugins.js';
 import type { Store } from '../store.js';
 import { conversationRef, personRef } from '../identity.js';
 import { ActionNotDispatchedError, nativeToolName, permits, type NativeActionDefinition, type ToolPermissions } from '../platform.js';
 import type { NativeAdapterDefinition } from '../plugin-sdk.js';
+import { sanitizeToolSchema } from '../schema.js';
 
 /** Omit repeated prose from model declarations without removing a parameter or constraint. */
 export function compactSchema(value: unknown, names = false): any {
@@ -12,16 +13,31 @@ export function compactSchema(value: unknown, names = false): any {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).filter(([key]) => names || !['description', 'title'].includes(key)).map(([key, item]) => [key, !names && ['enum', 'const', 'default', 'examples'].includes(key) ? item : compactSchema(item, !names && ['properties', 'patternProperties', 'definitions', '$defs', 'dependentSchemas'].includes(key))]));
 }
+function validateNativeArgs(name: string, schema: TSchema, args: unknown): Record<string, unknown> {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    throw new ActionNotDispatchedError(`Invalid native parameters for ${name}: expected an object.`);
+  }
+  try {
+    return validateToolArguments(
+      { name, description: '', parameters: schema },
+      { type: 'toolCall', id: 'native', name, arguments: args as ToolCall['arguments'] },
+    ) as Record<string, unknown>;
+  } catch (error) {
+    throw new ActionNotDispatchedError(error instanceof Error ? error.message : `Invalid native parameters for ${name}.`);
+  }
+}
 /** One native catalog becomes one independently callable tool per operation. */
 export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Store, permissions: ToolPermissions = adapter.permissions ?? { allow: '*', deny: [] }): LifePlugin {
   if (!Array.isArray(adapter.actions) || !adapter.actions.length || typeof adapter.version !== 'string' || !adapter.version.trim()) throw new Error('Adapters need a versioned, non-empty native catalog.');
   const identity = { platform: adapter.platform, accountId: adapter.accountId };
   conversationRef(identity, 'private', 'validation');
   const actions = new Map<string, NativeActionDefinition>();
+  const schemas = new Map<string, TSchema>();
   for (const action of adapter.actions) {
     const name = nativeToolName(adapter.instance, action.name);
     if (actions.has(name) || action.inputSchema.type !== 'object' || typeof action.readOnly !== 'boolean') throw new Error(`Invalid or duplicate native operation: ${name}`);
     actions.set(name, { ...action, invariants: action.invariants ?? [], inputSchema: action.inputSchema as TSchema });
+    schemas.set(name, sanitizeToolSchema(compactSchema(action.inputSchema) as TSchema));
   }
   for (const name of [...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny]) if (!actions.has(nativeToolName(adapter.instance, name))) throw new Error(`Unknown native interface: ${name}`);
   if (adapter.frequent !== undefined && (!Array.isArray(adapter.frequent) || adapter.frequent.some(name => typeof name !== 'string' || !actions.has(nativeToolName(adapter.instance, name))))) throw new Error('frequent must list operations of this adapter.');
@@ -37,8 +53,8 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
   const execute = async (name: string, args: Record<string, unknown>, signal?: AbortSignal) => {
     const action = actions.get(name);
     if (!active || !action || !allowed(name)) throw new ActionNotDispatchedError(`Adapter ${adapter.instance} is inactive or this operation is disabled.`);
-    if (!Check(action.inputSchema, args)) throw new ActionNotDispatchedError(`Invalid native parameters for ${name}.`);
-    return adapter.execute(action.name, args, AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]));
+    const validated = validateNativeArgs(name, schemas.get(name)!, args);
+    return adapter.execute(action.name, validated, AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]));
   };
   // The host also stops a plugin whose start failed, so the adapter is stopped once however often this is asked.
   let stopped: Promise<void> | undefined;
@@ -54,10 +70,10 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
       load: async signal => { if (!active) throw new Error('Adapter is inactive.'); const loaded = await image.load(AbortSignal.any([controller.signal, ...(signal ? [signal] : [])])); return { ...loaded, data: Buffer.from(loaded.data) }; },
     })) : [],
     tools: runtime => [...actions].map(([name, action]) => ({
-      ...runtime.jsonTool(name, `[${adapter.platform} account ${adapter.accountId}; ${adapter.instance}; API ${adapter.version}] ${(action.summary ?? action.name).split('\n')[0]}\nNative operation: ${action.name}. ${action.invariants.join(' ')} Parameters and results follow the native API; find_tools returns the full parameter documentation.`, compactSchema(action.inputSchema), async (args, signal) => {
-        if (!Check(action.inputSchema, args)) throw new ActionNotDispatchedError(`Invalid native parameters for ${name}.`);
-        return action.readOnly ? runtime.record(`adapter:${adapter.instance}:${action.name}`, await runtime.query(name, args as Record<string, unknown>, signal))
-          : runtime.action(name, args as Record<string, unknown>, dispatch => dispatch(name, runtime.resolveMedia(args) as Record<string, unknown>), signal);
+      ...runtime.jsonTool(name, `[${adapter.platform} account ${adapter.accountId}; ${adapter.instance}; API ${adapter.version}] ${(action.summary ?? action.name).split('\n')[0]}\nNative operation: ${action.name}. ${action.invariants.join(' ')} Parameters and results follow the native API; find_tools returns the full parameter documentation.`, schemas.get(name)!, async (args, signal) => {
+        const validated = validateNativeArgs(name, schemas.get(name)!, args);
+        return action.readOnly ? runtime.record(`adapter:${adapter.instance}:${action.name}`, await runtime.query(name, validated, signal))
+          : runtime.action(name, validated, dispatch => dispatch(name, runtime.resolveMedia(validated) as Record<string, unknown>), signal);
       }), available: () => allowed(name), ...(frequent && !frequent.has(action.name) ? { defer: true } : {}),
       // The declaration omits repeated prose; the catalog's own entry has it.
       documentation: () => action,

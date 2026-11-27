@@ -48,10 +48,13 @@ test('config rejects partial overrides and invalid role settings while allowing 
     const base = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
     writeFileSync(join(dir, base.personaFile), 'Qiuyue');
     const load = (patch: any) => { const path = join(dir, 'config.json'); writeFileSync(path, JSON.stringify({ ...base, model, ...patch })); return loadConfig(path); };
-    for (const bad of [null, {}, { id: '' }, { id: 'summary', api: 'openai-completions' }, { ...summaryModel, apiKeyEnv: 'bad-key' }, { ...summaryModel, input: ['text'] }]) {
+    for (const bad of [null, {}, { id: '' }, { id: 'summary', api: 'openai-completions' }, { ...summaryModel, apiKeyEnv: 'bad-key' }]) {
       assert.throws(() => load({ compaction: { ...base.compaction, model: bad } }), /compaction.model/);
       assert.throws(() => load({ review: { model: bad } }), /review.model/);
     }
+    // Vision is required for review.model, while compaction.model accepts text-only models (images downgrade automatically).
+    assert.throws(() => load({ review: { model: { ...summaryModel, input: ['text'] } } }), /review.model.*Image understanding/);
+    assert.equal(load({ compaction: { ...base.compaction, model: { ...summaryModel, input: ['text'] } } }).compaction.model?.input?.includes('image'), false);
     for (const bad of [null, [], 'review', 1]) assert.throws(() => load({ review: bad }), /review must be an object/);
     assert.throws(() => load({ review: { limits: { modelCallsPerDay: 10 } } }), /Unknown review.limits/);
     assert.throws(() => load({ review: { limits: { contextTokens: 0 } } }), /review.limits.contextTokens/);
@@ -85,7 +88,7 @@ function brains(independentSummary = true, sameSummaryId = false) {
     const target = { ...provider.getModel(), id: selected.id, baseUrl: selected.baseUrl!, contextWindow: 131072, maxTokens: 8192, reasoning: true };
     return { model: target, stream: (m: any, c: any, o: any) => {
       requests.push({ target: name, messages: structuredClone(c.messages), options: o });
-      return models.streamSimple(m, c, o);
+      return models.streamSimple(m, c, { ...o, cacheRetention: selected.cacheRetention ?? 'none' });
     } };
   };
   const summaries = independentSummary ? backend('summary', selectedSummary) : undefined;
@@ -170,7 +173,7 @@ test('review compaction inherits the review backend with no explicit reasoning, 
   }
 });
 
-test('helper-model and budget edits preserve the primary context identity', () => {
+test('model and budget edits preserve the primary context identity so working context hands off across models', () => {
   const f = brains();
   try {
     const before = contextIdentity(f.cfg, f.tools);
@@ -179,7 +182,11 @@ test('helper-model and budget edits preserve the primary context identity', () =
     f.cfg.review!.limits = { contextTokens: 110000, outputReserveTokens: 8192 };
     f.cfg.compaction.contextTokens = 120000;
     assert.equal(contextIdentity(f.cfg, f.tools), before);
-    f.cfg.model = { ...model, id: 'another-daily' };
+    // Changing the primary model preserves identity so saved Working Context can hand off seamlessly.
+    f.cfg.model = { ...model, id: 'another-daily', thinkingLevel: 'high' };
+    assert.equal(contextIdentity(f.cfg, f.tools), before);
+    // Changing persona/instructions still starts a fresh working context.
+    f.cfg.persona = 'Qiuyue with an updated persona.';
     assert.notEqual(contextIdentity(f.cfg, f.tools), before);
   } finally { f.store.close(); }
 });

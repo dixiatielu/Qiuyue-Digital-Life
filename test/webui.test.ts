@@ -304,7 +304,7 @@ test('providers start from the endpoints already configured and are checked when
   assert.deepEqual((await call('/api/providers')).body.providers, [native]);
 }));
 
-test('the working context identity follows the persona, prompt, model, and tools, and nothing else', () => {
+test('the working context identity follows the persona, prompt, and tools, while preserving continuity across model changes', () => {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-identity-'));
   try {
     const base = JSON.parse(readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
@@ -313,10 +313,10 @@ test('the working context identity follows the persona, prompt, model, and tools
     const identity = (raw: typeof base) => { writeFileSync(path, JSON.stringify(raw)); return inspectConfig(loadConfig(path)).identities[0]; };
     const original = identity(base);
     assert.equal(identity({ ...base, limits: { ...base.limits, batchSize: 3 }, memory: { ...base.memory, recallLimit: 2 } }), original);
+    assert.equal(identity({ ...base, model: { ...base.model, thinkingLevel: 'low' } }), original);
     assert.notEqual(identity({ ...base, life: { ...base.life, allowFiction: true } }), original);
     assert.notEqual(identity({ ...base, plugins: { 'qq-main-qq-faces': false } }), original);
     assert.notEqual(identity({ ...base, adapters: [{ ...base.adapters[0]!, tools: { allow: '*', deny: ['send_poke'] } }] }), original);
-    assert.notEqual(identity({ ...base, model: { ...base.model, thinkingLevel: 'low' } }), original);
     writeFileSync(join(dir, base.personaFile), 'Qiuyue, changed');
     assert.notEqual(identity(base), original);
     assert.ok(!inspectConfig(loadConfig(path)).plugins.includes('drawing'), 'drawing stays off without its endpoint');
@@ -493,7 +493,12 @@ test('model assignments round-trip through the page with readiness, inheritance 
   const invalid = (await call('/api/config/check', { method: 'POST', body: { raw: { ...next, review: { model: {} } } } })).body;
   assert.equal(invalid.valid, false); assert.match(invalid.error, /review.model/);
   const changedMain = (await call('/api/config/check', { method: 'POST', body: { raw: { ...next, model: { ...main, id: 'another-daily' } } } })).body;
-  assert.equal(changedMain.context.continues, false);
+  assert.equal(changedMain.context.continues, true);
+  const changedDeferred = (await call('/api/config/check', { method: 'POST', body: { raw: { ...next, model: { ...main, deferredTools: 'never' } } } })).body;
+  assert.equal(changedDeferred.context.continues, false);
+  const catalogMeta = (await call('/api/catalog')).body;
+  assert.ok(Array.isArray(catalogMeta.compatKeysByApi['openai-completions']) && catalogMeta.compatKeysByApi['openai-completions'].includes('maxTokensField'));
+  assert.deepEqual(catalogMeta.compatKeysByApi['google-generative-ai'], []);
   assert.equal((await call('/api/config', { method: 'PUT', body: { raw: next, hash: current.hash } })).status, 409);
   const usage = (await call('/api/model-usage')).body;
   assert.equal(usage.total, 0); assert.equal(usage.cost, null);
@@ -538,4 +543,44 @@ test('malformed percent-encoding is refused like any other bad request, and a mi
   writeFileSync(join(dir, 'config.json'), JSON.stringify(raw));
   const saved = await call('/api/persona', { method: 'PUT', body: { text: 'Someone else entirely.' } });
   assert.equal(saved.status, 400); assert.match(saved.body.error, /personaFile/); assert.equal(existsSync(join(dir, 'undefined')), false);
+}));
+
+test('the page probes a model endpoint using managed credentials and returns capability results', () => page(async call => {
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const tools = body.tools ?? [];
+    const messages = body.messages ?? [];
+    const delta = tools.some((t: any) => t.function?.name === 'probe_echo') && !messages.some((m: any) => m.role === 'tool')
+      ? { role: 'assistant', tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'probe_echo', arguments: '{"word":"ok"}' } }] }
+      : { role: 'assistant', content: 'OK' };
+    const chunk = { id: 'p', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason: delta.tool_calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const secrets = (await call('/api/secrets')).body;
+    assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'PROBE_KEY', value: 'probe-secret', revision: secrets.revision } })).status, 200);
+    const probed = await call('/api/probe/model', {
+      method: 'POST',
+      body: {
+        requireVision: false,
+        model: {
+          provider: 'probe-gw', id: 'text-probe-model', apiKeyEnv: 'PROBE_KEY', api: 'openai-completions',
+          baseUrl: `http://127.0.0.1:${port}/v1`, input: ['text'], contextWindow: 65536, maxTokens: 4096, reasoning: false,
+        },
+      },
+    });
+    assert.equal(probed.status, 200);
+    assert.equal(probed.body.ok, true);
+    assert.equal(probed.body.checks.basic.status, 'pass');
+    assert.equal(probed.body.checks.tools.status, 'pass');
+    assert.equal(probed.body.checks.vision.status, 'skip');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 }));

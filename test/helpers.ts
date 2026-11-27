@@ -51,9 +51,12 @@ export function fixture(social?: SocialAdapter, existingStore?: Store, recall?: 
   const plugins = extensions ? new PluginHost([...extensions(store, local).map(plugin => ['qzone-share', 'qq-stickers', 'qq-faces', 'snowluma-tools'].includes(plugin.id) ? scopePlugin(plugin, 'qq_main', getSnowLumaCatalog().actions, adapter) : plugin), scopePlugin(rawSnowTools(local, cfg.adapters[0]!), 'qq_main', getSnowLumaCatalog().actions, adapter)]) : createPlugins(cfg, store, adapter, recall);
   const restart = () => {
     tools = createTools(cfg, store, adapter, () => brain.thought, recall, plugins);
-    brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) }, undefined, recall);
+    // pi-ai's fauxProvider double-counts input + cacheWrite when sessionId is set with cacheRetention !== 'none'.
+    const fauxStream = (target: typeof models, selected: () => ReturnType<typeof config>['model']) => (m: any, c: any, o: any) =>
+      target.streamSimple(m, c, { ...o, cacheRetention: selected().cacheRetention ?? 'none' });
+    brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: fauxStream(models, () => cfg.model) }, undefined, recall);
     reviewTools = forReview(createTools(cfg, store, adapter, () => reviewer.thought, recall, plugins));
-    reviewer = new PiBrain(cfg, store, reviewTools, { model: reviewFaux.getModel(), stream: reviewModels.streamSimple.bind(reviewModels) }, undefined, recall, undefined, 'review');
+    reviewer = new PiBrain(cfg, store, reviewTools, { model: reviewFaux.getModel(), stream: fauxStream(reviewModels, () => cfg.review?.model ?? cfg.model) }, undefined, recall, undefined, 'review');
     return brain;
   };
   restart();

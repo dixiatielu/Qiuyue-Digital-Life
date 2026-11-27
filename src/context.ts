@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type Message } from '@earendil-works/pi-ai';
+import { getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type ImageContent, type Message, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
 
 export const SUMMARY_PREFIX = 'Earlier exchanges have been consolidated into a continuity summary';
 export const IMAGE_TOKENS = 2000;
@@ -28,8 +28,28 @@ export function fitLines(text: string, limit: number, complete = true): string {
   while (lines.length && textTokens(lines.join('\n')) > limit) lines.pop();
   return lines.join('\n').trim();
 }
-export function toModelMessages(messages: AgentMessage[]): Message[] {
-  return messages.map(message => message.role === 'observation' ? { role: 'user', content: message.content, timestamp: message.timestamp } : message) as Message[];
+function userContentBlocks(content: UserMessage['content']): (TextContent | ImageContent)[] {
+  return typeof content === 'string' ? [{ type: 'text', text: content }] : content;
+}
+/** Merge adjacent user messages cleanly at the LLM wire boundary for strict role-alternation templates. */
+export function mergeConsecutiveUserMessages(messages: Message[]): Message[] {
+  const merged: Message[] = [];
+  for (const message of messages) {
+    const previous = merged.at(-1);
+    if (message.role === 'user' && previous?.role === 'user') {
+      const content = typeof previous.content === 'string' && typeof message.content === 'string'
+        ? `${previous.content}\n\n${message.content}`
+        : [...userContentBlocks(previous.content), ...userContentBlocks(message.content)];
+      merged[merged.length - 1] = { role: 'user', content, timestamp: message.timestamp };
+    } else {
+      merged.push(message);
+    }
+  }
+  return merged;
+}
+export function toModelMessages(messages: AgentMessage[], options?: { mergeUsers?: boolean }): Message[] {
+  const converted = messages.map(message => message.role === 'observation' ? { role: 'user', content: message.content, timestamp: message.timestamp } : message) as Message[];
+  return options?.mergeUsers ? mergeConsecutiveUserMessages(converted) : converted;
 }
 function contentTokens(content: unknown): number {
   if (typeof content === 'string') return textTokens(content);
@@ -94,18 +114,20 @@ export class TokenMeter {
   reset() { this.anchor = undefined; }
 }
 
-/** A summary sent elsewhere cannot replay model/endpoint-specific reasoning or signatures. Originals stay intact. */
-export function portableSummaryMessages(messages: AgentMessage[]): AgentMessage[] {
-  return messages.map(message => message.role !== 'assistant' ? message : {
-    ...message,
-    content: message.content.flatMap<AssistantMessage['content'][number]>(block => {
+/** Messages sent to another model/endpoint cannot replay provider-specific reasoning or opaque signatures. Originals stay intact. */
+export function portableMessages(messages: AgentMessage[]): AgentMessage[] {
+  return messages.flatMap((message): AgentMessage[] => {
+    if (message.role !== 'assistant') return [message];
+    const content = message.content.flatMap<AssistantMessage['content'][number]>(block => {
       if (block.type === 'thinking') return [];
       if (block.type === 'text') return [{ type: 'text' as const, text: block.text }];
       const { thoughtSignature: _signature, ...portable } = block;
       return [portable];
-    }),
+    });
+    return content.length ? [{ ...message, content }] : [];
   });
 }
+export const portableSummaryMessages = portableMessages;
 
 /** Only persist visible messages; thinking blocks and tool-private details are never archived. */
 export function persistableMessage(message: AgentMessage): AgentMessage {
@@ -185,6 +207,10 @@ export interface ContextCheckpoint {
   messages: AgentMessage[];
   sources: string[];
   anchor?: TokenAnchor;
+  /** Stable session ID for provider prompt-cache affinity; rotated on reset or cross-model handoff. */
+  sessionId?: string;
+  /** Model route that produced this checkpoint, used to detect cross-model Working Context handoffs. */
+  route?: string;
 }
 
 /** An assistant call and all its results form one indivisible block. */

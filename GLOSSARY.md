@@ -29,7 +29,7 @@ A group of environment events that the digital life reads and understands togeth
 _Avoid_: one event necessarily requiring one independent thought
 
 **Working Context**:
-What the model reads in a thought: the instructions, the observations since the last compaction with the actions taken and their results, and a summary of what came before. What the model said to no one is not part of it. It is saved between thoughts and continued after a restart, and begins afresh when the instructions, model, accounts, or tools change.
+What the model reads in a thought: the instructions, the observations since the last compaction with the actions taken and their results, and a summary of what came before. What the model said to no one is not part of it. It is saved between thoughts and continued after a restart—including across model changes, where provider-specific signatures are stripped and the token meter resets—and begins afresh when the instructions, accounts, or tools change.
 _Avoid_: long-term memory, chat history, model session
 
 **Ambient Event**:

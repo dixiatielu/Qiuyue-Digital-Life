@@ -4,6 +4,7 @@ import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
 import type { ThoughtContext, ToolRuntime } from './tool-runtime.js';
 import { waitFor } from './async.js';
 import type { UserActivity } from './plugin-sdk.js';
+import { sanitizeToolSchema } from './schema.js';
 
 export interface OnlineActivity extends UserActivity {
   memoryKind?: MemoryKind;
@@ -120,7 +121,7 @@ export class PluginHost {
     const register = (plugin: LifePlugin) => {
       let tools = cache.get(plugin);
       if (tools) return { plugin, tools };
-      tools = plugin.tools(runtime).map(tool => ({ ...tool, execute: async (...args: Parameters<AgentTool['execute']>) => {
+      tools = plugin.tools(runtime).map(tool => ({ ...tool, parameters: sanitizeToolSchema(tool.parameters), execute: async (...args: Parameters<AgentTool['execute']>) => {
         runtime.check(args[2]);
         if (this.stopping) throw new Error('The program is shutting down; plugin tools are unavailable.');
         if (!this.plugins.includes(plugin)) throw new Error(`Plugin ${plugin.id} was reloaded; this tool belongs to an old version.`);
@@ -161,7 +162,7 @@ export class PluginHost {
       const decorated = plugin.decorateTool(result, runtime);
       if (decorated.name !== result.name) throw new Error(`Plugin ${plugin.id} cannot rename tool ${result.name}.`);
       if (decorated === result) continue;
-      result = { ...decorated, execute: async (...args: Parameters<AgentTool['execute']>) => {
+      result = { ...decorated, parameters: sanitizeToolSchema(decorated.parameters), execute: async (...args: Parameters<AgentTool['execute']>) => {
         runtime.check(args[2]);
         if (this.stopping || !this.plugins.includes(plugin) || !this.enabled(plugin)) throw new Error(`Plugin ${plugin.id} is disabled, reloaded, or stopping.`);
         return decorated.execute(...args);

@@ -4,8 +4,19 @@ const apis = [['openai-completions', 'OpenAI Chat Completions'], ['openai-respon
 const gemini = api => api === 'google-generative-ai' || api === 'google-interactions';
 const geminiBaseHelp = () => t('Include the API version, e.g. https://generativelanguage.googleapis.com/v1beta, or your gateway’s equivalent path.', '地址须包含 API 版本，例如 https://generativelanguage.googleapis.com/v1beta，或网关对应的路径。');
 const thinking = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const cacheRetentions = [['', t('short (default)', 'short（默认）')], ['short', 'short'], ['long', 'long'], ['none', 'none']];
+const deferredModes = [['', t('auto (default — load seldom-used tools on demand)', 'auto（默认——按需加载低频工具）')], ['auto', 'auto'], ['in-place-only', t('in-place-only (only when gateway supports mid-conversation additions)', 'in-place-only（仅当网关支持对话中增量声明时）')], ['never', t('never (declare every tool up front)', 'never（启动时声明全部工具）')]];
 const sameEndpoint = (profile, section) => section?.baseUrl && profile.apiKeyEnv === section.apiKeyEnv && (!section.api || profile.api === section.api) && new URL(profile.baseUrl).href.replace(/\/+$/, '') === new URL(section.baseUrl).href.replace(/\/+$/, '');
 const safeSame = (profile, section) => { try { return sameEndpoint(profile, section); } catch { return false; } };
+
+function filterCompat(apiName, compat, compatKeysByApi) {
+  if (!compat || typeof compat !== 'object' || Array.isArray(compat)) return undefined;
+  const allowed = compatKeysByApi?.[apiName];
+  if (!Array.isArray(allowed)) return gemini(apiName) ? undefined : compat;
+  const set = new Set(allowed);
+  const kept = Object.fromEntries(Object.entries(compat).filter(([key]) => set.has(key)));
+  return Object.keys(kept).length ? kept : undefined;
+}
 
 function ModelList({ models, id, value }) {
   // Keep candidates in sync with the input instead of relying on native popup filtering.
@@ -18,18 +29,59 @@ async function listModels(profile, set) {
   catch (error) { failed(error); }
 }
 
-function ProviderEditor({ profile, secrets, onSave, onClose }) {
+function ProbePanel({ probe, onApply }) {
+  if (!probe || probe.running) return null;
+  if (probe.error) return html`<p class="note error">${probe.error}</p>`;
+  const labels = {
+    basic: t('Connectivity', '基础连通'),
+    compactionOff: t('Compaction (off)', '压缩（关闭思考）'),
+    consecutiveUsers: t('Consecutive users', '连续用户消息'),
+    vision: t('Vision', '图像理解'),
+    tools: t('Tool replay', '工具调用回放'),
+    strictTools: t('Strict schemas', '严格 Schema'),
+    midConvoTools: t('In-place tools', '对话中增量工具'),
+  };
+  const hasSuggestions = Boolean(
+    Object.keys(probe.suggestedCompat ?? {}).length ||
+    Object.keys(probe.suggestedOptions ?? {}).length,
+  );
+  return html`<div class=${`note ${probe.ok ? 'ok' : 'warn'}`}>
+    <div class="row wrap">
+      <strong>${probe.ok ? t('Capability probe passed', '能力探测通过') : t('Capability probe found issues', '能力探测发现兼容问题')}</strong>
+      ${probe.inheritedFrom ? html`<${Badge} kind="info">${t('Template', '模板')}: ${probe.inheritedFrom}<//>` : null}
+      ${hasSuggestions && onApply ? html`<button class="primary tiny" onClick=${() => onApply(probe)}>${t('Apply suggested settings', '一键应用建议配置')}</button>` : null}
+    </div>
+    <div class="stack small">
+      ${Object.entries(probe.checks ?? {}).map(([key, check]) => html`<div class="row wrap">
+        <${Badge} kind=${check.status === 'pass' ? 'ok' : check.status === 'fail' ? 'warn' : ''}>${labels[key] ?? key}: ${check.status}<//>
+        <span class="muted">${check.ms ? `${check.ms} ms · ` : ''}${check.error ?? check.detail ?? ''}</span>
+      </div>`)}
+    </div>
+    ${(probe.notes ?? []).length ? html`<div class="stack small">${probe.notes.map(note => html`<div>• ${note}</div>`)}</div>` : null}
+    ${hasSuggestions ? html`<div class="small mono">${t('Suggested', '建议设置')}: ${JSON.stringify({ ...(Object.keys(probe.suggestedCompat ?? {}).length ? { compat: probe.suggestedCompat } : {}), ...(probe.suggestedOptions ?? {}) })}</div>` : null}
+  </div>`;
+}
+
+function ProviderEditor({ profile, secrets, compatKeysByApi, onSave, onClose }) {
   const [draft, setDraft] = useState(profile);
   const [compat, setCompat] = useState(profile.compat ? JSON.stringify(profile.compat, null, 2) : '');
   const [models, setModels] = useState(null);
   const field = (key, value) => setDraft(current => ({ ...current, [key]: value }));
+  const changeApi = nextApi => {
+    field('api', nextApi);
+    if (!compat.trim()) return;
+    try {
+      const cleaned = filterCompat(nextApi, JSON.parse(compat), compatKeysByApi);
+      setCompat(cleaned ? JSON.stringify(cleaned, null, 2) : '');
+    } catch { /* leave invalid JSON for user to edit */ }
+  };
   const parsed = () => { if (!compat.trim()) return undefined; return JSON.parse(compat); };
   const save = () => { try { const { compat: _old, ...rest } = draft; const value = parsed(); onSave({ ...rest, ...(value ? { compat: value } : {}) }); } catch (error) { failed(error); } };
   return html`<${Modal} title=${profile.name ? t(`Provider: ${profile.name}`, `供应商：${profile.name}`) : t('New provider', '新供应商')} onClose=${onClose}
     footer=${html`<button class="ghost" onClick=${() => listModels(draft, setModels)}>${t('Test: list models', '测试：获取模型列表')}</button><button class="primary" onClick=${save}>${t('Save provider', '保存供应商')}</button>`}>
     <div class="fields">
       <div class="field"><div class="field-label"><label>${t('Name', '名称')}</label></div><input value=${draft.name} onInput=${event => field('name', event.currentTarget.value)} /></div>
-      <div class="field"><div class="field-label"><label>API</label></div><select value=${draft.api} onChange=${event => field('api', event.currentTarget.value)}>${apis.map(([id, name]) => html`<option value=${id}>${name}</option>`)}</select></div>
+      <div class="field"><div class="field-label"><label>API</label></div><select value=${draft.api} onChange=${event => changeApi(event.currentTarget.value)}>${apis.map(([id, name]) => html`<option value=${id}>${name}</option>`)}</select></div>
       <div class="field"><div class="field-label"><label>${t('Base URL', '接口地址')}</label></div><input value=${draft.baseUrl} placeholder=${gemini(draft.api) ? 'https://generativelanguage.googleapis.com/v1beta' : 'https://api.example.com/v1'} onInput=${event => field('baseUrl', event.currentTarget.value)} spellcheck="false" />
         ${gemini(draft.api) ? html`<div class="field-help">${geminiBaseHelp()}</div>` : null}</div>
       <div class="field"><div class="field-label"><label>${t('Credential name', '凭据名称')}</label></div><input list="secret-names" value=${draft.apiKeyEnv} onInput=${event => field('apiKeyEnv', event.currentTarget.value)} spellcheck="false" />
@@ -42,7 +94,7 @@ function ProviderEditor({ profile, secrets, onSave, onClose }) {
   <//>`;
 }
 
-function Providers({ profiles, secrets, form, assignments }) {
+function Providers({ profiles, secrets, form, assignments, compatKeysByApi }) {
   const [editing, setEditing] = useState(null);
   const save = async next => {
     try { const result = await api('/api/providers', { method: 'PUT', body: { providers: next } }); profiles.set(result); setEditing(null); toast(t('Providers saved.', '供应商已保存。'), 'ok'); }
@@ -62,7 +114,7 @@ function Providers({ profiles, secrets, form, assignments }) {
         <td>${uses(profile).map(name => html`<${Badge} kind="info">${name}<//> `)}</td>
         <td class="nowrap"><button class="ghost tiny" onClick=${() => setEditing(profile)}>${t('Edit', '编辑')}</button><button class="ghost tiny danger" onClick=${() => confirm(t(`Remove ${profile.name}?`, `删除 ${profile.name}？`)) && save(list.filter(item => item.id !== profile.id))}>${t('Remove', '删除')}</button></td></tr>`)}
     </tbody></table>` : html`<p class="muted">${t('No providers yet.', '还没有供应商。')}</p>`}
-    ${editing ? html`<${ProviderEditor} profile=${editing} secrets=${secrets} onClose=${() => setEditing(null)} onSave=${profile => save(list.some(item => item.id === profile.id) ? list.map(item => item.id === profile.id ? profile : item) : [...list, profile])} />` : null}
+    ${editing ? html`<${ProviderEditor} profile=${editing} secrets=${secrets} compatKeysByApi=${compatKeysByApi} onClose=${() => setEditing(null)} onSave=${profile => save(list.some(item => item.id === profile.id) ? list.map(item => item.id === profile.id ? profile : item) : [...list, profile])} />` : null}
   <//>`;
 }
 
@@ -89,12 +141,13 @@ function useModelAssignments(draft, credentialRevision) {
   return result.key === key ? result : {};
 }
 
-function ModelRole({ form, profiles, path, title, help, targets = [] }) {
+function ModelRole({ form, profiles, path, title, help, targets = [], resolvedUse, compatKeysByApi }) {
   const independent = form.get(path) !== undefined;
+  const requireVision = path !== 'compaction.model';
   const [test, setTest] = useState(null);
   const run = async target => {
     setTest({ running: true });
-    try { setTest(await api('/api/test/model', { method: 'POST', body: { model: target.model } })); }
+    try { setTest(await api('/api/test/model', { method: 'POST', body: { model: target.model, requireVision } })); }
     catch (error) { setTest({ error: error.message }); }
   };
   return html`<div class="stack">
@@ -104,30 +157,64 @@ function ModelRole({ form, profiles, path, title, help, targets = [] }) {
       ${!independent ? targets.length ? html`<div class="stack">${targets.map(target => html`<div class="row wrap"><span>${target.label} · ${t('following', '跟随')} <code>${target.source}</code>: <strong>${target.model.provider}/${target.model.id}</strong> · <code>${target.model.apiKeyEnv}</code></span><button class="ghost tiny" disabled=${test?.running} onClick=${() => run(target)}>${t('Test connection', '测试连接')}</button></div>`)}</div>` : html`<p class="muted small">${t('Effective models appear after the configuration is valid.', '配置有效后会显示实际使用的模型。')}</p>` : null}
       ${test && !test.running ? test.error ? html`<p class="note error">${test.error}</p>` : html`<p class="note ok">${test.ms} ms · ${test.text || test.stopReason}</p>` : null}
     <//>
-    ${independent ? html`<${ModelEditor} form=${form} profiles=${profiles} path=${path} title=${title} help=${t('Uses its own model, endpoint, credential, and reasoning setting. Takes effect after restart; the primary working context is retained.', '独立使用模型、端点、凭据和推理设置。重启后生效，保留主思考的工作上下文。')} />` : null}
+    ${independent ? html`<${ModelEditor} form=${form} profiles=${profiles} path=${path} title=${title} requireVision=${requireVision} resolvedUse=${resolvedUse} compatKeysByApi=${compatKeysByApi} help=${requireVision
+      ? t('Uses its own model, endpoint, credential, and reasoning setting. Takes effect after restart; the primary working context is retained.', '独立使用模型、端点、凭据和推理设置。重启后生效，保留主思考的工作上下文。')
+      : t('Uses its own model for summaries; text-only models are supported (images are downgraded automatically). Takes effect after restart.', '独立使用模型生成摘要；支持纯文本模型（图片会自动降级为占位说明）。重启后生效。')} />` : null}
   </div>`;
 }
 
-function ModelEditor({ form, profiles, path = 'model', title = t('Primary thinking', '主思考'), help = t('Everyday thinking and actions. Changing this model starts a fresh working context after restart.', '日常思考与行动使用的模型。更换后，重启时会新建工作上下文。') }) {
+function ModelEditor({ form, profiles, path = 'model', title = t('Primary thinking', '主思考'), help = t('Everyday thinking and actions. Changing the model hands off the existing working context seamlessly after restart.', '日常思考与行动使用的模型。更换模型后，重启时会平滑交接现有工作上下文（自动清理跨模型签名并重置 token 锚点）。'), requireVision = true, resolvedUse, compatKeysByApi }) {
   const model = form.get(path) ?? {};
   const listId = `${path.replaceAll('.', '-')}-models`;
   const custom = Boolean(model.api);
   const [models, setModels] = useState(null);
   const [test, setTest] = useState(null);
+  const [probe, setProbe] = useState(null);
   const providers = useAsync(() => custom ? Promise.resolve(null) : api('/api/catalog'), [custom]);
   const catalog = useAsync(() => custom || !model.provider ? Promise.resolve(null) : api(`/api/catalog?provider=${encodeURIComponent(model.provider)}`), [custom, model.provider]);
   const setModel = next => form.set(path, next);
-  const toCatalog = () => { const { api: _a, input: _i, contextWindow: _c, maxTokens: _m, reasoning: _r, compat: _p, baseUrl: _b, ...rest } = model; setModel(rest); };
-  const toCustom = () => setModel({ ...model, api: 'openai-completions', baseUrl: model.baseUrl ?? '', input: ['text', 'image'], contextWindow: model.contextWindow ?? 131072, maxTokens: model.maxTokens ?? 32768 });
-  const pick = profile => { const { compat: _old, ...rest } = model; setModel({ ...rest, provider: profile.name, api: profile.api, baseUrl: profile.baseUrl, apiKeyEnv: profile.apiKeyEnv, ...(profile.compat ? { compat: profile.compat } : {}) }); };
+  const toCatalog = () => { const { api: _a, baseModel: _bm, input: _i, contextWindow: _c, maxTokens: _m, reasoning: _r, compat: _p, baseUrl: _b, ...rest } = model; setModel(rest); };
+  const toCustom = () => setModel({ ...model, api: 'openai-completions', baseUrl: model.baseUrl ?? '', input: requireVision ? ['text', 'image'] : ['text'], contextWindow: model.contextWindow ?? 131072, maxTokens: model.maxTokens ?? 32768 });
+  const pick = profile => {
+    const { compat: _old, ...rest } = model;
+    const cleaned = filterCompat(profile.api, profile.compat, compatKeysByApi);
+    setModel({ ...rest, provider: profile.name, api: profile.api, baseUrl: profile.baseUrl, apiKeyEnv: profile.apiKeyEnv, ...(cleaned ? { compat: cleaned } : {}) });
+  };
+  const changeCustomApi = nextApi => {
+    const cleaned = filterCompat(nextApi, model.compat, compatKeysByApi);
+    const { compat: _old, ...rest } = model;
+    setModel({ ...rest, api: nextApi, ...(cleaned ? { compat: cleaned } : {}) });
+  };
   const run = async () => {
     setTest({ running: true });
-    try { setTest(await api('/api/test/model', { method: 'POST', body: { model } })); } catch (error) { setTest({ error: error.message }); }
+    try { setTest(await api('/api/test/model', { method: 'POST', body: { model, requireVision } })); } catch (error) { setTest({ error: error.message }); }
+  };
+  const runProbe = async () => {
+    setProbe({ running: true });
+    try { setProbe(await api('/api/probe/model', { method: 'POST', body: { model, requireVision } })); } catch (error) { setProbe({ error: error.message }); }
+  };
+  const applyProbe = report => {
+    const next = { ...model };
+    const suggestedCompat = filterCompat(report.api, { ...(model.compat ?? {}), ...(report.suggestedCompat ?? {}) }, compatKeysByApi);
+    if (suggestedCompat) next.compat = suggestedCompat;
+    for (const [key, value] of Object.entries(report.suggestedOptions ?? {})) next[key] = value;
+    setModel(next);
+    toast(t('Applied suggested compatibility settings to the draft. Save to persist.', '已将建议的兼容设置填入草稿，请点击保存生效。'), 'ok');
   };
   const input = model.input ?? [];
-  return html`<${Card} title=${title} actions=${html`<button onClick=${run} disabled=${test?.running}>${test?.running ? t('Testing…', '测试中…') : t('Send a test request', '发送测试请求')}</button>`}>
+  const selectedCatalog = !custom ? (catalog.data?.models ?? []).find(item => item.id === model.id) : undefined;
+  const supportedLevels = resolvedUse?.supportedThinkingLevels ?? selectedCatalog?.supportedThinkingLevels;
+  const supportedSet = supportedLevels ? new Set(supportedLevels) : null;
+  const currentThinking = model.thinkingLevel ?? '';
+  return html`<${Card} title=${title} actions=${html`
+    <button class="ghost" onClick=${runProbe} disabled=${probe?.running || test?.running}>${probe?.running ? t('Probing…', '探测中…') : t('Probe capabilities', '探测能力')}</button>
+    <button onClick=${run} disabled=${test?.running || probe?.running}>${test?.running ? t('Testing…', '测试中…') : t('Send a test request', '发送测试请求')}</button>`}>
     <p class="muted small">${help}</p>
+    ${resolvedUse?.inheritedFrom ? html`<div class="row wrap small"><${Badge} kind="info">${t('Inherited catalog template', '自动继承内置目录模板')}: ${resolvedUse.inheritedFrom}<//>
+      ${resolvedUse.effectiveThinkingLevel && resolvedUse.thinkingLevel !== resolvedUse.effectiveThinkingLevel ? html`<${Badge} kind="warn">${t(`Effective thinking: ${resolvedUse.effectiveThinkingLevel}`, `实际思考强度：${resolvedUse.effectiveThinkingLevel}`)}<//>` : null}
+    </div>` : null}
     ${test && !test.running ? test.error ? html`<p class="note error">${test.error}</p>` : html`<p class="note ok">${t(`Answered in ${test.ms} ms`, `${test.ms} 毫秒内回复`)}: <span class="mono">${test.text || t('(no text)', '（无文字）')}</span> · ${test.stopReason}</p>` : null}
+    <${ProbePanel} probe=${probe} onApply=${applyProbe} />
     <div class="row wrap">
       <label class="check"><input type="radio" checked=${!custom} onChange=${toCatalog} />${t('From the Pi catalog', 'Pi 内置模型目录')}</label>
       <label class="check"><input type="radio" checked=${custom} onChange=${toCustom} />${t('Custom endpoint', '自定义端点')}</label>
@@ -141,19 +228,35 @@ function ModelEditor({ form, profiles, path = 'model', title = t('Primary thinki
           <div class="row"><input list=${listId} value=${model.id ?? ''} onInput=${event => setModel({ ...model, id: event.currentTarget.value })} spellcheck="false" />
           <button class="ghost tiny" onClick=${() => listModels({ id: path, name: model.provider || 'model', api: model.api, baseUrl: model.baseUrl, apiKeyEnv: model.apiKeyEnv }, setModels)}>${t('List', '获取列表')}</button></div><${ModelList} id=${listId} models=${models} value=${model.id} /></div>`
         : html`<div class="field"><div class="field-label"><label>${t('Model', '模型')}</label></div><select value=${model.id ?? ''} onChange=${event => setModel({ ...model, id: event.currentTarget.value })}>
-          <option value="">—</option>${(catalog.data?.models ?? []).map(item => html`<option value=${item.id} disabled=${!item.input.includes('image')}>${item.id}${item.input.includes('image') ? '' : t(' (no images)', '（不支持图片）')}${item.reasoning ? ' · reasoning' : ''}</option>`)}</select></div>`}
+          <option value="">—</option>${(catalog.data?.models ?? []).map(item => html`<option value=${item.id} disabled=${requireVision && !item.input.includes('image')}>${item.id}${item.input.includes('image') ? '' : t(' (text only)', '（纯文本）')}${item.reasoning ? ' · reasoning' : ''}</option>`)}</select></div>`}
       ${custom ? html`
-        <${ConfigField} form=${form} path=${`${path}.api`} type="select" options=${apis} label="API" />
+        <div class="field"><div class="field-label"><label>API</label></div><select value=${model.api ?? ''} onChange=${event => changeCustomApi(event.currentTarget.value)}>${apis.map(([id, name]) => html`<option value=${id}>${name}</option>`)}</select></div>
         <${ConfigField} form=${form} path=${`${path}.baseUrl`} label=${t('Base URL', '接口地址')} help=${gemini(model.api) ? geminiBaseHelp() : undefined} />` : html`<${ConfigField} form=${form} path=${`${path}.baseUrl`} label=${t('Base URL override', '覆盖接口地址')} help=${t('Optional; leave empty for the provider default.', '可选；留空使用供应商默认地址。')} />`}
       <${ConfigField} form=${form} path=${`${path}.apiKeyEnv`} label=${t('Credential name', '凭据名称')} help=${t('The named credential is used for both catalog models and custom endpoints.', '内置目录模型和自定义端点都使用这里指定的凭据。')} />
-      <${ConfigField} form=${form} path=${`${path}.thinkingLevel`} type="select" options=${[['', t('(off)', '（关闭）')], ...thinking.map(level => [level, level])]} label=${t('Thinking level', '思考强度')} help=${t('Only a reasoning model can think; with the OpenAI format, off sends nothing and the model uses its own default.', '只有推理模型可以思考；使用 OpenAI 格式时，off 不发送参数，模型按自身默认强度思考。')} />
+      <div class="field"><div class="field-label"><label>${t('Thinking level', '思考强度')}</label></div>
+        <select value=${currentThinking} onChange=${event => { const value = event.currentTarget.value; const next = { ...model }; if (value) next.thinkingLevel = value; else delete next.thinkingLevel; setModel(next); }}>
+          <option value="">${t('(off / model default)', '（关闭 / 模型默认）')}</option>
+          ${thinking.map(level => {
+            const unsupported = supportedSet && !supportedSet.has(level);
+            return html`<option value=${level} disabled=${Boolean(unsupported && currentThinking !== level)}>${level}${unsupported ? t(' (unsupported)', '（不支持）') : ''}</option>`;
+          })}
+        </select>
+        <div class="field-help">${supportedLevels
+          ? t(`Supported by this model: ${supportedLevels.join(', ')}.`, `当前模型支持：${supportedLevels.join(', ')}。`)
+          : t('Only a reasoning model can think; unsupported levels are automatically clamped.', '只有推理模型可以思考；不支持的档位会自动钳制到最接近的可用档位。')}</div>
+      </div>
       ${custom ? html`
+        <${ConfigField} form=${form} path=${`${path}.baseModel`} label=${t('Catalog template (optional)', '内置目录模板（可选）')} placeholder="anthropic/claude-fable-5" help=${t('Override automatic catalog template matching (inherits thinking levels, image limits, and model-intrinsic compat).', '覆盖自动匹配的内置目录模板（继承思考档位映射、图片缩放限制和模型固有 compat）。')} />
         <div class="field"><div class="field-label"><label>${t('Input', '输入能力')}</label></div><div class="row">
           ${['text', 'image'].map(kind => html`<label class="check"><input type="checkbox" checked=${input.includes(kind)} onChange=${event => setModel({ ...model, input: event.currentTarget.checked ? [...new Set([...input, kind])] : input.filter(item => item !== kind) })} />${kind}</label>`)}</div></div>
         <${ConfigField} form=${form} path=${`${path}.contextWindow`} type="int" label=${t('Context window (tokens)', '上下文窗口（tokens）')} />
         <${ConfigField} form=${form} path=${`${path}.maxTokens`} type="int" label=${t('Largest output (tokens)', '最大输出（tokens）')} />
-        <${ConfigField} form=${form} path=${`${path}.reasoning`} type="bool" label=${t('Reasoning model', '推理模型')} />
-        <${ConfigField} form=${form} path=${`${path}.compat`} type="json" label="compat" help=${gemini(model.api) ? t('Leave empty for Gemini native.', 'Gemini 原生格式请留空。') : t('Gateway differences, such as maxTokensField or thinkingFormat.', '网关差异设置，例如 maxTokensField、thinkingFormat。')} />` : null}
+        <${ConfigField} form=${form} path=${`${path}.reasoning`} type="bool" label=${t('Reasoning model', '推理模型')} />` : null}
+      <${ConfigField} form=${form} path=${`${path}.cacheRetention`} type="select" options=${cacheRetentions} label=${t('Prompt cache retention', '提示词缓存策略')} help=${t('Controls provider prompt caching and session affinity (default: short).', '控制供应商提示词缓存与会话亲和度（默认 short）。')} />
+      ${path !== 'compaction.model' ? html`<${ConfigField} form=${form} path=${`${path}.deferredTools`} type="select" options=${deferredModes} label=${t('Deferred tools', '低频工具按需加载')} help=${t('Hides ~190 seldom-used platform tools behind find_tools until needed.', '默认通过 find_tools 按需加载约 190 个低频平台工具，减少 schema 膨胀。')} />` : null}
+      <${ConfigField} form=${form} path=${`${path}.maxRetries`} type="int" placeholder="2" label=${t('Transient retries', '瞬时错误重试次数')} help=${t('Automatic retries on 429/5xx/network errors (0–10, default 2).', '遇到 429/5xx/网络波动时的自动重试次数（0–10，默认 2）。')} />
+      <${ConfigField} form=${form} path=${`${path}.mergeConsecutiveUsers`} type="bool" label=${t('Merge consecutive user turns', '合并连续用户消息')} help=${t('Enable for strict chat-template gateways that reject back-to-back user messages.', '当网关或模型模板拒绝连续 user 消息时开启。')} />
+      <${ConfigField} form=${form} path=${`${path}.compat`} type="json" label="compat" help=${custom && gemini(model.api) ? t('Leave empty for Gemini native.', 'Gemini 原生格式请留空。') : t('Gateway differences, such as maxTokensField, thinkingFormat, or mid-conversation tool flags.', '网关差异设置，例如 maxTokensField、thinkingFormat 或对话中工具增量开关。')} />
     </div>
   <//>`;
 }
@@ -217,29 +320,36 @@ export function ModelsPage() {
   const form = useConfigDraft();
   const profiles = useAsync(() => api('/api/providers'));
   const secrets = useAsync(() => api('/api/secrets'));
+  const catalogMeta = useAsync(() => api('/api/catalog'));
   const resolved = useModelAssignments(form.draft, secrets.data?.revision);
   if (!form.state.data || !profiles.data || !secrets.data) return html`<${Loading} state=${!form.state.data ? form.state : !profiles.data ? profiles : secrets} />`;
   if (!form.raw) return html`<p class="note error">${t('config.json is not valid JSON; repair it on the configuration page first.', 'config.json 不是有效的 JSON，请先在配置页修复。')}</p>`;
   if (!form.draft) return html`<${Loading} state=${form.state} />`;
   const list = profiles.data.providers;
   const assignments = resolved.data;
+  const compatKeysByApi = catalogMeta.data?.compatKeysByApi;
+  const uses = assignments?.readiness?.uses ?? [];
+  const mainUse = uses.find(item => item.owner === 'main' && item.purpose === 'thought');
+  const reviewUse = uses.find(item => item.owner === 'review' && item.purpose === 'review');
+  const compactionUse = uses.find(item => item.owner === 'main' && item.purpose === 'compaction');
   const reviewTargets = assignments ? [{ label: t('Review', '复盘'), model: assignments.review.thinking, source: assignments.review.thinkingSource }] : [];
   const summaryTargets = assignments ? ['main', 'review'].map(owner => ({ label: owner === 'main' ? t('Primary context', '主思考上下文') : t('Review context', '复盘上下文'), model: { ...assignments[owner].compaction, thinkingLevel: assignments[owner].compactionThinkingLevel }, source: assignments[owner].compactionSource })) : [];
   return html`
     <${PageHeader} title=${t('Models & connections', '模型与连接')} eyebrow="MODELS & PROVIDERS" description=${t('Configure thinking, recall and drawing in one place.', '为思考、回忆和创作，选择合适的模型。')} />
     <${Tabs} value=${tab} onChange=${setTab} tabs=${[['main', t('Primary thinking', '主思考')], ['review', t('Memory review', '记忆复盘')], ['compaction', t('Context compaction', '上下文压缩')], ['embedding', 'Embedding'], ['drawing', t('Drawing', '画图模型')], ['providers', t('Providers', '供应商')], ['credentials', t('Credentials', '凭据')]]} />
     ${resolved.error ? html`<p class="note error">${resolved.error.message}</p>` : assignments?.readiness.problems.length ? html`<div class="note warn">${assignments.readiness.problems.map(problem => html`<div>${problem}</div>`)}</div>` : null}
-    <div hidden=${tab !== 'providers'}><${Providers} profiles=${profiles} secrets=${secrets.data.entries} form=${form} assignments=${assignments} /></div>
-    <div hidden=${tab !== 'main'}><${ModelEditor} form=${form} profiles=${list} /></div>
+    ${assignments?.readiness.warnings?.length ? html`<div class="note warn">${assignments.readiness.warnings.map(warning => html`<div>${warning}</div>`)}</div>` : null}
+    <div hidden=${tab !== 'providers'}><${Providers} profiles=${profiles} secrets=${secrets.data.entries} form=${form} assignments=${assignments} compatKeysByApi=${compatKeysByApi} /></div>
+    <div hidden=${tab !== 'main'}><${ModelEditor} form=${form} profiles=${list} resolvedUse=${mainUse} compatKeysByApi=${compatKeysByApi} /></div>
     <div hidden=${tab !== 'review'} class="stack">
-      <${ModelRole} form=${form} profiles=${list} path="review.model" title=${t('Memory review', '记忆复盘')} help=${t('Follows the primary model unless configured independently. Reviews share her persona and memory and cannot send messages.', '默认跟随主模型，也可以独立配置。复盘共享她的人格与记忆，不能发送消息。')} targets=${reviewTargets} />
+      <${ModelRole} form=${form} profiles=${list} path="review.model" title=${t('Memory review', '记忆复盘')} help=${t('Follows the primary model unless configured independently. Reviews share her persona and memory and cannot send messages.', '默认跟随主模型，也可以独立配置。复盘共享她的人格与记忆，不能发送消息。')} targets=${reviewTargets} resolvedUse=${reviewUse} compatKeysByApi=${compatKeysByApi} />
       <${Card} title=${t('Review context', '复盘上下文')}><div class="fields">
         <${ConfigField} form=${form} path="review.limits.contextTokens" type="int" label=${t('Context window used (tokens)', '使用的上下文窗口（tokens）')} placeholder=${form.get('limits.contextTokens') ?? form.effective.limits?.contextTokens} help=${t('Unset follows the primary context cap.', '不设置则跟随主思考窗口上限。')} />
         <${ConfigField} form=${form} path="review.limits.outputReserveTokens" type="int" label=${t('Output reserve (tokens)', '输出预留（tokens）')} placeholder=${form.get('limits.outputReserveTokens') ?? form.effective.limits?.outputReserveTokens} help=${t('Unset follows the primary output reserve.', '不设置则跟随主思考输出预留。')} />
       </div><//>
     </div>
     <div hidden=${tab !== 'compaction'} class="stack">
-      <${ModelRole} form=${form} profiles=${list} path="compaction.model" title=${t('Context compaction', '上下文压缩')} help=${t('By default, each context uses its own model for summaries. An independent model summarizes both contexts.', '默认各自使用所属上下文的模型。独立配置后，主思考和复盘都由指定模型生成摘要。')} targets=${summaryTargets} />
+      <${ModelRole} form=${form} profiles=${list} path="compaction.model" title=${t('Context compaction', '上下文压缩')} help=${t('By default, each context uses its own model for summaries. An independent model summarizes both contexts and may be text-only.', '默认各自使用所属上下文的模型。独立配置后，主思考和复盘都由指定模型生成摘要，支持纯文本模型。')} targets=${summaryTargets} resolvedUse=${compactionUse} compatKeysByApi=${compatKeysByApi} />
       <${Card} title=${t('Summary budget', '摘要预算')}><div class="fields">
         <${ConfigField} form=${form} path="compaction.contextTokens" type="int" label=${t('Summary request window (tokens)', '摘要请求窗口（tokens）')} help=${t('Unset follows each owner. The generated summary must still fit that owner’s context.', '不设置则跟随各自上下文。生成结果仍须符合原上下文的预算。')} />
         <${ConfigField} form=${form} path="compaction.summaryMaxTokens" type="int" label=${t('Summary length limit (tokens)', '摘要长度上限（tokens）')} />

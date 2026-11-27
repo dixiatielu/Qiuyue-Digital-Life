@@ -24,15 +24,17 @@
 
 ## 模型
 
-`model.thinkingLevel` 设置推理模型每轮思考的强度：`off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`。自定义模型还需将 `model.reasoning` 设为 `true`。使用 OpenAI Chat Completions 时，强度如何发送由 `model.compat.thinkingFormat` 决定，请使用接口接受的格式，网关可能拒绝其他格式。使用 OpenAI 格式时，`off` 不发送任何参数，模型按自身默认强度思考；想尽量少思考请用 `minimal`。
+`model.thinkingLevel` 设置推理模型每轮思考的强度：`off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`。自定义模型还需将 `model.reasoning` 设为 `true`。若当前模型不支持所选档位，系统会依据 Pi 的模型元数据自动钳制到最接近的可用档位，并在 `validate` 与管理页中给出提示。Pi 内置目录模型也支持分层覆盖（`baseUrl`、`compat`、`headers`、`thinkingLevelMap`、`thinkingBudgets`、`samplingParams`、`cacheRetention`、`maxRetries`、`maxRetryDelayMs`、`deferredTools`、`mergeConsecutiveUsers`）。
 
-`model` 负责日常思考与行动。可选的 `review.model` 和 `compaction.model` 接受同样的完整模型配置，包括自定义端点能力、凭据名称和思考强度。例如，把较便宜的模型放在 `model`，再将强模型的完整配置分别复制到 `review.model` 和 `compaction.model`。三个用途都须支持图片输入，共享同一人格、长期记忆和持续状态。
+`model` 负责日常思考与行动。可选的 `review.model` 和 `compaction.model` 接受同样的完整模型配置，包括自定义端点能力、凭据名称和思考强度。`model` 与 `review.model` 须支持图片输入；`compaction.model` 支持纯文本模型（上下文中的图片会在发送摘要请求时自动降级为占位说明）。三者共享同一人格、长期记忆和持续状态。
 
 ### 自定义端点
 
-自定义端点支持 `openai-completions`、`openai-responses`、`anthropic-messages`、Gemini 原生的 `google-generative-ai`，以及 Gemini Interactions API（`google-interactions`）。管理页中的供应商和三个模型用途都可选择 **Gemini (native)**，支持获取模型列表和连接测试。使用 Pi 内置的 Gemini 模型时，供应商填 `google`，从 `npm run dev -- models google` 选择模型 ID，无需填写 `api`。
+自定义端点支持 `openai-completions`、`openai-responses`、`anthropic-messages`、Gemini 原生的 `google-generative-ai`，以及 Gemini Interactions API（`google-interactions`）。自定义端点会按 `model.baseModel`、精确 `model.id`、去除供应商前缀的 ID 或最长目录 ID 前缀自动继承 Pi 内置目录中的**模型固有元数据**（如 `thinkingLevelMap`、图片缩放限制，以及 `forceAdaptiveThinking`、`thinkingFormat`、`requiresReasoningContentOnAssistantMessages` 等模型固有 `compat`），同时不会把依赖网关行为的选项（如对话中增量工具声明或严格模式）泄漏到未知网关。`config.json` 中显式填写的字段始终优先。
 
-Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 token 上限替换为实际模型的值：
+管理页支持模型列表、连接测试与自动能力探测。可以运行 `npm run dev -- models probe [main|review|compaction] --config config.json` 或在管理页「模型」点击 **探测能力**，一次性检测基础连通、关闭思考压缩、连续用户消息、图像理解、多轮工具调用回放、严格 Schema 及对话中增量工具声明，并可一键应用建议的 `compat` 与参数。
+
+使用 Pi 内置的 Gemini 模型时，供应商填 `google`，从 `npm run dev -- models google` 选择模型 ID，无需填写 `api`。Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 token 上限替换为实际模型的值：
 
 ```json
 {
@@ -49,23 +51,23 @@ Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 to
 }
 ```
 
-`google-interactions` 使用同样的配置，只需把 `api` 改为 `"google-interactions"`；接口地址同样写到 API 版本为止，请求发往 `<baseUrl>/interactions`。管理页中对应的选项是 **Gemini (Interactions)**。修改 `api` 与更换模型一样，会开始新的工作上下文。
+`google-interactions` 使用同样的配置，只需把 `api` 改为 `"google-interactions"`；接口地址同样写到 API 版本为止，请求发往 `<baseUrl>/interactions`。更换 `model` 或修改 `api` 后，重启时会平滑交接现有工作上下文——自动清理跨模型签名、重置 token 锚点，并在新模型窗口更小时自动压缩。
 
 ### 按需加载工具
 
-模型接口支持在对话中途接收新工具时，不常用的原生操作只在指令里按名称列出，模型用 `find_tools` 要求后才声明（[ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)）。所有已启用的工具始终可用，操作员的允许和拒绝规则不变。适用于 `google-interactions`，以及 `compat` 声明支持的 `anthropic-messages`、`openai-responses`、`openai-completions` 模型：`supportsMidConvoSystemMessages` 分别配合 `supportsMidConvoToolChanges`、`supportsAdditionalTools`、`supportsMidConvoToolAdditions`。Pi 的内置目录已为支持的模型设置这些选项；自定义模型请在确认端点确实支持后再设置。其它模型（包括 `google-generative-ai`）仍从一开始就声明全部工具。
+所有可解析的模型默认按需加载低频原生工具（`model.deferredTools: "auto"`）：低频工具仅在指令中按名称与简介列出，模型通过 `find_tools` 请求后再声明（[ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)）。所有已启用工具始终可用，操作员的允许和拒绝规则不变。在 `compat` 声明支持对话中增量工具的路由（`supportsMidConvoSystemMessages` 配合对应 API 开关）或 `google-interactions` 上，Pi 会在对话中原地追加工具定义而不破坏前缀缓存；在其他路由上则按需刷新顶层工具列表。可将 `model.deferredTools` 设为 `"in-place-only"` 或 `"never"` 来调整策略。所有声明的工具 Schema 都会自动做跨供应商清洗；瞬时 429/5xx 错误会自动重试（`maxRetries`，默认 `2`），同时启用持久会话缓存亲和（`cacheRetention`，默认 `"short"`）、确定性图片缩放，以及上下文溢出的有界自动压缩恢复。
 
 在管理页「凭据」或 `credentials.json` 中保存 `GEMINI_API_KEY`。原生适配器使用 `x-goog-api-key` 鉴权，调用 `models/{id}:streamGenerateContent`；`baseUrl` 必须包含 API 版本路径（通常为 `/v1beta`），也可包含网关的路径前缀。Gemini 的 `compat` 请留空，Pi 会将 `thinkingLevel` 映射为模型原生的思考等级或 token 预算。模型列表按原生格式翻页，并排除明确只支持 embedding 等其他方法的模型。参见 Google 的 [API 参考](https://ai.google.dev/api)和[模型列表参考](https://aistudio.google.com/api-reference/models/list-models)。原生支持适用于思考、复盘和压缩；embedding 与画图仍使用各自文档说明的 OpenAI 兼容接口。
 
 ### 继承与压缩
 
-不设置 `review.model` 时，复盘跟随主模型。不设置 `compaction.model` 时，各自使用所属上下文的模型生成摘要；显式设置后，主思考与复盘都由该模型压缩。删除 override 表示跟随，空模型对象或 `null` 无效。独立配置不会与其他模型逐字段合并，请求失败也不会自动切换模型。跟随模式下的摘要请求不主动开启额外推理；独立压缩模型使用自己的 `thinkingLevel`，默认 off。
+不设置 `review.model` 时，复盘跟随主模型。不设置 `compaction.model` 时，各自使用所属上下文的模型生成摘要；显式设置后，主思考与复盘都由该模型压缩，且可使用纯文本模型。删除 override 表示跟随，空模型对象或 `null` 无效。独立配置不会与其他模型逐字段合并，请求失败也不会自动切换模型。跟随模式下的摘要请求不主动开启额外推理；独立压缩模型使用自己的 `thinkingLevel`，默认 off。
 
 复盘可独立设置 `review.limits.contextTokens` 和 `review.limits.outputReserveTokens`，未设置的字段跟随 `limits`。`compaction.contextTokens` 限制摘要请求窗口，默认跟随所属上下文的窗口配置，并受摘要模型实际窗口限制；`compaction.summaryMaxTokens` 限制包含来源引用的摘要长度。即使摘要模型窗口更大，结果仍必须放得回原上下文。校验命令会列出模型分配、缺少的凭据和不足的预算。输出预留包含推理量；Anthropic 按预算推理需要超过 1,024 tokens 的输出空间。
 
 主思考上下文超过输入预算的 `compaction.idleRatio`（默认 85%），空闲满 `compaction.idleAfterMs`（默认 30 秒），且没有待处理的唤醒事件时，会在后台压缩。新消息可以继续使用现有上下文回复；摘要在请求边界或思考结束后，仅替换启动时选定的旧历史，保留当前尾部、新增对话和最新运行状态。只有超过完整输入预算时才等待已有摘要；没有可用摘要时，才在前台压缩。暂停、删除和上下文重置会使后台任务失效，插件维护会等待它结束。
 
-管理页的「模型」支持三种用途、继承开关、预算和连接测试。修改后重启生效；只改复盘或压缩设置会保留主工作上下文，修改 `model` 会新建工作上下文，记忆和持续状态保留。「状态总览 → 模型用量」分别展示最近 24 小时主思考、复盘及两者压缩的用量。所有尝试共用每日调用上限，每次重试只计一次。缺少的用量和旧记录的用途标为未知，SDK 中的零费用不代表免费。
+管理页的「模型」支持三种用途、继承开关、预算、连接测试与能力探测。修改后重启生效；修改模型配置会平滑交接现有主工作上下文，只有修改指令、账号或工具集时才会新建工作上下文，记忆和持续状态始终保留。「状态总览 → 模型用量」分别展示最近 24 小时主思考、复盘及两者压缩的用量。所有尝试共用每日调用上限，每次重试只计一次。缺少的用量和旧记录的用途标为未知，SDK 中的零费用不代表免费。
 
 ## 可选能力
 

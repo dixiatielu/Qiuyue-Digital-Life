@@ -9,6 +9,7 @@ import { SnowLumaActionError as SnowLumaApiError } from '../src/adapters/snowlum
 const unsupportedActions = ['unsupported_test_action', '.compatibility_action'];
 import { fauxAssistantMessage as answer, fauxToolCall as call, getCurrentSystemPrompt, getCurrentTools } from '@earendil-works/pi-ai';
 import { allowedSnowLumaAction, findSnowLumaAction, getSnowLumaCatalog } from '../src/adapters/snowluma/catalog.js';
+import { sanitizeToolSchema } from '../src/schema.js';
 import { loadConfig } from '../src/config.js';
 import { event, fixture } from './helpers.js';
 
@@ -23,14 +24,23 @@ test('generated native tools expose canonical native names and schemas directly'
       assert.match(action.name, /^[a-zA-Z0-9_-]{1,64}$/);
       const tool = f.tools.current().find(tool => tool.name === `qq_main__${action.name}`)!;
       assert.ok(tool, action.name);
-      // add_custom_face also takes the description it is saved with; OneBot message fields gain explicit anyOf typing for constrained tool calling.
-      if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, desc: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, desc: undefined } });
+      // Every declared schema is sanitized (no additionalProperties: true, no untyped properties);
+      // add_custom_face also takes the description it is saved with, and untyped SnowLuma fields gain explicit types.
+      const sanitized = sanitizeToolSchema(action.inputSchema) as Record<string, any>;
+      assert.doesNotMatch(JSON.stringify(tool.parameters), /"additionalProperties":true/);
+      for (const [key, prop] of Object.entries((tool.parameters as any).properties ?? {})) {
+        const schema = prop as Record<string, unknown>;
+        assert.ok(schema.type || schema.anyOf || schema.oneOf || schema.allOf || schema.enum || Object.hasOwn(schema, 'const'), `${action.name}.${key} must be typed`);
+      }
+      if (action.name === 'add_custom_face') assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, desc: undefined } }, { ...sanitized, properties: { ...sanitized.properties, desc: undefined } });
       else if (['send_group_msg', 'send_private_msg', 'send_msg'].includes(action.name)) {
         const msg = (tool.parameters as any).properties.message;
         assert.ok(Array.isArray(msg.anyOf) && msg.anyOf.length === 3, action.name);
         assert.equal(msg.description, (action.inputSchema as any).properties.message.description);
-        assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, message: undefined } }, { ...action.inputSchema, properties: { ...(action.inputSchema as any).properties, message: undefined } });
-      } else assert.deepEqual(tool.parameters, action.inputSchema);
+        assert.deepEqual({ ...tool.parameters, properties: { ...(tool.parameters as any).properties, message: undefined } }, { ...sanitized, properties: { ...sanitized.properties, message: undefined } });
+      } else if (['create_flash_task', 'download_file', 'get_group_file_url', 'send_forward_msg', 'send_group_forward_msg', 'send_private_forward_msg', 'upload_forward_msg'].includes(action.name)) {
+        assert.deepEqual(Object.keys((tool.parameters as any).properties ?? {}).sort(), Object.keys(sanitized.properties ?? {}).sort(), action.name);
+      } else assert.deepEqual(tool.parameters, sanitized);
       const common = ['send_group_msg', 'send_private_msg', 'set_group_reaction', 'group_poke', 'get_msg', 'fetch_custom_face_detail', 'send_custom_face', 'add_custom_face', 'modify_custom_face', 'delete_msg', 'get_qzone_feeds', 'get_qzone_msg_detail', 'send_qzone_msg', 'like_qzone', 'comment_qzone', 'get_ai_characters', 'send_group_ai_record', 'set_diy_online_status'].includes(action.name);
       // A seldom-used interface says what it is and no more, and is loaded on demand where the model's API can do that (ADR-0023).
       if (!common) assert.equal(tool.description.replaceAll('qq_main__', ''), action.summary ?? action.name);

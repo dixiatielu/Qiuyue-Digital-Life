@@ -1,8 +1,8 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
-import { createModelBackend, modelBudget, modelRoute, modelUse, type ModelOwner } from './model.js';
+import { createModelBackend, effectiveThinkingLevel, modelBudget, modelRoute, modelUse, shouldMergeConsecutiveUsers, type ModelOwner } from './model.js';
 import { GEMINI_INTERACTIONS } from './gemini-interactions.js';
-import { createInitialSystemMessage, getCurrentTools, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai';
+import { createInitialSystemMessage, getCurrentTools, isContextOverflow, isRecoverableLength, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
@@ -10,8 +10,9 @@ import type { EnvironmentEvent, Memory, MemoryKind, Observation } from './domain
 import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, digest, eventRef } from './store.js';
 import { fetchImage } from './web.js';
+import { normalizeImageBlocks, prepareModelImage } from './image.js';
 import { ensureCurrent, FIND_TOOLS, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldNoopCalls, foldReplies, foldToolResults, IMAGE_TOKENS, portableSummaryMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
+import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldNoopCalls, foldReplies, foldToolResults, IMAGE_TOKENS, portableMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
 import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { waitFor } from './async.js';
@@ -72,12 +73,16 @@ export interface Brain {
   abort(): void;
 }
 
-/** What a persisted working context belongs to: when any of it changes, the next start begins a fresh one. */
+/**
+ * What a persisted working context belongs to: when instructions, accounts, tools, or plugin contracts change, the
+ * next start begins a fresh working context. Changing the model or its parameters hands off the working context
+ * seamlessly, stripping foreign signatures and resetting the token meter on restore.
+ */
 export function contextIdentity(config: Config, tools: ToolSet) {
   const contracts = tools.plugins.installed().filter(plugin => plugin.contextVersion !== undefined && (plugin.enabled?.() ?? true)).map(plugin => [plugin.id, plugin.contextVersion]);
   const current = tools.current();
   const instructions = systemInstructions(config, tools.plugins.activityPrompts(new Set(current.map(tool => tool.name))), tools.deferred());
-  return digest({ instructions, model: config.model, accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })), tools: current.map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
+  return digest({ instructions, accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })), tools: current.map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
 }
 
 export class PiBrain implements Brain {
@@ -120,6 +125,8 @@ export class PiBrain implements Brain {
   private completed?: { messages: AgentMessage[]; seen: string[]; sources: string[]; compactions: number; anchor: ContextCheckpoint['anchor']; turns: number };
   private background?: BackgroundCompaction;
   private lastCallId?: string;
+  private sessionId: string = crypto.randomUUID();
+  private lastAssistant?: AssistantMessage;
   private readonly summaryBackend?: { model: Model<any>; stream: StreamFn };
   constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential, private owner: ModelOwner = 'main', compactionBackend?: { model: Model<any>; stream: StreamFn }) {
     const use = modelUse(config, owner);
@@ -128,31 +135,51 @@ export class PiBrain implements Brain {
     const loading = (send: StreamFn): StreamFn => !tools.loading.enabled ? send : (target, context, options) => target.api === GEMINI_INTERACTIONS ? send(target, context, { ...options, toolLoader: FIND_TOOLS } as typeof options) : send(target, context, options);
     const stream = loading(transport);
     this.stream = stream;
-    const summary = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential) : undefined);
+    const summary = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential, { requireVision: false }) : undefined);
     this.summaryBackend = summary && { model: summary.model, stream: loading(summary.stream) };
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
+    const requestedThinking = use.thinking.thinkingLevel ?? 'off';
+    const initialThinking = model.reasoning
+      ? (requestedThinking !== 'off'
+          ? effectiveThinkingLevel(model, requestedThinking)
+          : model.api === 'anthropic-messages' && model.thinkingLevelMap?.off === null
+            ? effectiveThinkingLevel(model, 'off')
+            : 'off')
+      : requestedThinking;
+    const mergeUsers = shouldMergeConsecutiveUsers(use.thinking, model);
     this.agent = new Agent({
-      initialState: { model, systemPrompt: this.instructions(), tools: tools.declared(), thinkingLevel: use.thinking.thinkingLevel ?? 'off' },
-      streamFn: (target, context, options) => stream(target, context, { ...options, maxTokens: Math.min(modelUse(config, owner).limits.outputReserveTokens, target.maxTokens) }),
+      initialState: { model, systemPrompt: this.instructions(), tools: tools.declared(), thinkingLevel: initialThinking },
+      sessionId: this.sessionId,
+      thinkingBudgets: use.thinking.thinkingBudgets,
+      maxRetryDelayMs: use.thinking.maxRetryDelayMs ?? 60_000,
+      streamFn: (target, context, options) => stream(target, context, {
+        ...options,
+        sessionId: options?.sessionId ?? this.sessionId,
+        cacheRetention: options?.cacheRetention ?? use.thinking.cacheRetention ?? 'short',
+        maxTokens: Math.min(modelUse(config, owner).limits.outputReserveTokens, target.maxTokens),
+      }),
       getApiKey: () => credential(use.thinking.apiKeyEnv), toolExecution: 'sequential', steeringMode: 'all',
-      convertToLlm: toModelMessages,
+      convertToLlm: messages => toModelMessages(messages, { mergeUsers }),
       // What a thought has loaded is declared from its next turn on; Pi writes the change into the transcript.
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.declared() } }),
       beforeToolCall: async ({ toolCall, args }) => (await this.skipStale(toolCall.name, args)) ?? this.skipRepeated(toolCall.id, toolCall.name, args),
       // A batch ends the thought when every call in it does. Something remembered beside a message sent is part of that reply, not a reason to decide again (ADR-0028).
       afterToolCall: async ({ toolCall, args, isError, result }) => {
         if (isError) return;
+        const normalized = await normalizeImageBlocks(result.content, this.agent.state.model);
+        const contentPatch = normalized.changed ? { content: normalized.content } : undefined;
         if ((result.details as { noop?: unknown } | undefined)?.noop === true) {
           this.noopCalls.add(toolCall.id);
-          return { terminate: true };
+          return { ...contentPatch, terminate: true };
         }
         if (!stateCheckedTools.has(toolCall.name) && !this.tools.plugins.endsThought(toolCall.name, result.details) && !(toolCall.name === 'read_chat_record' && this.thought.reviewing && !(args as { from?: unknown } | undefined)?.from)) {
           this.repeatedCalls.add(`${toolCall.name}:${stableJson(args)}`);
         }
         if (this.tools.plugins.endsThought(toolCall.name, result.details) || (toolCall.name === 'remember' && this.batch.some(name => this.tools.plugins.endsThought(name, undefined)))) {
-          return { terminate: true };
+          return { ...contentPatch, terminate: true };
         }
+        return contentPatch;
       },
       prepareRequest: async ({ context, model: currentModel }, signal) => {
         const first = this.turns === 0;
@@ -212,7 +239,7 @@ export class PiBrain implements Brain {
         this.thought.lifeOnly &&= event.message.lifeOnly;
         store.log('observation_entered', { runId: this.runId, batchId: event.message.batchId });
       }
-      if (event.type === 'message_end' && event.message.role === 'assistant') { this.finishRequest(event.message); this.phase = 'acting'; this.batch = event.message.content.flatMap(block => block.type === 'toolCall' ? [block.name] : []); }
+      if (event.type === 'message_end' && event.message.role === 'assistant') { this.lastAssistant = event.message; this.finishRequest(event.message); this.phase = 'acting'; this.batch = event.message.content.flatMap(block => block.type === 'toolCall' ? [block.name] : []); }
       if (event.type === 'tool_execution_start') {
         const chat = this.tools.plugins.chatTarget(event.toolName, event.args); if (chat) this.engaged.add(chat);
         // A call to a tool not yet loaded fails as not found; loading it now lets the next turn make the call.
@@ -322,7 +349,7 @@ export class PiBrain implements Brain {
     }
     return { messages, measured };
   }
-  private async compact(messages: AgentMessage[], budget: number, ownerModel: Model<any>, signal?: AbortSignal, background?: BackgroundCompaction): Promise<AgentMessage[]> {
+  private async compact(messages: AgentMessage[], budget: number, ownerModel: Model<any>, signal?: AbortSignal, background?: BackgroundCompaction, keepRecentTokens?: number): Promise<AgentMessage[]> {
     const thought = background?.thought ?? this.thought;
     const meter = background?.meter ?? this.meter;
     const runId = background?.runId ?? this.runId;
@@ -330,7 +357,7 @@ export class PiBrain implements Brain {
     const { model, stream } = this.summaryBackend ?? { model: ownerModel, stream: this.stream };
     const { window } = modelBudget(model, use.compactionContextTokens, this.config.compaction.summaryMaxTokens, this.config.limits.contextSafetyTokens);
     const summaryLimit = this.config.compaction.summaryMaxTokens;
-    const { system, pinned, removed, kept } = compactionSplit(messages, Math.min(this.config.compaction.keepRecentTokens, budget), budget, summaryLimit + 100, this.owner === 'review');
+    const { system, pinned, removed, kept } = compactionSplit(messages, Math.min(keepRecentTokens ?? this.config.compaction.keepRecentTokens, budget), budget, summaryLimit + 100, this.owner === 'review');
     if (!removed.length) throw new Error('No older exchanges can be safely compacted; reduce the latest input or increase the context budget.');
     const ids = this.store.archiveContext(removed, [...thought.sources]);
     if (background) background.prefix = background.original.slice(0, 1 + removed.length).map(contextRecordId);
@@ -356,6 +383,16 @@ export class PiBrain implements Brain {
       model.maxTokens,
       model.reasoning ? Math.max(outputLimit, Math.min(Math.max(use.limits.outputReserveTokens, outputLimit * 2), availableOutput)) : outputLimit,
     );
+    const sameRoute = this.route(model) === this.route(ownerModel);
+    const compactionMergeUsers = shouldMergeConsecutiveUsers(use.compaction, model);
+    const requestedCompactionLevel = use.compactionThinkingLevel;
+    const effectiveCompactionLevel = model.reasoning
+      ? (requestedCompactionLevel !== 'off'
+          ? effectiveThinkingLevel(model, requestedCompactionLevel)
+          : model.api === 'anthropic-messages' && model.thinkingLevelMap?.off === null
+            ? effectiveThinkingLevel(model, 'off')
+            : 'off')
+      : requestedCompactionLevel;
     const replacement = (text: string) => {
       const summary: Message = { role: 'user', content: framing + text + references, timestamp: Date.now() };
       const compacted = [system, ...pinned, summary, ...kept];
@@ -379,8 +416,15 @@ export class PiBrain implements Brain {
       const finish = (response?: AssistantMessage) => background ? this.recordRequestFinished(requestInfo, response, signal?.aborted) : this.finishRequest(response, signal?.aborted);
       let response: AssistantMessage;
       try {
-        const portable = this.route(model) === this.route(ownerModel) ? request : portableSummaryMessages(request);
-        const responseWork = (async () => (await stream(model, normalizeContext({ messages: toModelMessages(portable) }), { apiKey: this.credential(use.compaction.apiKeyEnv), reasoning: use.compactionThinkingLevel === 'off' ? undefined : use.compactionThinkingLevel, signal, maxTokens: requestMaxTokens })).result())();
+        const portable = sameRoute ? request : portableMessages(request);
+        const responseWork = (async () => (await stream(model, normalizeContext({ messages: toModelMessages(portable, { mergeUsers: compactionMergeUsers }) }), {
+          apiKey: this.credential(use.compaction.apiKeyEnv),
+          reasoning: effectiveCompactionLevel === 'off' ? undefined : effectiveCompactionLevel,
+          sessionId: sameRoute ? this.sessionId : undefined,
+          cacheRetention: use.compaction.cacheRetention ?? 'short',
+          signal,
+          maxTokens: requestMaxTokens,
+        })).result())();
         response = await (background && signal ? waitFor(responseWork, signal) : responseWork);
         finish(response);
       } catch (error) { finish(); throw error; }
@@ -418,6 +462,8 @@ export class PiBrain implements Brain {
   }
   private resetContext() {
     this.cancelBackground();
+    this.sessionId = crypto.randomUUID();
+    this.agent.sessionId = this.sessionId;
     this.tools.loading.restore([]);
     this.agent.reset(); this.agent.state.tools = this.tools.declared();
     this.agent.state.messages = [createInitialSystemMessage(this.instructions(), this.tools.declared().map(toToolDeclaration))!];
@@ -434,21 +480,43 @@ export class PiBrain implements Brain {
     return changed;
   }
   private checkpoint(): ContextCheckpoint {
-    return { identity: this.identity, generation: this.contextGeneration, messages: this.agent.state.messages.slice(), sources: [...this.thought.sources], anchor: this.meter.anchor };
+    return {
+      identity: this.identity,
+      generation: this.contextGeneration,
+      messages: this.agent.state.messages.slice(),
+      sources: [...this.thought.sources],
+      anchor: this.meter.anchor,
+      sessionId: this.sessionId,
+      route: this.route(this.agent.state.model),
+    };
   }
   private restore(checkpoint: ContextCheckpoint) {
+    const currentRoute = this.route(this.agent.state.model);
+    const handoff = Boolean(checkpoint.route && checkpoint.route !== currentRoute);
+    const restoredMessages = handoff ? portableMessages(checkpoint.messages) : checkpoint.messages;
     // What a saved context declares is what it had loaded.
-    this.tools.loading.restore(getCurrentTools(toModelMessages(checkpoint.messages)).map(tool => tool.name));
+    this.tools.loading.restore(getCurrentTools(toModelMessages(restoredMessages)).map(tool => tool.name));
     this.agent.reset(); this.agent.state.tools = this.tools.declared();
     this.runtimeSnapshot = undefined;
-    this.agent.state.messages = checkpoint.messages;
-    for (const message of checkpoint.messages) {
+    this.agent.state.messages = restoredMessages;
+    for (const message of restoredMessages) {
       if (message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('<runtime_data>')) {
         const data = JSON.parse(message.content.slice('<runtime_data>'.length, message.content.lastIndexOf('</runtime_data>'))) as RuntimeSnapshot;
         this.runtimeSnapshot = applyRuntimeUpdate(this.runtimeSnapshot, data);
       }
     }
-    this.meter.anchor = checkpoint.anchor;
+    if (handoff) {
+      this.meter.reset();
+      this.sessionId = crypto.randomUUID();
+      this.agent.sessionId = this.sessionId;
+      this.store.log('context_model_handoff', { owner: this.owner, from: checkpoint.route, to: currentRoute, messages: restoredMessages.length });
+    } else {
+      this.meter.anchor = checkpoint.anchor;
+      if (checkpoint.sessionId) {
+        this.sessionId = checkpoint.sessionId;
+        this.agent.sessionId = this.sessionId;
+      }
+    }
     this.contextGeneration = checkpoint.generation;
     this.thought.sources = new Set(checkpoint.sources);
   }
@@ -488,7 +556,8 @@ export class PiBrain implements Brain {
       let picture;
       try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
       if (!picture) { count--; content.push({ type: 'text', text: image.unavailable }); continue; }
-      content.push({ type: 'text', text: image.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
+      const prepared = await prepareModelImage(picture.data, picture.mimeType, this.agent.state.model);
+      content.push({ type: 'text', text: image.label }, { type: 'image', data: prepared.data.toString('base64'), mimeType: prepared.mimeType });
       image.onShown?.();
     }
     for (const event of observation.events) for (const [index, segment] of (Array.isArray(event.payload.message) ? event.payload.message : []).filter(segment => segment.type === 'image').entries()) {
@@ -504,8 +573,9 @@ export class PiBrain implements Brain {
       if (typeof url !== 'string') { count--; content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} has no readable URL; the original event is retained.` }); continue; }
       try {
         const image = await fetchImage(url, this.controller.signal);
+        const prepared = await prepareModelImage(image.data, image.type, this.agent.state.model);
         // The label outlives the image, which is folded when the thought ends.
-        content.push({ type: 'text', text: `The following is image ${index} from ${ref}${saved}${from}` }, { type: 'image', data: image.data.toString('base64'), mimeType: image.type });
+        content.push({ type: 'text', text: `The following is image ${index} from ${ref}${saved}${from}` }, { type: 'image', data: prepared.data.toString('base64'), mimeType: prepared.mimeType });
       } catch { count--; content.push({ type: 'text', text: `Image ${index} in ${ref}${saved} could not be read${from}` }); }
     }
     // Supplementary plugin pictures follow the images in the chat and use the same budget.
@@ -515,7 +585,8 @@ export class PiBrain implements Brain {
       let picture;
       try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
       if (!picture) { count--; if (image.unavailable) content.push({ type: 'text', text: image.unavailable }); continue; }
-      content.push({ type: 'text', text: image.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType });
+      const prepared = await prepareModelImage(picture.data, picture.mimeType, this.agent.state.model);
+      content.push({ type: 'text', text: image.label }, { type: 'image', data: prepared.data.toString('base64'), mimeType: prepared.mimeType });
       image.onShown?.();
     }
     return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
@@ -658,10 +729,59 @@ export class PiBrain implements Brain {
     if (this.store.settings().generation === generation) this.restore(checkpoint);
     else { this.resetContext(); this.thought.sources.clear(); this.contextGeneration = -1; }
   }
+  /**
+   * Recover once from provider context-window overflow or truncated output before any tool call was dispatched.
+   * Silent overflows only reset the meter; error/length overflows drop the failed reply, aggressively prune and
+   * compact older history, and continue once if the context actually shrank (ADR-0008).
+   */
+  private async recoverOverflow(): Promise<boolean> {
+    const last = this.lastAssistant;
+    if (!last || this.preempted || this.controller.signal.aborted) return false;
+    const model = this.agent.state.model;
+    const { window, budget } = this.budget(model);
+    const desiredMaxOutput = Math.min(modelUse(this.config, this.owner).limits.outputReserveTokens, model.maxTokens);
+    const overflow = isContextOverflow(last, window);
+    const recoverableLength = !overflow && isRecoverableLength(last, desiredMaxOutput);
+    if (!overflow && !recoverableLength) return false;
+    if (overflow && last.stopReason === 'stop') {
+      this.meter.reset();
+      this.store.log('context_overflow_silent', { runId: this.runId, owner: this.owner, provider: model.provider, model: model.id, inputTokens: last.usage.input + last.usage.cacheRead, contextWindow: window });
+      return false;
+    }
+    // Never discard or retry a turn that emitted tool calls whose outcomes may already exist (ADR-0008).
+    if (last.content.some(block => block.type === 'toolCall')) return false;
+    const current = this.agent.state.messages;
+    const base = current.at(-1) === last ? current.slice(0, -1) : current.slice();
+    if (!base.length || base.at(-1)?.role === 'assistant' || base.every(item => item.role === 'system')) return false;
+    const before = estimatedContextTokens(base);
+    this.meter.reset();
+    this.store.archiveContext(base, [...this.thought.sources]);
+    const pruned = pruneToolResults(base, Math.min(2000, Math.floor(this.config.compaction.keepRecentTokens / 2)));
+    let shrunk = pruned.messages;
+    const runtime = this.runtimeContext(false);
+    const snapshot = this.runtimeMessage(runtimeUpdate(runtime)!);
+    const candidate = shrunk.slice();
+    const tail = candidate.at(-1);
+    if (!(tail?.role === 'user' && tail.content === snapshot.content)) candidate.push(snapshot);
+    try {
+      shrunk = await this.compact(candidate, budget, model, this.controller.signal, undefined, 0);
+      this.runtimeSnapshot = runtime;
+    } catch (error) {
+      if (this.controller.signal.aborted) throw error;
+      ensureCurrent(this.store, this.thought, this.controller.signal);
+    }
+    const after = estimatedContextTokens(shrunk);
+    if (after >= before) return false;
+    this.store.log('context_overflow_recovered', { runId: this.runId, owner: this.owner, reason: overflow ? 'overflow' : 'length', errorMessage: last.errorMessage, beforeTokens: before, afterTokens: after });
+    this.agent.state.messages = shrunk;
+    this.lastAssistant = undefined;
+    await this.agent.continue();
+    return true;
+  }
   async run(observation: Observation) {
     const generation = this.store.settings().generation;
     this.prepare(generation);
-    const rollback = this.checkpoint(); this.compactions = []; this.completed = undefined;
+    const rollback = this.checkpoint(); this.compactions = []; this.completed = undefined; this.lastAssistant = undefined;
     this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(observation.events.filter(event => !ownEvent(event) && !ambientEvent(event)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
@@ -674,6 +794,7 @@ export class PiBrain implements Brain {
       const message = await this.message(observation);
       this.controller.signal.throwIfAborted();
       await this.agent.prompt(message);
+      await this.recoverOverflow();
       // A preempted thought ends without its unfinished call and is saved like any other (ADR-0002).
       if (this.preempted) this.agent.state.messages = this.agent.state.messages.filter(item => !(item.role === 'assistant' && item.stopReason === 'aborted'));
       else if (this.agent.state.errorMessage) throw new Error(this.agent.state.errorMessage);
@@ -696,7 +817,7 @@ export class PiBrain implements Brain {
   /** A memory review runs apart from the conversations, in a working context of its own that starts from runtime state and ends with it; nothing steers into it (ADR-0012). */
   async review(observation: Observation) {
     const generation = this.store.settings().generation;
-    this.resetContext(); this.compactions = [];
+    this.resetContext(); this.compactions = []; this.lastAssistant = undefined;
     this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(); this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
@@ -706,6 +827,7 @@ export class PiBrain implements Brain {
       const message = await this.message(observation);
       this.controller.signal.throwIfAborted();
       await this.agent.prompt(message);
+      await this.recoverOverflow();
       if (this.agent.state.errorMessage) throw new Error(this.agent.state.errorMessage);
       this.controller.signal.throwIfAborted();
       this.store.log('review_finished', { runId: this.runId, calls: this.turns });
