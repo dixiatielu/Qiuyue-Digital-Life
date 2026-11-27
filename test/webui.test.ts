@@ -210,7 +210,8 @@ test('the persona and the system prompt are checked before saving, and the opera
   const preview = await call('/api/prompt/preview', { method: 'POST', body: { template: 'Hi {{persona}}\n<!-- current-context -->\n' } });
   assert.equal(preview.body.pluginSource, 'builtin');
   assert.ok(preview.body.text.startsWith('Hi Qiuyue, who likes snow.\n'));
-  assert.equal(preview.body.text, systemInstructions({ ...config, systemPrompt: 'Hi {{persona}}\n<!-- current-context -->\n' }, inspectConfig(config).activityPrompts));
+  const inspectedPreview = inspectConfig(config);
+  assert.equal(preview.body.text, systemInstructions({ ...config, systemPrompt: 'Hi {{persona}}\n<!-- current-context -->\n' }, inspectedPreview.activityPrompts, [], inspectedPreview.platformNotes));
   const after = await call('/api/prompt');
   assert.equal(after.body.override, template);
   assert.equal(after.body.builtinChanged, false);
@@ -400,7 +401,7 @@ test('capabilities show daemon versions and schema, and apply saved settings thr
     assert.equal(clock.configSchema.properties.timeZone.type, 'string');
     const preview = await call('/api/prompt/preview', { method: 'POST', body: { template: 'Draft {{persona}}\n<!-- current-context -->' } });
     assert.equal(preview.body.pluginSource, 'running');
-    assert.equal(preview.body.text, systemInstructions({ ...cfg, systemPrompt: 'Draft {{persona}}\n<!-- current-context -->' }, host.activityPrompts(new Set(tools.current().map(tool => tool.name)))));
+    assert.equal(preview.body.text, systemInstructions({ ...cfg, systemPrompt: 'Draft {{persona}}\n<!-- current-context -->' }, host.activityPrompts(new Set(tools.current().map(tool => tool.name))), [], host.platformNotes()));
     assert.ok(preview.body.text.includes('Clock guidance from the active plugin.'));
     const config = await call('/api/config');
     assert.equal((await call('/api/config', { method: 'PUT', body: { raw: { ...config.body.raw, plugins: { clock: false } }, hash: config.body.hash } })).status, 200);
@@ -591,4 +592,42 @@ test('adapter catalog API serves built-in driver catalogs and keeps /api/snowlum
   assert.ok(Array.isArray(tg.body.actions) && tg.body.actions.some((a: any) => a.name === 'sendMessage'));
   const unknown = await call('/api/adapters/unknown-driver/catalog');
   assert.equal(unknown.status, 404);
+}));
+
+test('the page runs isolated behavioral eval cases against a model endpoint via /api/eval/model', () => page(async call => {
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const chunk = {
+      id: 'eval', object: 'chat.completion.chunk', created: 1, model: body.model,
+      choices: [{ index: 0, delta: { role: 'assistant', content: 'Quiet.' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 40, completion_tokens: 3, total_tokens: 43 },
+    };
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const secrets = (await call('/api/secrets')).body;
+    assert.equal((await call('/api/secrets', { method: 'PUT', body: { name: 'EVAL_KEY', value: 'eval-secret', revision: secrets.revision } })).status, 200);
+    const evaluated = await call('/api/eval/model', {
+      method: 'POST',
+      body: {
+        caseIds: ['silence_technical_chatter'],
+        model: {
+          provider: 'eval-gw', id: 'eval-model', apiKeyEnv: 'EVAL_KEY', api: 'openai-completions',
+          baseUrl: `http://127.0.0.1:${port}/v1`, input: ['text', 'image'], contextWindow: 65536, maxTokens: 4096, reasoning: false,
+        },
+      },
+    });
+    assert.equal(evaluated.status, 200);
+    assert.equal(evaluated.body.ok, true);
+    assert.equal(evaluated.body.passed, 1);
+    assert.equal(evaluated.body.results[0].id, 'silence_technical_chatter');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 }));

@@ -59,6 +59,8 @@ export interface LifePlugin {
   actionCaption?(action: Action): string | undefined;
   endsThought?(tool: string, details: unknown): boolean;
   activities?: OnlineActivity[];
+  /** Brief platform-specific guidance injected into system instructions while this plugin is enabled. */
+  promptNotes?: string[];
   experienceKinds?: Record<string, string>;
   chatActions?: string[];
   staleActions?: string[];
@@ -219,6 +221,19 @@ export class PluginHost {
     return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin =>
       availableActivities(plugin.activities ?? [], available).flatMap(({ activity, tools, instructions }) =>
         instructions?.trim() ? [{ plugin: plugin.id, activity, tools, instructions }] : []));
+  }
+  /** Brief platform-specific guidance contributed by enabled adapters and plugins, deduplicated in order. */
+  platformNotes(): string[] {
+    const seen = new Set<string>();
+    const notes: string[] = [];
+    for (const plugin of this.plugins) {
+      if (!this.enabled(plugin)) continue;
+      for (const raw of plugin.promptNotes ?? []) {
+        const note = raw.trim();
+        if (note && !seen.has(note)) { seen.add(note); notes.push(note); }
+      }
+    }
+    return notes;
   }
   experienceKind(tool: string): string { return this.plugins.find(plugin => plugin.experienceKinds?.[tool])?.experienceKinds?.[tool] ?? tool; }
   chatTarget(tool: string, args: unknown, staleOnly = false): string | undefined {

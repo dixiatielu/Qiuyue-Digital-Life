@@ -1,6 +1,6 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
-import { createModelBackend, initialThinkingLevel, modelBudget, modelRoute, modelUse, shouldMergeConsecutiveUsers, withToolLoader, type ModelOwner } from './model.js';
+import { createModelBackend, initialThinkingLevel, modelBudget, modelRoute, modelUse, requiresThoughtSignatures, shouldMergeConsecutiveUsers, withToolLoader, type ModelOwner } from './model.js';
 import { createInitialSystemMessage, getCurrentTools, toToolDeclaration, type AssistantMessage, type Model } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
@@ -44,7 +44,7 @@ export interface Brain {
 export function contextIdentity(config: Config, tools: ToolSet) {
   const contracts = tools.plugins.installed().filter(plugin => plugin.contextVersion !== undefined && (plugin.enabled?.() ?? true)).map(plugin => [plugin.id, plugin.contextVersion]);
   const current = tools.current();
-  const instructions = systemInstructions(config, tools.plugins.activityPrompts(new Set(current.map(tool => tool.name))), tools.deferred());
+  const instructions = systemInstructions(config, tools.plugins.activityPrompts(new Set(current.map(tool => tool.name))), tools.deferred(), tools.plugins.platformNotes());
   return digest({ instructions, accounts: config.adapters.map(({ id, driver, accountId }) => ({ id, driver, accountId })), tools: current.map(toToolDeclaration), ...(contracts.length ? { plugins: contracts } : {}) });
 }
 
@@ -239,7 +239,7 @@ export class PiBrain implements Brain {
   get streaming() { return this.agent.state.isStreaming && !this.preempted; }
   private display(update: (monitor: Monitor) => void) { if (this.monitor) { try { update(this.monitor); } catch {} } }
   abort() { this.compactor.cancelBackground(); this.controller.abort(); this.agent.abort(); }
-  private instructions() { return systemInstructions(this.config, this.activityPrompts(), this.tools.deferred()); }
+  private instructions() { return systemInstructions(this.config, this.activityPrompts(), this.tools.deferred(), this.tools.plugins.platformNotes()); }
   /** Read-only management preview, using this brain's actual tool permissions. */
   activityPrompts() { return this.tools.plugins.activityPrompts(new Set(this.tools.current().map(tool => tool.name))); }
 
@@ -320,7 +320,8 @@ export class PiBrain implements Brain {
   private restore(checkpoint: ContextCheckpoint) {
     const currentRoute = modelRoute(this.agent.state.model);
     const handoff = Boolean(checkpoint.route && checkpoint.route !== currentRoute);
-    const restoredMessages = handoff ? portableMessages(checkpoint.messages) : checkpoint.messages;
+    const flattenToolCalls = handoff && requiresThoughtSignatures(this.agent.state.model);
+    const restoredMessages = handoff ? portableMessages(checkpoint.messages, { flattenToolCalls }) : checkpoint.messages;
     this.tools.loading.restore(getCurrentTools(toModelMessages(restoredMessages)).map(tool => tool.name));
     this.agent.reset(); this.agent.state.tools = this.tools.declared();
     this.runtimeSnapshot = undefined;
@@ -335,7 +336,13 @@ export class PiBrain implements Brain {
       this.meter.reset();
       this.sessionId = crypto.randomUUID();
       this.agent.sessionId = this.sessionId;
-      this.store.log('context_model_handoff', { owner: this.owner, from: checkpoint.route, to: currentRoute, messages: restoredMessages.length });
+      this.store.log('context_model_handoff', {
+        owner: this.owner,
+        from: checkpoint.route,
+        to: currentRoute,
+        messages: restoredMessages.length,
+        ...(flattenToolCalls ? { flattenedToolCalls: true } : {}),
+      });
     } else {
       this.meter.anchor = checkpoint.anchor;
       if (checkpoint.sessionId) {

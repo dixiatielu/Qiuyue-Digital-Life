@@ -158,6 +158,20 @@ export function shouldMergeConsecutiveUsers(config: ModelConfig, model: Model<Ap
   return compat.requiresAssistantAfterToolResult === true || model.api === 'mistral-conversations';
 }
 
+/**
+ * Whether this model strictly requires valid thought signatures on historical function calls
+ * (Gemini 3+/4+ and Gemma 4 thinking models on Google's generateContent / Vertex APIs).
+ */
+export function requiresThoughtSignatures(model: Pick<Model<Api>, 'api' | 'id' | 'reasoning'>): boolean {
+  if (!model.reasoning) return false;
+  if (model.api !== 'google-generative-ai' && model.api !== 'google-vertex') return false;
+  const id = model.id.toLowerCase();
+  return /gemini(?:-live)?-(?:[3-9]|[1-9]\d)/.test(id)
+    || id === 'gemini-flash-latest'
+    || id === 'gemini-flash-lite-latest'
+    || /gemma-?4/.test(id);
+}
+
 /** Whole-model inheritance and context policies, shared by the brains and management interfaces. */
 export function modelUse<T extends ModelSystemConfig>(config: T, owner: ModelOwner) {
   const thinkingSource: ModelPath = owner === 'review' && config.review?.model ? 'review.model' : 'model';

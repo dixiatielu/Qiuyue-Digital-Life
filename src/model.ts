@@ -26,6 +26,7 @@ export {
   modelBudget,
   modelRoute,
   modelUse,
+  requiresThoughtSignatures,
   shouldMergeConsecutiveUsers,
   supportedThinkingLevels,
   validateModelConfig,

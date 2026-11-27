@@ -137,6 +137,7 @@ export function telegramAdapter(config: AdapterConfig, credential: CredentialRea
   return {
     instance: config.id, platform: 'telegram', accountId: config.accountId, version: `@grammyjs/types ${catalog.source.version}`, actions: catalog.actions, permissions: config.tools,
     staleActions: telegramSocialActions, endsThoughtActions: telegramSocialActions,
+    promptNotes: ['Telegram upload objects ({"file": ...}) refer to local files on this host.'],
     encodeMedia: media => media.path
       ? { file: media.path, ...(media.filename ? { filename: media.filename } : {}), contentType: media.mimeType }
       : `base64://${Buffer.from(media.data).toString('base64')}`,

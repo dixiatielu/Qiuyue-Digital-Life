@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, webuiSettings, type Config } from '../config.js';
 import { modelReadiness, modelUse } from '../model.js';
 import { probeModel } from '../probe.js';
+import { evalModel } from '../eval.js';
 import { callControl } from '../control.js';
 import { errorText } from '../domain.js';
 import { adapterCatalog, configuredPluginIds, pluginIds } from '../plugins/index.js';
@@ -180,16 +181,22 @@ export class WebUi {
       const { raw, config } = this.current();
       const persona = typeof body.persona === 'string' ? body.persona : config?.persona ?? this.files.persona().text;
       const template = typeof body.template === 'string' ? body.template : config?.systemPrompt;
-      let activities: ActivityPrompt[] = [], pluginSource: 'running' | 'builtin' | 'unavailable' = 'unavailable';
+      let activities: ActivityPrompt[] = [], platformNotes: string[] = [], pluginSource: 'running' | 'builtin' | 'unavailable' = 'unavailable';
       try {
         activities = await callControl(this.paths.socket, { args: ['plugins', 'prompts'] }) as ActivityPrompt[];
+        try { platformNotes = await callControl(this.paths.socket, { args: ['plugins', 'notes'] }) as string[]; } catch { platformNotes = []; }
         pluginSource = 'running';
       } catch {
         // Never import user code in the management process just to render a preview.
-        if (config) { activities = inspectConfig(config, this.files.credentials().get).activityPrompts; pluginSource = 'builtin'; }
+        if (config) {
+          const inspected = inspectConfig(config, this.files.credentials().get);
+          activities = inspected.activityPrompts;
+          platformNotes = inspected.platformNotes;
+          pluginSource = 'builtin';
+        }
       }
-      const text = systemInstructions({ persona, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template }, activities);
-      return { text, chars: text.length, activities, pluginSource };
+      const text = systemInstructions({ persona, life: { allowFiction: Boolean(config?.life.allowFiction ?? raw.life?.allowFiction) } as Config['life'], systemPrompt: template }, activities, [], platformNotes);
+      return { text, chars: text.length, activities, platformNotes, pluginSource };
     });
 
     this.on('GET', '/api/plugins', async () => {
@@ -254,6 +261,19 @@ export class WebUi {
         credential: this.files.credentials().get,
         requireVision: body.requireVision !== false,
         checkMidConvoTools: body.checkMidConvoTools !== false,
+      });
+    });
+    this.on('POST', '/api/eval/model', ({ body }) => {
+      const { config } = this.current();
+      if (!config) throw new HttpError(400, 'Fix configuration errors before running behavioral evaluation.');
+      const role = body.role === 'review' ? 'review' : 'main';
+      const caseIds = Array.isArray(body.caseIds) ? body.caseIds.map(String) : undefined;
+      return evalModel({
+        config,
+        role,
+        ...(body.model ? { modelOverride: body.model } : {}),
+        credential: this.files.credentials().get,
+        ...(caseIds?.length ? { caseIds } : {}),
       });
     });
     this.on('POST', '/api/test/embedding', ({ body }) => {

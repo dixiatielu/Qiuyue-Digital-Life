@@ -78,6 +78,7 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
     },
     reviewTools: [...actions].filter(([, action]) => action.readOnly).map(([name]) => name),
     chatActions: [...actions].filter(([, action]) => !action.readOnly).map(([name]) => name),
+    ...(adapter.promptNotes?.length ? { promptNotes: adapter.promptNotes } : {}),
     ...(stale ? { staleActions: [...actions].filter(([, action]) => stale.has(action.name)).map(([name]) => name) } : {}),
     chatTarget,
     trackedConversations: currentStore => currentStore.activeConversations(identity, ['group', 'thread'], 10),

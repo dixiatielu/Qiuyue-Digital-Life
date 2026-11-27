@@ -34,6 +34,8 @@
 
 管理页支持模型列表、连接测试与自动能力探测。可以运行 `npm run dev -- models probe [main|review|compaction] --config config.json` 或在管理页「模型」点击 **探测能力**，一次性检测基础连通、关闭思考压缩、连续用户消息、图像理解、多轮工具调用回放、严格 Schema 及对话中增量工具声明，并可一键应用建议的 `compat` 与参数。
 
+切换模型前后，还可以运行 `npm run dev -- models eval [main|review] --config config.json`（支持 `--case <id1,id2>` 筛选或 `--cases <cases.json>` 自定义用例集），在完全隔离的内存数据库与模拟适配器下离线评测行为回归（不产生真实外发消息或数据库写入），覆盖群聊沉默克制、直呼回应与单条消息风格、记忆来源卫生、ADR-0008 未知结果查证、ADR-0023 按需加载工具以及 ADR-0003 运行控制边界。
+
 使用 Pi 内置的 Gemini 模型时，供应商填 `google`，从 `npm run dev -- models google` 选择模型 ID，无需填写 `api`。Gemini 原生自定义端点的完整模型配置示例如下，请将 ID 和 token 上限替换为实际模型的值：
 
 ```json
@@ -51,7 +53,7 @@
 }
 ```
 
-`google-interactions` 使用同样的配置，只需把 `api` 改为 `"google-interactions"`；接口地址同样写到 API 版本为止，请求发往 `<baseUrl>/interactions`。更换 `model` 或修改 `api` 后，重启时会平滑交接现有工作上下文——自动清理跨模型签名、重置 token 锚点，并在新模型窗口更小时自动压缩。
+`google-interactions` 使用同样的配置，只需把 `api` 改为 `"google-interactions"`；接口地址同样写到 API 版本为止，请求发往 `<baseUrl>/interactions`。更换 `model` 或修改 `api` 后，重启时会平滑交接现有工作上下文——自动清理跨模型签名（切入要求 `thoughtSignature` 的 Gemini 3+/4+ 模型时还会将历史未签名工具调用展平为便携记录），重置 token 锚点，并在新模型窗口更小时自动压缩。
 
 ### 按需加载工具
 

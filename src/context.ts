@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type ImageContent, type Message, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
+import { getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type ImageContent, type Message, type TextContent, type ToolCall, type ToolResultMessage, type UserMessage } from '@earendil-works/pi-ai';
 
 export const SUMMARY_PREFIX = 'Earlier exchanges have been consolidated into a continuity summary';
 export const IMAGE_TOKENS = 2000;
@@ -114,18 +114,91 @@ export class TokenMeter {
   reset() { this.anchor = undefined; }
 }
 
-/** Messages sent to another model/endpoint cannot replay provider-specific reasoning or opaque signatures. Originals stay intact. */
-export function portableMessages(messages: AgentMessage[]): AgentMessage[] {
-  return messages.flatMap((message): AgentMessage[] => {
-    if (message.role !== 'assistant') return [message];
-    const content = message.content.flatMap<AssistantMessage['content'][number]>(block => {
-      if (block.type === 'thinking') return [];
-      if (block.type === 'text') return [{ type: 'text' as const, text: block.text }];
-      const { thoughtSignature: _signature, ...portable } = block;
-      return [portable];
+function compactSnippet(text: string, limit: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) return trimmed;
+  const head = Math.floor(limit * 0.55);
+  const tail = Math.max(0, limit - head - 30);
+  const metadata = trimmed.match(/(?:sourceId|actionId|outcome|status|reused)[^\n]{0,160}/g)?.slice(-4).join('; ') ?? '';
+  return `${trimmed.slice(0, head)}\n...${metadata ? ` [${metadata}] ` : ''}${trimmed.slice(trimmed.length - tail)}`;
+}
+
+function summarizeFlattenedResult(result: ToolResultMessage): string {
+  const text = result.content.filter((block): block is TextContent => block.type === 'text').map(block => block.text).join('\n').trim();
+  const images = result.content.filter(block => block.type === 'image').length;
+  const parts = [
+    ...(text ? [compactSnippet(text, 1200)] : []),
+    ...(images ? [`[${images} image${images > 1 ? 's' : ''} omitted across model handoff]`] : []),
+  ];
+  return parts.join(' ') || '[empty result]';
+}
+
+/**
+ * Messages sent to another model/endpoint cannot replay provider-specific reasoning or opaque signatures.
+ * When `flattenToolCalls` is set (for targets like Gemini 3+/4+ that reject unsigned historical function calls),
+ * historical tool-call/result exchanges are converted into compact plain-text user notes while preserving
+ * system messages, observations, runtime snapshots, and action outcomes. Originals stay intact.
+ */
+export function portableMessages(messages: AgentMessage[], options?: { flattenToolCalls?: boolean }): AgentMessage[] {
+  if (!options?.flattenToolCalls) {
+    return messages.flatMap((message): AgentMessage[] => {
+      if (message.role !== 'assistant') return [message];
+      const content = message.content.flatMap<AssistantMessage['content'][number]>(block => {
+        if (block.type === 'thinking') return [];
+        if (block.type === 'text') return [{ type: 'text' as const, text: block.text }];
+        const { thoughtSignature: _signature, ...portable } = block;
+        return [portable];
+      });
+      return content.length ? [{ ...message, content }] : [];
     });
-    return content.length ? [{ ...message, content }] : [];
-  });
+  }
+
+  const resultsById = new Map<string, ToolResultMessage>();
+  for (const message of messages) {
+    if (message.role === 'toolResult') resultsById.set(message.toolCallId, message);
+  }
+  const consumedResults = new Set<string>();
+  const output: AgentMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === 'toolResult') {
+      if (consumedResults.has(message.toolCallId)) continue;
+      output.push({
+        role: 'user',
+        content: `[Prior tool result flattened across model handoff]\n- ${message.toolName} => ${message.isError ? 'error' : 'ok'}: ${summarizeFlattenedResult(message)}`,
+        timestamp: message.timestamp,
+      });
+      continue;
+    }
+    if (message.role !== 'assistant') {
+      output.push(message);
+      continue;
+    }
+    const textBlocks = message.content.filter((block): block is TextContent => block.type === 'text' && block.text.length > 0)
+      .map(block => ({ type: 'text' as const, text: block.text }));
+    const calls = message.content.filter((block): block is ToolCall => block.type === 'toolCall');
+    if (textBlocks.length) output.push({ ...message, content: textBlocks });
+    if (calls.length) {
+      let timestamp = message.timestamp;
+      const lines = calls.map(toolCall => {
+        const result = resultsById.get(toolCall.id);
+        if (result) {
+          consumedResults.add(toolCall.id);
+          timestamp = Math.max(timestamp, result.timestamp);
+        }
+        const args = compactSnippet(JSON.stringify(toolCall.arguments ?? {}), 600);
+        const status = result ? (result.isError ? 'error' : 'ok') : 'unrecorded';
+        const outcome = result ? summarizeFlattenedResult(result) : '[no tool result recorded]';
+        return `- ${toolCall.name}(${args}) => ${status}: ${outcome}`;
+      });
+      output.push({
+        role: 'user',
+        content: `[Prior tool exchange flattened across model handoff]\n${lines.join('\n')}`,
+        timestamp,
+      });
+    }
+  }
+  return output;
 }
 export const portableSummaryMessages = portableMessages;
 

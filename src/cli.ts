@@ -15,6 +15,7 @@ import { controlCommands, handleControl, requestControl, serveControl } from './
 import { errorText } from './domain.js';
 import { modelReadiness, modelUse } from './model.js';
 import { probeModel } from './probe.js';
+import { evalModel } from './eval.js';
 import { Monitor } from './monitor.js';
 import { followDisplay } from './display-client.js';
 import { EmbeddingClient, SemanticRecall } from './recall.js';
@@ -24,15 +25,25 @@ import { PluginManager, type PluginReloadJob } from './plugin-manager.js';
 
 async function main() {
   process.umask(0o077);
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { config: { type: 'string', default: 'config.json' }, yes: { type: 'boolean', default: false }, follow: { type: 'boolean', default: false }, help: { type: 'boolean', short: 'h', default: false } } });
+  const { values, positionals } = parseArgs({
+    allowPositionals: true,
+    options: {
+      config: { type: 'string', default: 'config.json' },
+      cases: { type: 'string' },
+      case: { type: 'string' },
+      yes: { type: 'boolean', default: false },
+      follow: { type: 'boolean', default: false },
+      help: { type: 'boolean', short: 'h', default: false },
+    },
+  });
   const configPath = resolve(values.config!);
   loadUiLanguage(configPath);
   const command = values.help ? 'help' : positionals[0] ?? 'help';
   if (command === 'help') {
-    console.log(ui(`qiuyue-digital-life\n\n  npm run dev -- <command> --config config.json\n\n  run                     Start the single daemon\n  identities migrate      Migrate platform identities offline\n  validate                Check configuration, model, and credentials (without connecting to QQ)\n  models [provider]       List Pi models and image support\n  models probe [role]     Probe model/gateway capabilities (main, review, or compaction)\n  status | logs           Inspect continuing state or logs\n  plugins list            Inspect loaded plugins and pending changes\n  plugins reload [ID|all]  Reload plugins without restarting the daemon\n  tui                     Connect to the live terminal (exiting does not stop the daemon)\n  webui                   Serve the management web page (a process apart from the daemon)\n  logs --follow           Subscribe to live NDJSON display events\n  pause | resume          Pause or resume the digital life\n  life on | life off      Enable or disable autonomous life\n  memory search <query>   Search memories and personal notes\n  memory show <ID>        Inspect a memory and its sources\n  memory correct <ID> <content>  Correct a memory while retaining versions\n  memory forget <ID>      Preview deletion; add --yes to proceed\n  replay <cases.json>     Ask of past moments what memory a thought would have had in view (reads the database only)\n\nRestart after changing core configuration. The limits.modelCallsPerDay budget follows the Asia/Shanghai calendar day.`, `qiuyue-digital-life\n\n  npm run dev -- <命令> --config config.json\n\n  run                     启动唯一常驻主体\n  identities migrate      停机迁移平台标识\n  validate                检查配置、模型和凭据是否就绪（不连接QQ）\n  models [provider]       列出Pi模型及图片能力\n  models probe [角色]     探测模型与网关能力（main、review 或 compaction）\n  status | logs           查看持续状态或运行记录\n  plugins list            查看插件运行状态与待应用修改\n  plugins reload [ID|all]  重载插件，无需重启常驻进程\n  tui                     连接实时终端（退出不停止主体）\n  webui                   启动管理网页（独立于常驻进程）\n  logs --follow           订阅实时 NDJSON 展示事件\n  pause | resume          整体暂停/恢复\n  life on | life off      开关自主生活\n  memory search <查询>    检索记忆及个人笔记\n  memory show <ID>        查看记忆及来源\n  memory correct <ID> <内容>  修正并保留版本\n  memory forget <ID>      预览删除范围；追加 --yes 执行\n  replay <cases.json>     回放过去的时刻，看当时的思考能看到哪些记忆（只读数据库）\n\n核心配置修改后重启。limits.modelCallsPerDay 预算按 Asia/Shanghai 的自然日计算。`));
+    console.log(ui(`qiuyue-digital-life\n\n  npm run dev -- <command> --config config.json\n\n  run                     Start the single daemon\n  identities migrate      Migrate platform identities offline\n  validate                Check configuration, model, and credentials (without connecting to QQ)\n  models [provider]       List Pi models and image support\n  models probe [role]     Probe model/gateway capabilities (main, review, or compaction)\n  models eval [role]      Run isolated behavioral regression suite (main or review; --cases <file> --case <id>)\n  status | logs           Inspect continuing state or logs\n  plugins list            Inspect loaded plugins and pending changes\n  plugins reload [ID|all]  Reload plugins without restarting the daemon\n  tui                     Connect to the live terminal (exiting does not stop the daemon)\n  webui                   Serve the management web page (a process apart from the daemon)\n  logs --follow           Subscribe to live NDJSON display events\n  pause | resume          Pause or resume the digital life\n  life on | life off      Enable or disable autonomous life\n  memory search <query>   Search memories and personal notes\n  memory show <ID>        Inspect a memory and its sources\n  memory correct <ID> <content>  Correct a memory while retaining versions\n  memory forget <ID>      Preview deletion; add --yes to proceed\n  replay <cases.json>     Ask of past moments what memory a thought would have had in view (reads the database only)\n\nRestart after changing core configuration. The limits.modelCallsPerDay budget follows the Asia/Shanghai calendar day.`, `qiuyue-digital-life\n\n  npm run dev -- <命令> --config config.json\n\n  run                     启动唯一常驻主体\n  identities migrate      停机迁移平台标识\n  validate                检查配置、模型和凭据是否就绪（不连接QQ）\n  models [provider]       列出Pi模型及图片能力\n  models probe [角色]     探测模型与网关能力（main、review 或 compaction）\n  models eval [角色]      运行隔离的行为回归评测（main 或 review；支持 --cases <文件> --case <ID>）\n  status | logs           查看持续状态或运行记录\n  plugins list            查看插件运行状态与待应用修改\n  plugins reload [ID|all]  重载插件，无需重启常驻进程\n  tui                     连接实时终端（退出不停止主体）\n  webui                   启动管理网页（独立于常驻进程）\n  logs --follow           订阅实时 NDJSON 展示事件\n  pause | resume          整体暂停/恢复\n  life on | life off      开关自主生活\n  memory search <查询>    检索记忆及个人笔记\n  memory show <ID>        查看记忆及来源\n  memory correct <ID> <内容>  修正并保留版本\n  memory forget <ID>      预览删除范围；追加 --yes 执行\n  replay <cases.json>     回放过去的时刻，看当时的思考能看到哪些记忆（只读数据库）\n\n核心配置修改后重启。limits.modelCallsPerDay 预算按 Asia/Shanghai 的自然日计算。`));
     return;
   }
-  if (command === 'models' && positionals[1] !== 'probe') {
+  if (command === 'models' && positionals[1] !== 'probe' && positionals[1] !== 'eval') {
     console.log(JSON.stringify(builtinModels().getModels(positionals[1]).map(model => ({ provider: model.provider, id: model.id, input: model.input })), null, 2)); return;
   }
   // Before loading the configuration, so the page still opens to repair one that no longer loads.
@@ -45,6 +56,24 @@ async function main() {
     const credentials = new Credentials(credentialPaths(configPath, config.credentialsFile));
     const selected = role === 'main' ? modelUse(config, 'main').thinking : role === 'review' ? modelUse(config, 'review').thinking : modelUse(config, 'main').compaction;
     const report = await probeModel(selected, { credential: credentials.get, requireVision: role !== 'compaction' });
+    console.log(JSON.stringify({ role, ...report }, null, 2));
+    if (!report.ok) process.exitCode = 1;
+    return;
+  }
+  if (command === 'models' && positionals[1] === 'eval') {
+    const role = positionals[2] ?? 'main';
+    if (!['main', 'review'].includes(role)) throw new Error(ui('models eval accepts main or review.', 'models eval 仅支持 main 或 review。'));
+    const credentials = new Credentials(credentialPaths(configPath, config.credentialsFile));
+    const customCases = values.cases ? JSON.parse(readFileSync(resolve(values.cases), 'utf8')) : undefined;
+    if (customCases !== undefined && !Array.isArray(customCases)) throw new Error(ui('--cases must point to a JSON array of eval cases.', '--cases 必须指向评测用例数组 JSON 文件。'));
+    const caseIds = values.case ? values.case.split(',').map(id => id.trim()).filter(Boolean) : undefined;
+    const report = await evalModel({
+      config,
+      role: role as 'main' | 'review',
+      credential: credentials.get,
+      ...(customCases ? { cases: customCases } : {}),
+      ...(caseIds?.length ? { caseIds } : {}),
+    });
     console.log(JSON.stringify({ role, ...report }, null, 2));
     if (!report.ok) process.exitCode = 1;
     return;

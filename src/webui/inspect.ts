@@ -22,6 +22,7 @@ export function inspectConfig(config: Config, credential: CredentialReader = env
       identities: [contextIdentity(config, tools)],
       plugins: plugins.enabledIds(), tools: tools.current().map(tool => tool.name), credentials: pluginCredentials(config, credential),
       activityPrompts: plugins.activityPrompts(new Set(tools.current().map(tool => tool.name))),
+      platformNotes: plugins.platformNotes(),
       models: modelReadiness(config, credential),
     };
   } finally { store.close(); }

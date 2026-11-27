@@ -11,7 +11,7 @@ import { actionSummary, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { memoriesInView, type SemanticRecall } from './recall.js';
 import type { OnlineActivity } from './plugins.js';
-import type { ModelOwner } from './model-config.js';
+import { requiresThoughtSignatures, type ModelOwner } from './model-config.js';
 
 export interface ObservationMessage {
   role: 'observation';
@@ -259,6 +259,11 @@ export async function buildObservationMessage(params: {
   };
 }
 
+const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
+function isValidThoughtSignature(signature: string | undefined): boolean {
+  return Boolean(signature && signature.length % 4 === 0 && base64SignaturePattern.test(signature));
+}
+
 /**
  * Build seeded turns for a fresh main working context from recent successful chat actions interleaved with surrounding chat
  * events (ADR-0024). Starting with only consecutive user observations and zero assistant turns leaves thinking models
@@ -276,6 +281,7 @@ export function buildSeedTurns(params: { config: Config; store: Store; tools: To
     .slice(0, 6)
     .reverse();
   if (!actions.length) return [];
+  const requireSignatures = requiresThoughtSignatures(model);
   const signatures = new Map<string, { id: string; thoughtSignature?: string }>();
   for (const archived of store.recentAssistantMessages(200)) {
     if (archived.role !== 'assistant' || archived.provider !== model.provider || archived.api !== model.api || archived.model !== model.id) continue;
@@ -291,6 +297,9 @@ export function buildSeedTurns(params: { config: Config; store: Store; tools: To
   const usedCallIds = new Set<string>();
   const turns: AgentMessage[][] = [];
   for (const action of actions) {
+    const match = signatures.get(`${action.kind}:${stableJson(action.args)}`);
+    // Gemini 3+/4+ thinking models on generateContent reject historical functionCall parts without valid signatures.
+    if (requireSignatures && !isValidThoughtSignature(match?.thoughtSignature)) continue;
     const candidates = new Map<string, EnvironmentEvent>();
     for (const item of [...store.actionTriggers(action.id), ...store.recentConversationEvents(action.conversation!, action.createdAt, 3)]) {
       candidates.set(item.id, item);
@@ -299,7 +308,6 @@ export function buildSeedTurns(params: { config: Config; store: Store; tools: To
     if (!surrounding.length) continue;
     const freshEvents = surrounding.filter(item => !emittedEvents.has(item.id));
     for (const item of freshEvents) emittedEvents.add(item.id);
-    const match = signatures.get(`${action.kind}:${stableJson(action.args)}`);
     const callId = match && !usedCallIds.has(match.id) ? match.id : `seed_${action.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
     usedCallIds.add(callId);
     const callBlock: ToolCall = { type: 'toolCall', id: callId, name: action.kind, arguments: action.args as ToolCall['arguments'], ...(match?.thoughtSignature ? { thoughtSignature: match.thoughtSignature } : {}) };

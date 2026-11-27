@@ -201,6 +201,7 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
       return snowlumaCatalog.map(toolFor);
     },
     activities: activities.map(activity => ({ ...activity, insertBefore: 'Write or reread your diary' })),
+    promptNotes: ['SnowLuma file paths belong to its server; preserve them as provided rather than treating them as local host paths.'],
     experienceKinds: Object.fromEntries(snowlumaCatalog.map(action => [action.name, `adapter:${account.id}:${action.name}`])),
     chatActions: [...socialActions], staleActions: [...socialActions],
     chatTarget: (_tool, args) => snowlumaChat(args, account.accountId),

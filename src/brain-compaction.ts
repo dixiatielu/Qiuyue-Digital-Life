@@ -26,7 +26,7 @@ import {
 import { runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import { recordTime } from './record.js';
 import { waitFor } from './async.js';
-import { initialThinkingLevel, modelBudget, modelRoute, modelUse, shouldMergeConsecutiveUsers, type ModelOwner } from './model-config.js';
+import { initialThinkingLevel, modelBudget, modelRoute, modelUse, requiresThoughtSignatures, shouldMergeConsecutiveUsers, type ModelOwner } from './model-config.js';
 import { runtimeMessage } from './brain-observation.js';
 
 export interface ModelRequest {
@@ -175,13 +175,14 @@ export class ContextCompactor {
     measured = this.host.meter.measure(messages, route);
     if (pruned.changed) this.host.store.log('context_pruned', { runId: this.host.getRunId(), results: pruned.changed, beforeTokens: before, afterTokens: measured.tokens });
     if (measured.tokens > limit) {
-      // A delta may depend on a base that compaction removes. Keep a complete current state.
+      // A delta may depend on a base that compaction removes. Keep a complete current state for the compacted result.
       const snapshot = runtimeMessage(runtimeUpdate(runtime)!);
       const latest = messages.at(-1);
-      if (!(latest?.role === 'user' && latest.content === snapshot.content)) messages.push(snapshot);
-      this.host.setRuntimeSnapshot(runtime);
-      try { messages = await this.compact(messages, budget, model, signal); }
-      catch (error) {
+      const candidate = latest?.role === 'user' && latest.content === snapshot.content ? messages : [...messages, snapshot];
+      try {
+        messages = await this.compact(candidate, budget, model, signal);
+        this.host.setRuntimeSnapshot(runtime);
+      } catch (error) {
         // Below the full budget, compaction only makes room ahead of time; the request can go on without it.
         if (measured.tokens > budget || signal?.aborted) throw error;
         ensureCurrent(this.host.store, this.host.getThought(), signal);
@@ -248,12 +249,18 @@ export class ContextCompactor {
       const finish = (response?: AssistantMessage) => background ? this.host.recordRequestFinished(requestInfo, response, signal?.aborted) : this.host.finishRequest(response, signal?.aborted);
       let response: AssistantMessage;
       try {
-        const portable = sameRoute ? request : portableMessages(request);
+        const portable = sameRoute
+          ? request
+          : portableMessages(request, { flattenToolCalls: requiresThoughtSignatures(model) });
+        // Force toolChoice="none" on independent summary models or retries to prevent stray tool calls
+        // without busting the same-route prompt cache on the first attempt.
+        const toolChoice = !sameRoute || attempt > 0 ? 'none' as const : undefined;
         const responseWork = (async () => (await stream(model, normalizeContext({ messages: toModelMessages(portable, { mergeUsers: compactionMergeUsers }) }), {
           apiKey: this.host.credential(use.compaction.apiKeyEnv),
           reasoning: effectiveCompactionLevel === 'off' ? undefined : effectiveCompactionLevel,
           sessionId: sameRoute ? this.host.getSessionId() : undefined,
           cacheRetention: use.compaction.cacheRetention ?? 'short',
+          ...(toolChoice ? { toolChoice } : {}),
           signal,
           maxTokens: requestMaxTokens,
         })).result())();

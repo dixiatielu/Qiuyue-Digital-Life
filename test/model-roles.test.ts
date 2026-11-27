@@ -138,8 +138,12 @@ test('primary, concurrent review, and compaction use independent keys, reasoning
     assert.equal(grouped('review')[0]!.options.reasoning, 'high');
     assert.equal(grouped('review')[0]!.options.maxTokens, 2048);
     const budget = Math.min(f.cfg.limits.contextTokens, f.main.agent.state.model.contextWindow) - f.cfg.limits.outputReserveTokens - f.cfg.limits.contextSafetyTokens;
-    // A completed reply adds output after the prepared input; each prepared request still fits its owner.
-    assert.ok(grouped('main').every(request => estimatedContextTokens(request.messages) <= budget));
+    const mainBudgets = f.store.logs(500).filter(log => log.kind === 'context_budget' && (log.data as any).owner === 'main');
+    assert.equal(mainBudgets.length, grouped('main').length);
+    // A completed reply adds output after the prepared input; each prepared request still fits its owner's measured budget.
+    assert.ok(mainBudgets.every(log => (log.data as any).tokens <= budget));
+    const mainFinished = f.store.logs(500).filter(log => log.kind === 'model_request_finished' && (log.data as any).owner === 'main' && (log.data as any).purpose === 'thought');
+    assert.ok(mainFinished.every(log => (log.data as any).usage.input + (log.data as any).usage.cacheRead <= budget));
     assert.equal(f.review.agent.state.messages.length, 1);
     assert.equal(f.store.dailyCalls(), f.requests.length);
     const finished = f.store.logs(500).filter(log => log.kind === 'model_request_finished');

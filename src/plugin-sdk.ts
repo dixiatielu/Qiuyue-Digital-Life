@@ -129,6 +129,8 @@ export interface NativeAdapterDefinition {
   staleActions?: string[];
   /** Operations that end the thought once a batch made only of ending actions succeeds (ADR-0028). */
   endsThoughtActions?: string[];
+  /** Brief platform-specific parameter or protocol notes injected into system instructions while enabled. */
+  promptNotes?: string[];
   permissions?: { allow: '*' | string[]; deny: string[] };
   execute(operation: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
   conversation?(operation: string, args: Record<string, unknown>): { type: import('./identity.js').ConversationType; id: string } | undefined;

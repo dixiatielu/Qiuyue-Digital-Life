@@ -6,6 +6,8 @@ import { fauxAssistantMessage as answer } from '@earendil-works/pi-ai';
 import { builtinSystemPrompt, checkSystemPrompt, systemInstructions } from '../src/prompts.js';
 import { scopePlugin } from '../src/adapters/scope.js';
 import { PluginHost, type LifePlugin } from '../src/plugins.js';
+import { createPlugins } from '../src/plugins/index.js';
+import { Store } from '../src/store.js';
 import { config, event, fixture } from './helpers.js';
 
 test('activity instructions are literal additions to built-in and custom templates', () => {
@@ -83,4 +85,40 @@ test('built-in system prompt and example persona preserve prompt markers and ren
   }
   assert.ok(!withoutFiction.includes('Save fictional daily life with remember as fiction'));
   assert.ok(withFiction.includes('Save fictional daily life with remember as fiction'));
+  // Platform-specific guidance must come from enabled adapters rather than being hardcoded in system.md.
+  assert.ok(!builtinSystemPrompt.includes('SnowLuma'));
+  assert.ok(!builtinSystemPrompt.includes('Telegram upload objects'));
+});
+
+test('adapter platform notes are injected dynamically, deduplicated, and kept literal', () => {
+  const store = new Store(':memory:');
+  try {
+    const qqOnly = config();
+    const qqHost = createPlugins(qqOnly, store, undefined, () => undefined, () => ({ execute: async () => ({}) }));
+    assert.ok(qqHost.platformNotes().some(note => note.includes('SnowLuma')));
+    assert.ok(!qqHost.platformNotes().some(note => note.includes('Telegram')));
+
+    const tgOnly = config();
+    tgOnly.adapters = [{
+      id: 'tg_main', driver: 'telegram', accountId: '42', url: 'https://api.telegram.org',
+      tokenEnv: 'TG_TOKEN', groups: [], tools: { allow: '*', deny: [] }, maxStreamBytes: 10_000_000, maxFileBytes: 50_000_000, receive: 'polling',
+    }];
+    const tgHost = createPlugins(tgOnly, store, undefined, () => undefined);
+    assert.ok(tgHost.platformNotes().some(note => note.includes('Telegram')));
+    assert.ok(!tgHost.platformNotes().some(note => note.includes('SnowLuma')));
+
+    // Deduplication and literal rendering (no {{persona}} expansion inside platform notes).
+    const host = new PluginHost([
+      { id: 'a', tools: () => [], promptNotes: ['Note for {{persona}}.', 'Shared note.'] },
+      { id: 'b', tools: () => [], promptNotes: ['Shared note.'] },
+      { id: 'c', enabled: () => false, tools: () => [], promptNotes: ['Disabled note.'] },
+    ]);
+    assert.deepEqual(host.platformNotes(), ['Note for {{persona}}.', 'Shared note.']);
+    const rendered = systemInstructions(qqOnly, [], [], host.platformNotes());
+    assert.ok(rendered.includes('## Platform Notes'));
+    assert.ok(rendered.includes('- Note for {{persona}}.'));
+    assert.ok(!rendered.includes('Disabled note.'));
+  } finally {
+    store.close();
+  }
 });

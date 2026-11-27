@@ -116,6 +116,10 @@ export class PluginManager {
       if (!this.ready || this.stopped || !this.prompts) throw new Error('Plugin prompt preview is not ready.');
       return this.prompts();
     }
+    if (args.length === 1 && args[0] === 'notes') {
+      if (!this.ready || this.stopped) throw new Error('Plugin prompt preview is not ready.');
+      return this.host.platformNotes();
+    }
     if (args[0] === 'manage' && args.length === 4) {
       if (!this.ready || this.stopped || this.operation) throw new Error('Plugin management is unavailable while starting, stopping, or reloading.');
       const input = JSON.parse(args[3]!);

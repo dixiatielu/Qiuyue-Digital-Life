@@ -34,6 +34,8 @@ Custom endpoints support `openai-completions`, `openai-responses`, `anthropic-me
 
 The management page offers **Gemini (native)** and **Gemini (Interactions)** for providers and all three model assignments, including model listing, connection tests, and automated capability probing. Run `npm run dev -- models probe [main|review|compaction] --config config.json` (or click **Probe capabilities** on the Models page) to verify connectivity, compaction with thinking off, consecutive user turns, vision, multi-turn tool replay, strict schemas, and mid-conversation tool additions, with one-click application of suggested `compat` and options.
 
+To benchmark cross-model behavior offline (zero external platform side effects and an in-memory database), run `npm run dev -- models eval [main|review] --config config.json` (optionally `--case <id1,id2>` or `--cases <cases.json>`). The built-in suite checks group silence restraint, direct-mention engagement, burst/single-message style, memory source hygiene, ADR-0008 unknown-outcome caution, ADR-0023 on-demand `find_tools` loading, and ADR-0003 runtime-control boundaries.
+
 For a built-in Gemini model, use provider `google` and a model ID from `npm run dev -- models google` without setting `api`. For a Gemini native custom endpoint, use a complete model object like this, replacing the ID and token limits with those of your model:
 
 ```json
@@ -51,7 +53,7 @@ For a built-in Gemini model, use provider `google` and a model ID from `npm run 
 }
 ```
 
-`google-interactions` takes the same object with `"api": "google-interactions"`; its base URL also ends at the API version, and requests go to `<baseUrl>/interactions`. Changing `model` or `api` hands off the existing working context seamlessly after restart—stripping provider-specific signatures, resetting the token meter, and compacting automatically if the new model has a smaller window.
+`google-interactions` takes the same object with `"api": "google-interactions"`; its base URL also ends at the API version, and requests go to `<baseUrl>/interactions`. Changing `model` or `api` hands off the existing working context seamlessly after restart—stripping provider-specific signatures (and flattening unsigned historical tool turns into portable recaps when handing off to Gemini 3+/4+ models that require thought signatures), resetting the token meter, and compacting automatically if the new model has a smaller window.
 
 ### Tools loaded on demand
 

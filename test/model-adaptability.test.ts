@@ -21,6 +21,7 @@ import {
   filterCompatForApi,
   loadsToolsOnDemand,
   modelReadiness,
+  requiresThoughtSignatures,
   resolveModel,
   resolveModelWithInfo,
   supportedThinkingLevels,
@@ -28,7 +29,7 @@ import {
 } from '../src/model.js';
 import { sanitizeToolSchema } from '../src/schema.js';
 import { normalizeImageBlocks, prepareModelImage } from '../src/image.js';
-import { mergeConsecutiveUserMessages, toModelMessages } from '../src/context.js';
+import { estimateTokens, mergeConsecutiveUserMessages, portableMessages, textTokens, toModelMessages } from '../src/context.js';
 import { PiBrain, contextIdentity } from '../src/brain.js';
 import { Store } from '../src/store.js';
 import { nativeAdapterPlugin, compactSchema } from '../src/adapters/native.js';
@@ -656,4 +657,187 @@ test('probeModel detects when a gateway supports mid-conversation tool additions
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
+});
+
+test('requiresThoughtSignatures and Claude-to-Gemini-3 handoff/fresh-seed avoid unsigned functionCall HTTP 400s', async () => {
+  assert.equal(requiresThoughtSignatures({ api: 'google-generative-ai', id: 'gemini-3-flash-preview', reasoning: true }), true);
+  assert.equal(requiresThoughtSignatures({ api: 'google-generative-ai', id: 'gemini-4-hydrogen', reasoning: true }), true);
+  assert.equal(requiresThoughtSignatures({ api: 'google-vertex', id: 'gemini-3.1-pro-preview', reasoning: true }), true);
+  assert.equal(requiresThoughtSignatures({ api: 'google-generative-ai', id: 'gemma-4-27b-it', reasoning: true }), true);
+  assert.equal(requiresThoughtSignatures({ api: 'google-generative-ai', id: 'gemini-2.5-flash', reasoning: true }), false);
+  assert.equal(requiresThoughtSignatures({ api: 'google-interactions', id: 'gemini-4-hydrogen', reasoning: true }), false);
+  assert.equal(requiresThoughtSignatures({ api: 'anthropic-messages', id: 'claude-sonnet-4-6', reasoning: true }), false);
+  assert.equal(requiresThoughtSignatures({ api: 'google-generative-ai', id: 'gemini-3-flash-preview', reasoning: false }), false);
+
+  // Unit check: portableMessages({ flattenToolCalls: true }) strips toolCall/toolResult while preserving outcomes & system messages.
+  const flattened = portableMessages([
+    { role: 'system', content: 'sys', toolsAdded: [{ name: 'extra', description: 'd', parameters: Type.Object({}) }], timestamp: 1 } as any,
+    { role: 'user', content: 'Hi', timestamp: 2 },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'internal' },
+        { type: 'toolCall', id: 'c1', name: 'qq_main__send_group_msg', arguments: { group_id: 100, message: 'Lunar note' } },
+      ],
+      api: 'anthropic-messages', provider: 'anthropic', model: 'claude',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: 'toolUse', timestamp: 3,
+    },
+    { role: 'toolResult', toolCallId: 'c1', toolName: 'qq_main__send_group_msg', content: [{ type: 'text', text: '{"message_id":42}' }], isError: false, timestamp: 4 },
+  ], { flattenToolCalls: true });
+  assert.ok(flattened.some(m => m.role === 'system' && (m as any).toolsAdded?.length === 1));
+  assert.ok(!flattened.some(m => m.role === 'toolResult'));
+  assert.ok(!flattened.some(m => m.role === 'assistant' && m.content.some(b => b.type === 'toolCall')));
+  const flattenedText = String((flattened.at(-1) as any).content);
+  assert.match(flattenedText, /Lunar note/);
+  assert.match(flattenedText, /"message_id":42/);
+
+  // End-to-end check: strict Gemini 3 server rejects ANY functionCall missing a valid thoughtSignature with HTTP 400.
+  const requests: any[] = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    requests.push(body);
+    const unsignedCall = (body.contents ?? []).flatMap((c: any) => c.parts ?? []).find((part: any) => part.functionCall && !part.thoughtSignature);
+    if (unsignedCall) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { code: 400, message: 'Function call is missing a thought_signature in functionCall parts.' } }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'Quiet' }] }, finishReason: 'STOP', index: 0 }], usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 5, thoughtsTokenCount: 2, totalTokenCount: 57 } })}\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+
+  const cfg = config();
+  cfg.model = { ...baseCustom, id: 'claude-sonnet', api: 'anthropic-messages', baseUrl: 'https://claude.example', reasoning: false };
+  cfg.adapters[0]!.tools = { allow: ['send_group_msg', 'get_msg'], deny: [] };
+  cfg.plugins.gallery = false;
+  const store = new Store(':memory:');
+  const social = { execute: async () => ({ message_id: 77 }) };
+  const fauxClaude = fauxProvider(); const modelsClaude = createModels(); modelsClaude.setProvider(fauxClaude.provider);
+  const claudeBackend = {
+    model: { ...fauxClaude.getModel(), id: 'claude-sonnet', baseUrl: 'https://claude.example' },
+    stream: (m: any, c: any, o: any) => modelsClaude.streamSimple(m, c, { ...o, cacheRetention: 'none' }),
+  };
+
+  try {
+    // Turn 1 on Claude emits a tool call without a Gemini thoughtSignature.
+    let brain!: PiBrain;
+    const tools = createTools(cfg, store, social, () => brain.thought);
+    brain = new PiBrain(cfg, store, tools, claudeBackend);
+    event(store, 'Tell me about Tycho crater');
+    fauxClaude.setResponses([answer(call('qq_main__send_group_msg', { group_id: 100, message: 'Tycho has bright rays!' }))]);
+    await brain.run(store.claim(10)!);
+
+    // Turn 2 switches to Gemini 3 Flash (google-generative-ai): seamless handoff flattens unsigned tool turns.
+    cfg.model = {
+      provider: 'gemini-gw', id: 'gemini-3-flash-preview', api: 'google-generative-ai',
+      apiKeyEnv: 'GEMINI_TEST_KEY', baseUrl: `http://127.0.0.1:${port}/v1beta`,
+      input: ['text', 'image'], contextWindow: 1048576, maxTokens: 8192, reasoning: true, thinkingLevel: 'low',
+    };
+    const geminiTools = createTools(cfg, store, social, () => brain.thought);
+    brain = new PiBrain(cfg, store, geminiTools, undefined, undefined, undefined, name => name === 'GEMINI_TEST_KEY' ? 'key' : undefined);
+    event(store, 'Follow-up after switching to Gemini 3');
+    await brain.run(store.claim(10)!);
+
+    assert.equal(requests.length, 1);
+    const handoffPayload = JSON.stringify(requests[0].contents);
+    assert.match(handoffPayload, /Tycho has bright rays!/);
+    assert.ok(!requests[0].contents.flatMap((c: any) => c.parts ?? []).some((p: any) => p.functionCall));
+    assert.ok(store.logs(50).some(log => log.kind === 'context_model_handoff' && (log.data as any).flattenedToolCalls === true));
+
+    // Turn 3 changes persona to force a fresh context on Gemini 3: buildSeedTurns skips Claude's unsigned action instead of 400ing.
+    cfg.persona = 'Qiuyue refreshed for Gemini 3 fresh seed test.';
+    brain = new PiBrain(cfg, store, geminiTools, undefined, undefined, undefined, name => name === 'GEMINI_TEST_KEY' ? 'key' : undefined);
+    event(store, 'Fresh context after persona edit');
+    await brain.run(store.claim(10)!);
+
+    assert.equal(requests.length, 2);
+    assert.ok(!requests[1].contents.flatMap((c: any) => c.parts ?? []).some((p: any) => p.functionCall));
+  } finally {
+    store.close();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('compaction sets toolChoice="none" on independent summary models and retries while preserving same-route first-attempt cache', async () => {
+  const runCase = async (independent: boolean) => {
+    const cfg = config();
+    cfg.adapters[0]!.tools = { allow: ['send_group_msg', 'get_msg'], deny: [] };
+    cfg.plugins.gallery = false;
+    cfg.compaction.summaryMaxTokens = 512;
+    cfg.compaction.keepRecentTokens = 300;
+    cfg.compaction.retries = 1;
+    const store = new Store(':memory:');
+    const social = { execute: async () => ({ message_id: 1 }) };
+    const mainFaux = fauxProvider(); const mainModels = createModels(); mainModels.setProvider(mainFaux.provider);
+    const sumFaux = fauxProvider(); const sumModels = createModels(); sumModels.setProvider(sumFaux.provider);
+    const summaryOptions: any[] = [];
+    const isSummary = (messages: Message[]) => String(messages.at(-1)?.content).startsWith('Internal working context consolidation:');
+
+    const mainBackend = {
+      model: { ...mainFaux.getModel(), id: 'main-route', baseUrl: 'https://main.example' },
+      stream: (m: any, c: any, o: any) => {
+        if (isSummary(c.messages)) summaryOptions.push(o);
+        return mainModels.streamSimple(m, c, { ...o, cacheRetention: 'none' });
+      },
+    };
+    const summaryBackend = independent ? {
+      model: { ...sumFaux.getModel(), id: 'summary-route', baseUrl: 'https://summary.example' },
+      stream: (m: any, c: any, o: any) => {
+        if (isSummary(c.messages)) summaryOptions.push(o);
+        return sumModels.streamSimple(m, c, { ...o, cacheRetention: 'none' });
+      },
+    } : undefined;
+    if (independent) {
+      cfg.compaction.model = { ...baseCustom, id: 'summary-route', baseUrl: 'https://summary.example', reasoning: false };
+    }
+
+    let brain!: PiBrain;
+    const tools = createTools(cfg, store, social, () => brain.thought);
+    brain = new PiBrain(cfg, store, tools, mainBackend, undefined, undefined, () => 'secret', 'main', summaryBackend);
+    const fixed = textTokens(brain.agent.state.systemPrompt) + estimateTokens(tools.current().map(t => ({ name: t.name, description: t.description, parameters: t.parameters })));
+    cfg.limits.outputReserveTokens = 2048;
+    cfg.limits.contextTokens = cfg.limits.outputReserveTokens + cfg.limits.contextSafetyTokens + fixed + 2400;
+
+    try {
+      const longMsg = (n: number) => answer(call('qq_main__send_group_msg', { group_id: 100, message: `turn ${n} ` + 'history detail '.repeat(600) }));
+      if (independent) {
+        mainFaux.setResponses([longMsg(1), longMsg(2), answer('Done')]);
+        sumFaux.setResponses(Array.from({ length: 4 }, () => answer('Compact summary of earlier turns.')));
+      } else {
+        // Same-route compaction: attempt 0 emits a stray tool call (rejected), attempt 1 retries with toolChoice="none".
+        let summaryAttempt = 0;
+        const respond = (ctx: any) => {
+          if (isSummary(ctx.messages)) {
+            return summaryAttempt++ === 0
+              ? answer(call('qq_main__get_msg', { message_id: 1 }))
+              : answer('Compact summary on retry with toolChoice none.');
+          }
+          return answer('Done');
+        };
+        mainFaux.setResponses([longMsg(1), longMsg(2), respond, respond, respond]);
+      }
+      for (let i = 0; i < 3; i++) {
+        event(store, `Prompt ${i}`);
+        await brain.run(store.claim(10)!);
+      }
+      return summaryOptions;
+    } finally {
+      store.close();
+    }
+  };
+
+  const independentOpts = await runCase(true);
+  assert.ok(independentOpts.length >= 1);
+  assert.equal(independentOpts[0].toolChoice, 'none');
+
+  const sameRouteOpts = await runCase(false);
+  assert.ok(sameRouteOpts.length >= 2);
+  assert.equal(sameRouteOpts[0].toolChoice, undefined, 'same-route attempt 0 omits toolChoice to keep prompt cache warm');
+  assert.equal(sameRouteOpts[1].toolChoice, 'none', 'same-route retry forces toolChoice="none" after a stray tool call');
 });
