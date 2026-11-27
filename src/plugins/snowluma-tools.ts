@@ -1,11 +1,14 @@
 import type { AdapterConfig, Config } from '../config.js';
 import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
 import { nativeToolName } from '../platform.js';
+import { conversationRef } from '../identity.js';
 import { errorResult } from '../tool-runtime.js';
 import { eventRef } from '../store.js';
 import { fetchImage, preferJpeg } from '../web.js';
 import { sanitizeToolSchema } from '../schema.js';
 import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
+import { snowlumaDisplayProjector } from '../adapters/snowluma/display.js';
+import { snowlumaChatRecordFormatter } from '../adapters/snowluma/record.js';
 
 const oneBotSegment = {
   type: 'object',
@@ -201,6 +204,9 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
     experienceKinds: Object.fromEntries(snowlumaCatalog.map(action => [action.name, `adapter:${account.id}:${action.name}`])),
     chatActions: [...socialActions], staleActions: [...socialActions],
     chatTarget: (_tool, args) => snowlumaChat(args, account.accountId),
+    trackedConversations: () => account.groups.map(groupId => conversationRef({ platform: 'qq', accountId: account.accountId }, 'group', String(groupId))),
+    display: snowlumaDisplayProjector,
+    recordFormatter: snowlumaChatRecordFormatter,
     endsThought: tool => socialActions.has(tool),
     images: (event, helpers) => {
       if (!Array.isArray(event.payload.message)) return [];

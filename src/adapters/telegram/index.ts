@@ -106,9 +106,12 @@ export function telegramAdapter(config: AdapterConfig, credential: CredentialRea
       const own = String(actor?.id) === config.accountId || !!(chat && message?.message_id !== undefined && context!.storage.get(`sent:${chat.id}:${message.message_id}`, false));
       const entities = message?.entities ?? message?.caption_entities ?? [];
       const addressed = !own && (chat?.type === 'private' || kind === 'callback_query' || kind === 'inline_query' || String(message?.reply_to_message?.from?.id) === config.accountId || entities.some((entity: any) => entity.type === 'text_mention' && String(entity.user?.id) === config.accountId || entity.type === 'mention' && text.slice(entity.offset, entity.offset + entity.length).toLowerCase() === `@${username.toLowerCase()}`));
-      context!.publish({ key: `update:${update.update_id}`, kind: message && !data.message ? 'message' : `notice:${kind}`, at: Number.isFinite(message?.edit_date ?? message?.date) ? (message.edit_date ?? message.date) * 1000 : Date.now(), text,
-        payload: update, ...(chat ? { conversation: { type, id: thread === undefined ? String(chat.id) : `${chat.id}/${thread}` } } : {}),
-        ...(actor ? { actor: String(actor.id), actorName: [actor.first_name, actor.last_name].filter(Boolean).join(' ') || actor.username } : {}), own, addressed,
+      const isMessage = Boolean(message && !data.message);
+      const conversationName = typeof chat?.title === 'string' && chat.title ? chat.title : undefined;
+      context!.publish({ key: `update:${update.update_id}`, kind: isMessage ? 'message' : `notice:${kind}`, at: Number.isFinite(message?.edit_date ?? message?.date) ? (message.edit_date ?? message.date) * 1000 : Date.now(), text,
+        payload: update, ...(chat ? { conversation: { type, id: thread === undefined ? String(chat.id) : `${chat.id}/${thread}` }, ...(conversationName ? { conversationName } : {}) } : {}),
+        ...(actor ? { actor: String(actor.id), actorName: [actor.first_name, actor.last_name].filter(Boolean).join(' ') || actor.username } : {}),
+        ...(isMessage && message?.message_id != null ? { messageId: String(message.message_id) } : {}), own, addressed,
         attention: own || ['message_reaction', 'message_reaction_count'].includes(kind) ? 'ambient' : 'normal',
       });
     }

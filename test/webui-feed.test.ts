@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { displayImageUrl, displayMessageParts, outgoingMessage } from '../src/display-message.js';
+import { displayImageUrl } from '../src/display-message.js';
+import { snowlumaMessageParts } from '../src/adapters/snowluma/display.js';
+import { outgoingMessage } from '../src/adapters/display.js';
 import { Monitor } from '../src/monitor.js';
 import { Store } from '../src/store.js';
 import { normalizeEvent } from '../src/adapters/snowluma/index.js';
@@ -54,7 +56,7 @@ test('media projections reject local files, executable URLs, embedded credential
   }
   assert.equal(imageUrl('/api/gallery/drawing%3Aabc-123/image'), '/api/gallery/drawing%3Aabc-123/image');
   assert.equal(displayImageUrl('drawing:abc-123'), '/api/gallery/drawing%3Aabc-123/image');
-  assert.deepEqual(displayMessageParts([{ type: 'image', data: { file: 'base64://hidden' } }]), [{ kind: 'image', text: '', url: undefined }]);
+  assert.deepEqual(snowlumaMessageParts([{ type: 'image', data: { file: 'base64://hidden' } }]), [{ kind: 'image', text: '', url: undefined }]);
   assert.equal(outgoingMessage('telegram_main__sendMessage', { text: 'Hello' })?.parts[0]?.text, 'Hello');
   assert.equal(outgoingMessage('qq_main__get_msg', { message: 'Not a send' }), undefined);
 });
@@ -76,4 +78,60 @@ test('life event summaries describe structured facts and model prose is never pr
   assert.equal(thought.message, undefined); assert.equal(thought.facts[0].value, 'Not sent to a conversation');
   const revision = presentItem(item({ eventKind: 'memory_revision', text: 'memory:1 replaces memory:2', eventData: { revisions: [{ memoryId: 'memory:1' }], cites: ['state:activity'] } }));
   assert.ok(!revision.text.includes('memory:1')); assert.equal(revision.facts.length, 2);
+});
+
+test('Telegram incoming and outgoing messages project through adapter display hooks, and custom projector URLs are sanitized', () => {
+  const cfg = config(), store = new Store(':memory:');
+  const monitor = new Monitor(cfg, store, 2000, () => undefined, {
+    projectors: () => [{
+      platform: 'custom',
+      projectEvent: event => ({
+        sender: 'ExtUser',
+        sourceName: 'ExtRoom',
+        message: {
+          direction: 'incoming',
+          parts: [
+            { kind: 'text', text: event.text },
+            { kind: 'image', text: 'bad', url: 'javascript:alert(1)' },
+            { kind: 'image', text: 'api', url: '/api/secrets' },
+            { kind: 'image', text: 'drawing', url: 'drawing:abc-123' },
+          ],
+        },
+      }),
+    }],
+  });
+  try {
+    const incoming = store.receive({
+      key: 'tg:disp:1', kind: 'message', at: Date.now(), text: 'Look at this photo',
+      source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: 'telegram:900:group:-100123', conversationType: 'group', conversationName: 'Studio', actor: 'telegram:user:7', actorName: 'Lin', messageId: '55', own: false, addressed: true, attention: 'normal' },
+      payload: { update_id: 1, message: { message_id: 55, chat: { id: -100123, type: 'supergroup', title: 'Studio' }, reply_to_message: { message_id: 50, text: 'Earlier note' }, caption: 'Look at this photo', photo: [{ file_id: 'p1' }] } },
+    })!;
+    const tgItem = monitor.snapshot().items.find(entry => entry.id === incoming.id)!;
+    assert.equal(tgItem.sender, 'Lin');
+    assert.equal(tgItem.sourceName, 'Studio');
+    assert.deepEqual(tgItem.message?.parts.map(part => part.kind), ['reply', 'text', 'image']);
+    assert.equal(tgItem.message?.parts[0]?.text, 'Earlier note');
+    assert.equal(tgItem.message?.parts[1]?.text, 'Look at this photo');
+
+    const sent = store.beginAction('tg:send:photo', 'tg_main__sendPhoto', { chat_id: -100123, photo: 'drawing:abc-123', caption: 'Finished sketch' }, [], [], null, 'telegram:900:group:-100123').action;
+    const sentItem = monitor.snapshot().items.find(entry => entry.id === sent.id)!;
+    assert.equal(sentItem.sourceName, 'Studio');
+    assert.equal(sentItem.message?.direction, 'outgoing');
+    assert.deepEqual(sentItem.message?.parts, [
+      { kind: 'text', text: 'Finished sketch' },
+      { kind: 'image', text: '', url: '/api/gallery/drawing%3Aabc-123/image' },
+    ]);
+
+    const custom = store.receive({
+      key: 'custom:1', kind: 'message', at: Date.now() + 1, text: 'Hi from custom',
+      source: { platform: 'custom', accountId: '1', instance: 'ext_main', conversation: 'custom:1:channel:general', conversationType: 'channel', own: false, addressed: true, attention: 'normal' },
+      payload: {},
+    })!;
+    const customItem = monitor.snapshot().items.find(entry => entry.id === custom.id)!;
+    assert.equal(customItem.sender, 'ExtUser');
+    assert.equal(customItem.sourceName, 'ExtRoom');
+    assert.equal(customItem.message?.parts[1]?.url, undefined);
+    assert.equal(customItem.message?.parts[2]?.url, undefined);
+    assert.equal(customItem.message?.parts[3]?.url, '/api/gallery/drawing%3Aabc-123/image');
+  } finally { monitor.close(); store.close(); }
 });

@@ -1,4 +1,5 @@
-import { fromCQString } from '@snowluma/sdk';
+import type { Action, EnvironmentEvent } from './domain.js';
+import { parseConversationRef } from './identity.js';
 
 /** A small, inert message projection. Never includes image bytes or arbitrary native payloads. */
 export interface DisplayMessagePart {
@@ -8,9 +9,32 @@ export interface DisplayMessagePart {
 }
 export interface DisplayMessage { direction: 'incoming' | 'outgoing'; parts: DisplayMessagePart[] }
 
-export function displayImageUrl(value: unknown): string | undefined {
+export interface EventDisplayProjection {
+  sender?: string;
+  sourceName?: string;
+  message?: DisplayMessage;
+}
+export interface ActionDisplayProjection {
+  source?: string;
+  message?: DisplayMessage;
+}
+export type DisplayImageUrlResolver = (value: unknown) => string | undefined;
+export type MediaPreviewResolver = (value: string) => string | undefined;
+
+export interface DisplayProjector {
+  /** Platform identifier handled by this projector (e.g. 'qq', 'telegram'), or undefined to inspect any platform. */
+  readonly platform?: string;
+  projectEvent?(event: EnvironmentEvent, imageUrl: DisplayImageUrlResolver): EventDisplayProjection | undefined;
+  projectAction?(action: Action, imageUrl: DisplayImageUrlResolver): ActionDisplayProjection | undefined;
+}
+
+const defaultPreview: MediaPreviewResolver = value =>
+  /^drawing:[a-f0-9-]+$/i.test(value) ? `/api/gallery/${encodeURIComponent(value)}/image` : undefined;
+
+export function displayImageUrl(value: unknown, preview?: MediaPreviewResolver): string | undefined {
   if (typeof value !== 'string') return;
-  if (/^drawing:[a-f0-9-]+$/i.test(value)) return `/api/gallery/${encodeURIComponent(value)}/image`;
+  const local = preview?.(value) ?? defaultPreview(value);
+  if (local !== undefined) return local;
   try {
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return;
@@ -20,39 +44,78 @@ export function displayImageUrl(value: unknown): string | undefined {
   } catch { return; }
 }
 
-export function displayMessageParts(message: unknown, fallback = ''): DisplayMessagePart[] {
-  if (typeof message === 'string') {
-    if (!message.includes('[CQ:')) return [{ kind: 'text', text: message }];
-    try { message = fromCQString(message).toSegments(); } catch { return [{ kind: 'text', text: message as string }]; }
-  }
-  if (!Array.isArray(message) || !message.length) return fallback ? [{ kind: 'text', text: fallback }] : [];
-  return message.slice(0, 80).map((part): DisplayMessagePart => {
-    const data = part?.data ?? {};
-    const text = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).slice(0, 8000) : '';
-    switch (part?.type) {
-      case 'text': return { kind: 'text', text: text(data.text) };
-      case 'image': case 'mface': return { kind: 'image', text: text(data.summary), url: displayImageUrl(data.url) ?? displayImageUrl(data.file) };
-      case 'at': return { kind: 'mention', text: text(data.name || data.qq) };
-      case 'reply': return { kind: 'reply', text: text(data.text || data.id) };
-      case 'face': return { kind: 'face', text: text(data.name || data.id) };
-      case 'record': case 'video': case 'file': case 'forward': return { kind: part.type, text: text(data.name || data.summary) };
-      case 'json': {
-        let title = '';
-        try { title = text(JSON.parse(String(data.data)).prompt); } catch { /* The original stays in details. */ }
-        return { kind: 'card', text: title };
-      }
-      default: return { kind: 'attachment', text: text(part?.type) };
-    }
-  });
+/** Plain text projection for adapters that have no structured segment representation. */
+export function displayTextParts(value: unknown, fallback = ''): DisplayMessagePart[] {
+  const text = typeof value === 'string' && value ? value : fallback;
+  return text ? [{ kind: 'text', text: text.slice(0, 8000) }] : [];
 }
 
-export function outgoingMessage(kind: string, args: Record<string, unknown>): DisplayMessage | undefined {
-  const operation = kind.split('__').at(-1)!;
-  if (['send_group_msg', 'send_private_msg', 'send_msg'].includes(operation)) return { direction: 'outgoing', parts: displayMessageParts(args.message) };
-  if (['sendMessage', 'sendPhoto', 'sendAnimation', 'sendSticker', 'sendDocument', 'sendVideo', 'sendVoice', 'sendAudio'].includes(operation)) {
-    const parts = displayMessageParts(args.text ?? args.caption);
-    if (operation === 'sendPhoto' || operation === 'sendSticker') parts.push({ kind: 'image', text: '', url: displayImageUrl(args.photo ?? args.sticker) });
-    else if (operation !== 'sendMessage') parts.push({ kind: 'attachment', text: operation.replace('send', '') });
-    return { direction: 'outgoing', parts };
+/** Sanitize every part URL returned by a projector so untrusted extensions cannot inject unsafe URLs. */
+export function sanitizeDisplayMessage(message: DisplayMessage | undefined, imageUrl: DisplayImageUrlResolver): DisplayMessage | undefined {
+  if (!message || !Array.isArray(message.parts)) return undefined;
+  return {
+    direction: message.direction === 'outgoing' ? 'outgoing' : 'incoming',
+    parts: message.parts.slice(0, 80).map(part => ({
+      kind: part.kind,
+      text: typeof part.text === 'string' ? part.text.slice(0, 8000) : '',
+      ...(part.url !== undefined ? { url: imageUrl(part.url) } : {}),
+    })),
+  };
+}
+
+function createImageUrlResolver(preview?: MediaPreviewResolver): { resolve: DisplayImageUrlResolver; sanitize: DisplayImageUrlResolver } {
+  const produced = new Set<string>();
+  const resolve: DisplayImageUrlResolver = value => {
+    const url = displayImageUrl(value, preview);
+    if (url !== undefined) produced.add(url);
+    return url;
+  };
+  const sanitize: DisplayImageUrlResolver = value =>
+    typeof value === 'string' && produced.has(value) ? value : displayImageUrl(value, preview);
+  return { resolve, sanitize };
+}
+
+export function projectEventDisplay(
+  event: EnvironmentEvent,
+  projectors: readonly DisplayProjector[],
+  preview?: MediaPreviewResolver,
+): EventDisplayProjection {
+  const { resolve, sanitize } = createImageUrlResolver(preview);
+  const platform = event.source?.platform;
+  for (const projector of projectors) {
+    if (projector.platform && platform && projector.platform !== platform) continue;
+    const projected = projector.projectEvent?.(event, resolve);
+    if (!projected) continue;
+    return {
+      sender: projected.sender ?? event.source?.actorName ?? event.source?.actor,
+      sourceName: projected.sourceName ?? event.source?.conversationName,
+      ...(projected.message ? { message: sanitizeDisplayMessage(projected.message, sanitize) } : {}),
+    };
   }
+  return {
+    sender: event.source?.actorName ?? event.source?.actor,
+    sourceName: event.source?.conversationName,
+    ...(event.kind === 'message'
+      ? { message: { direction: event.source?.own ? 'outgoing' : 'incoming', parts: displayTextParts(event.text) } }
+      : {}),
+  };
+}
+
+export function projectActionDisplay(
+  action: Action,
+  projectors: readonly DisplayProjector[],
+  preview?: MediaPreviewResolver,
+): ActionDisplayProjection {
+  const { resolve, sanitize } = createImageUrlResolver(preview);
+  const platform = action.conversation ? parseConversationRef(action.conversation)?.platform : undefined;
+  for (const projector of projectors) {
+    if (projector.platform && platform && projector.platform !== platform) continue;
+    const projected = projector.projectAction?.(action, resolve);
+    if (!projected) continue;
+    return {
+      source: projected.source ?? action.conversation,
+      ...(projected.message ? { message: sanitizeDisplayMessage(projected.message, sanitize) } : {}),
+    };
+  }
+  return { ...(action.conversation ? { source: action.conversation } : {}) };
 }

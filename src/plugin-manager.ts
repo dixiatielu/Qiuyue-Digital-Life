@@ -7,7 +7,14 @@ import { waitFor } from './async.js';
 import { inspectPluginManifests, readPluginManifest } from './plugin-manifest.js';
 import type { PluginDefinition } from './plugin-sdk.js';
 import { PluginHost, type ActivityPrompt, type LifePlugin } from './plugins.js';
-import { createBuiltinPlugin, activePluginIds, pluginIds, type BuiltinPluginId } from './plugins/index.js';
+import { createBuiltinPlugin } from './plugins/index.js';
+import {
+  activePluginIds,
+  applySelectedPluginReloadConfig,
+  builtinFingerprintInput,
+  coreConfigForRestartCheck,
+  isBuiltinPluginId,
+} from './plugins/metadata.js';
 import type { LifeRuntime } from './runtime.js';
 import { digest, type Store } from './store.js';
 import { join } from 'node:path';
@@ -18,23 +25,13 @@ export interface PluginReloadJob {
   id: string; target: string; state: 'preparing' | 'waiting' | 'applying' | 'done' | 'failed'; startedAt: number; finishedAt?: number;
   changed?: string[]; contextReset?: boolean; error?: string; cleanupErrors?: string[];
 }
-const builtin = (id: string): id is BuiltinPluginId => (pluginIds as readonly string[]).includes(id);
+const builtin = isBuiltinPluginId;
 const busy = (job?: PluginReloadJob) => job && !['done', 'failed'].includes(job.state);
 function fingerprint(id: string, config: Config): string {
-  const enabled = config.plugins[id] ?? true;
   if (!builtin(id)) return digest({ enabled: config.plugins[id], settings: config.extensions.settings[id] ?? {} });
-  switch (id) {
-    case 'drawing': return digest({ enabled, drawing: config.drawing });
-    case 'gallery': return digest({ enabled, dir: config.drawing.dir, drawing: config.drawing.enabled, generator: config.plugins.drawing, embedding: config.embedding });
-    case 'web-reader': case 'web-search': return digest({ enabled, web: config.web });
-    case 'qq-stickers': return digest({ enabled, embedding: config.embedding });
-    default: return digest({ enabled });
-  }
+  return digest(builtinFingerprintInput(id, config));
 }
-function core(config: Config) {
-  const { plugins: _plugins, web: _web, drawing: _drawing, extensions, ...rest } = config;
-  return { ...rest, drawing: { dir: config.drawing.dir }, extensions: { directory: extensions.directory, dataDirectory: extensions.dataDirectory } };
-}
+const core = coreConfigForRestartCheck;
 /** Reload is a daemon operation. The web page reads metadata and never imports user code. */
 export class PluginManager {
   private installed = new Map<string, Installed>();
@@ -144,22 +141,20 @@ export class PluginManager {
     next.extensions.reloadTimeoutMs = desired.extensions.reloadTimeoutMs;
     if (target === 'all') {
       next.plugins = desired.plugins; next.extensions.settings = desired.extensions.settings;
-      next.web = desired.web; next.drawing = { ...desired.drawing, dir: this.config.drawing.dir };
     } else {
       delete next.plugins[target];
       if (desired.plugins[target] !== undefined) next.plugins[target] = desired.plugins[target];
       delete next.extensions.settings[target];
       if (desired.extensions.settings[target] !== undefined) next.extensions.settings[target] = desired.extensions.settings[target]!;
-      if (target === 'drawing') next.drawing = { ...desired.drawing, dir: this.config.drawing.dir };
-      if (target === 'web-reader' || target === 'web-search') next.web = desired.web;
     }
+    applySelectedPluginReloadConfig(next, desired, target);
     for (const [id, item] of this.installed) if (item.plugin.requiresRestart || item.source === 'builtin' && !builtin(id)) { delete next.extensions.settings[id]; if (this.config.extensions.settings[id]) next.extensions.settings[id] = this.config.extensions.settings[id]!; delete next.plugins[id]; if (this.config.plugins[id] !== undefined) next.plugins[id] = this.config.plugins[id]!; }
     return next;
   }
   private applyConfig(next: Config) {
     this.config.plugins = next.plugins; this.config.extensions.settings = next.extensions.settings;
     this.config.extensions.reloadTimeoutMs = next.extensions.reloadTimeoutMs;
-    this.config.web = next.web; this.config.drawing = next.drawing;
+    applySelectedPluginReloadConfig(this.config, next, 'all');
   }
   private async reload(target: string, job: PluginReloadJob, signal: AbortSignal) {
     if (target !== 'all' && this.installed.get(target)?.plugin.requiresRestart) throw new Error('Native adapter plugins require a daemon restart to avoid overlapping event consumers.');

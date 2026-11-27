@@ -4,9 +4,11 @@ import { dirname, resolve } from 'node:path';
 import type { ToolPermissions } from './platform.js';
 import { atModelPath, independentModelUses, modelReadiness, validateModelConfig, type ModelConfig, type ModelPath } from './model.js';
 import { checkSystemPrompt } from './prompts.js';
+import { builtinAdapterDrivers, isBuiltinAdapterDriver, snowlumaScopedPluginIds, type BuiltinAdapterDriver } from './adapters/metadata.js';
+import { builtinCredentialFields } from './plugins/metadata.js';
 
 export interface AdapterConfig {
-  id: string; driver: 'snowluma' | 'telegram'; accountId: string; url?: string; tokenEnv: string;
+  id: string; driver: BuiltinAdapterDriver; accountId: string; url?: string; tokenEnv: string;
   tools: ToolPermissions; groups: number[]; maxStreamBytes: number; maxFileBytes: number; receive: 'polling' | 'manual';
 }
 export interface Config {
@@ -42,7 +44,7 @@ export interface Config {
 
 export function loadConfig(path: string): Config {
   const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
-  if ('snowluma' in raw || raw.adapters === undefined || ['snowluma-tools', 'qzone-share', 'qq-stickers', 'qq-faces'].some(id => Object.hasOwn(raw.plugins ?? {}, id))) throw new Error('Platform configuration needs migration: run identities migrate --config <path> while the daemon is stopped.');
+  if ('snowluma' in raw || raw.adapters === undefined || snowlumaScopedPluginIds.some(id => Object.hasOwn(raw.plugins ?? {}, id))) throw new Error('Platform configuration needs migration: run identities migrate --config <path> while the daemon is stopped.');
   const base = dirname(resolve(path));
   if (typeof raw.personaFile !== 'string' || !raw.personaFile.trim()) throw new Error('The personaFile configuration must be a non-empty file path.');
   const persona = readFileSync(resolve(base, raw.personaFile), 'utf8');
@@ -104,7 +106,7 @@ export function loadConfig(path: string): Config {
   if (!Number.isSafeInteger(config.extensions.reloadTimeoutMs) || config.extensions.reloadTimeoutMs < 100 || config.extensions.reloadTimeoutMs > 900_000) throw new Error('extensions.reloadTimeoutMs must be between 100 and 900000.');
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
   validateModelConfig(config.model);
-  for (const name of [config.model.apiKeyEnv, ...config.adapters.map(account => account.tokenEnv), config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
+  for (const name of [...builtinCredentialFields.map(([section, field]) => (config as Record<string, any>)[section]?.[field]), ...config.adapters.map(account => account.tokenEnv)]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
   const { modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun, debounceMs, maxPreemptions, ...runLimits } = config.limits;
   for (const [key, value] of Object.entries({ modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun })) {
     if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) throw new Error(`${key} must be a positive integer or null (unlimited).`);
@@ -161,17 +163,17 @@ function readAdapters(value: unknown): AdapterConfig[] {
   return value.map(raw => {
     if (!raw || !/^[a-z][a-z0-9_]{0,23}$/.test(raw.id) || ids.has(raw.id)) throw new Error('Each adapter needs a unique id of 1–24 lowercase letters, digits or underscores.');
     ids.add(raw.id);
-    if (!['snowluma', 'telegram'].includes(raw.driver)) throw new Error('Built-in adapter driver must be snowluma or telegram. Other adapters register through plugins.');
+    const driverName: unknown = raw.driver;
+    if (!isBuiltinAdapterDriver(driverName)) throw new Error('Built-in adapter driver must be snowluma or telegram. Other adapters register through plugins.');
+    const driver = builtinAdapterDrivers[driverName];
     if (typeof raw.accountId !== 'string' || !/^[1-9][0-9]*$/.test(raw.accountId) || !Number.isSafeInteger(Number(raw.accountId))) throw new Error('These adapters require accountId as a positive decimal string within the platform ID range.');
-    const key = `${raw.driver === 'snowluma' ? 'qq' : 'telegram'}:${raw.accountId}`;
+    const key = `${driver.platform}:${raw.accountId}`;
     if (accounts.has(key)) throw new Error('Configure each platform account once to avoid competing event consumers.'); accounts.add(key);
-    const config: AdapterConfig = { groups: [], maxStreamBytes: 32_000_000, maxFileBytes: 50_000_000, receive: 'polling', ...raw, tokenEnv: raw.tokenEnv ?? (raw.driver === 'telegram' ? 'TELEGRAM_BOT_TOKEN' : 'SNOWLUMA_TOKEN'), tools: { allow: '*', deny: [], ...raw.tools } };
+    const config: AdapterConfig = { groups: [], maxStreamBytes: 32_000_000, maxFileBytes: 50_000_000, receive: 'polling', ...raw, tokenEnv: raw.tokenEnv ?? driver.defaultTokenEnv, tools: { allow: '*', deny: [], ...raw.tools } };
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.tokenEnv)) throw new Error('Adapter tokenEnv must be an environment variable name.');
-    const url = new URL(config.url ?? (config.driver === 'snowluma' ? 'ws://127.0.0.1:3001' : 'https://api.telegram.org'));
-    if (!(config.driver === 'snowluma' ? ['ws:', 'wss:'] : ['https:', 'http:']).includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Adapter URL has an invalid protocol or embedded credentials.');
-    if (!Array.isArray(config.groups) || config.groups.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new Error('Adapter groups must contain positive QQ group IDs.');
-    for (const limit of [config.maxStreamBytes, config.maxFileBytes]) if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Adapter size limits must be positive integers.');
-    if (!['manual', 'polling'].includes(config.receive)) throw new Error('Telegram receive must be polling or manual.');
+    const url = new URL(config.url ?? driver.defaultUrl);
+    if (!driver.allowedProtocols.includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Adapter URL has an invalid protocol or embedded credentials.');
+    driver.validateConfig(config);
     const permissions = config.tools;
     if (permissions.allow !== '*' && !Array.isArray(permissions.allow) || !Array.isArray(permissions.deny)) throw new Error('Adapter tools.allow must be "*" or an array; deny must be an array.');
     if ([...(permissions.allow === '*' ? [] : permissions.allow), ...permissions.deny].some(name => typeof name !== 'string' || !name)) throw new Error('Adapter permission names must be non-empty strings.');

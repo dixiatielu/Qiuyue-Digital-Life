@@ -1,246 +1,160 @@
-import { requireConversationRef, personRef, parsePersonRef } from './identity.js';
+import { requireConversationRef } from './identity.js';
 import { eventChat, type Action, type EnvironmentEvent } from './domain.js';
 import { eventRef, type Store } from './store.js';
 import { textTokens } from './context.js';
+import {
+  RECORD_LINE_LIMIT,
+  clipRecordText,
+  emojiLabel,
+  recordClock,
+  recordDay,
+  recordDetails,
+  recordTime,
+  type ChatRecordContext,
+  type ChatRecordFormatter,
+  type ChatRecordPage,
+  type ChatRecordSession,
+} from './record-format.js';
+import { builtinRecordFormatters } from './adapters/record.js';
 
-const ZONE_OFFSET = 8 * 3_600_000;
-const LINE_LIMIT = 300;
-const QUOTE_LIMIT = 40;
-/** Asia/Shanghai wall-clock time; the record is read in the same zone as runtime_data. */
-const local = (at: number) => new Date(at + ZONE_OFFSET).toISOString();
-export const recordTime = (at: number) => local(at).replace('Z', '+08:00');
-const clock = (at: number) => local(at).slice(11, 19);
-const day = (at: number) => local(at).slice(0, 10);
+export {
+  clipRecordText,
+  emojiLabel,
+  recordTime,
+  type ChatRecordContext,
+  type ChatRecordFormatter,
+  type ChatRecordPage,
+  type ChatRecordSession,
+};
 
-/** An emoji's native ID and any supplied name; larger IDs can be Unicode code points. */
-export function emojiLabel(id: unknown, names: Record<string, string>): string {
-  const code = String(id);
-  let name = names[code];
-  if (!name && Number(code) >= 1000) { try { name = String.fromCodePoint(Number(code)); } catch { /* not a code point */ } }
-  return name ? `${code} ${name}` : code;
-}
-
-type Item = { at: number; event?: EnvironmentEvent; action?: Action };
-interface Page { lines: string[]; last?: number }
-/** How an observation shows a chat: a thought acts on what it sees, so each person comes with their QQ and each message with its message_id, and text runs up to limit characters. */
+/** How an observation shows a chat: a thought acts on what it sees, so each person comes with their ID and each message with its message_id, and text runs up to limit characters. */
 interface Observed { limit: number }
+
+/** Fallback session for platforms without a dedicated ChatRecordFormatter. */
+class GenericChatRecordSession implements ChatRecordSession {
+  private people = new Map<string, string>();
+  constructor(private readonly ctx: ChatRecordContext) {}
+  heading(): string {
+    const name = this.ctx.identity.type !== 'private' ? this.ctx.store.conversationName(this.ctx.conversation) : undefined;
+    return name ? `${name} [${this.ctx.conversation}]:` : `${this.ctx.conversation}:`;
+  }
+  title(): string {
+    const name = this.ctx.identity.type !== 'private' ? this.ctx.store.conversationName(this.ctx.conversation) : undefined;
+    return name ? `Chat record of ${name} (${this.ctx.conversation})` : `Chat record of ${this.ctx.conversation}`;
+  }
+  legend(page: ChatRecordPage): string {
+    if (!page.lines.length) return '';
+    const people = [...this.people].map(([ref, name]) => `${name}=${ref}`).join(', ');
+    return `Conversation: ${this.ctx.conversation}. People: ${people || 'none'}; "me" is you. Times are +08:00. #xxxxxxxx refs can be cited as sources and opened with read_event or view_event_image.`;
+  }
+  render(events: EnvironmentEvent[], actions: Action[], today = ''): ChatRecordPage {
+    for (const event of events) {
+      if (event.source?.actor && !event.source.own) {
+        const label = event.source.actorName || event.source.actor;
+        if (!this.people.has(event.source.actor)) this.people.set(event.source.actor, label);
+      }
+    }
+    const limit = this.ctx.observed?.limit ?? RECORD_LINE_LIMIT;
+    const items = [
+      ...events.map(event => ({
+        at: event.at,
+        text: `${eventRef(event.id)} [${event.kind}] ${event.source?.own ? 'me' : [event.source?.actorName, event.source?.actor].filter(Boolean).join(' ')}: ${clipRecordText(event.text, eventRef(event.id), limit)}`,
+      })),
+      ...actions.map(action => {
+        const caption = this.ctx.actionCaption?.(action);
+        return {
+          at: action.createdAt,
+          text: caption !== undefined
+            ? `${action.id} ${caption}`
+            : `${action.id} me: ${action.kind} ${clipRecordText(JSON.stringify(action.args), action.id, limit)} → ${clipRecordText(JSON.stringify(action.result), action.id, limit)}`,
+        };
+      }),
+    ].sort((a, b) => a.at - b.at);
+    return {
+      lines: items.map(item => `${recordDay(item.at) === today ? '' : `${recordDay(item.at)} `}${recordClock(item.at)} ${item.text}`),
+      last: items.at(-1)?.at,
+    };
+  }
+}
 
 /** Render one conversation faithfully and in order; what to learn from it is left to the reader. */
 export class ChatRecord {
-  private names = new Map<number, string>();
-  /** faces names QQ system faces by ID, so reactions read as what they show. */
-  constructor(private store: Store, private conversation: string, private faces: Record<string, string> = {}, private observed?: Observed, private actionCaption?: (action: Action) => string | undefined) {
-    this.identity = requireConversationRef(conversation);
-    this.selfId = Number(this.identity.accountId);
+  private readonly session: ChatRecordSession;
+  /** faces names platform system faces by ID, so reactions read as what they show. */
+  constructor(
+    private store: Store,
+    private conversation: string,
+    faces: Record<string, string> = {},
+    observed?: Observed,
+    actionCaption?: (action: Action) => string | undefined,
+    extraFormatters: readonly ChatRecordFormatter[] = [],
+  ) {
+    const identity = requireConversationRef(conversation);
+    const context: ChatRecordContext = { store, conversation, identity, faces, observed, actionCaption };
+    const formatters = extraFormatters.length ? [...extraFormatters, ...builtinRecordFormatters] : builtinRecordFormatters;
+    const formatter = formatters.find(item => item.platform === identity.platform && (item.matches?.(identity) ?? true));
+    this.session = formatter ? formatter.create(context) : new GenericChatRecordSession(context);
   }
-  private identity: ReturnType<typeof requireConversationRef>;
-  private selfId: number;
-  private generic() { return this.identity.platform !== 'qq' || !['group', 'private'].includes(this.identity.type); }
 
   /** Events an observation brings from this conversation, under a heading naming it; a date is given only when it is not today. */
   observe(events: EnvironmentEvent[]): string {
-    if (this.generic()) return `${this.conversation}:\n${this.render(events, [], day(Date.now())).lines.join('\n')}`;
-    const { type, id } = this.identity;
-    const name = type === 'group' && this.store.groupName(this.conversation);
-    const heading = type === 'private' ? `Private chat with ${this.name(Number(id))}:` : `Group ${id}${name ? ` (${name})` : ''}:`;
-    return [`${heading} [${this.conversation}]`, ...this.render(events, [], day(Date.now())).lines].join('\n');
+    const heading = this.session.heading();
+    return [heading, ...this.session.render(events, [], recordDay(Date.now())).lines].join('\n');
   }
 
   /** Read forward from a time; reports the time of the first item not included. */
   page(from: number, limit: number): { text: string; next?: number; through?: number } {
     const { events, actions, complete } = this.store.conversationRecord(this.conversation, from, limit);
-    const page = this.render(events, actions);
+    const page = this.session.render(events, actions);
     const next = page.last === undefined ? undefined : page.last + 1;
-    const header = page.lines.length ? `${this.title()}, from ${recordTime(from)}:` : `${this.title()}: nothing from ${recordTime(from)} on.`;
+    const header = page.lines.length ? `${this.session.title()}, from ${recordTime(from)}:` : `${this.session.title()}: nothing from ${recordTime(from)} on.`;
     const footer = complete ? 'This is the end of the record so far.' : `More follows: read_chat_record with from="${recordTime(next!)}".`;
-    return { text: [header, this.legend(page), ...page.lines, footer].filter(Boolean).join('\n'), next: complete ? undefined : next, through: next };
+    return { text: [header, this.session.legend(page), ...page.lines, footer].filter(Boolean).join('\n'), next: complete ? undefined : next, through: next };
   }
 
   /** Everything from one time through another, as it happened. Beyond budget tokens, the earliest lines are left out and counted. */
   span(from: number, until: number, budget: number): { text: string; omitted: number } {
     const { events, actions } = this.store.conversationRecord(this.conversation, from, Number.MAX_SAFE_INTEGER, until);
-    const { lines } = this.render(events, actions);
+    const { lines } = this.session.render(events, actions);
     let omitted = 0; let tokens = lines.reduce((sum, line) => sum + textTokens(line) + 1, 0);
     while (omitted < lines.length && tokens > budget) tokens -= textTokens(lines[omitted++]!) + 1;
     const kept = lines.slice(omitted);
-    return { text: [`${this.title()}, from ${recordTime(from)} through ${recordTime(until)}:`, this.legend({ lines: kept }), ...(kept.length ? kept : ['(nothing)'])].filter(Boolean).join('\n'), omitted };
+    return { text: [`${this.session.title()}, from ${recordTime(from)} through ${recordTime(until)}:`, this.session.legend({ lines: kept }), ...(kept.length ? kept : ['(nothing)'])].filter(Boolean).join('\n'), omitted };
   }
 
   /** The latest items containing a phrase or written by one person, in order. */
   matches(limit: number, match: { query?: string; person?: string }): string {
     const { events, actions } = this.store.conversationMatches(this.conversation, limit, match);
-    const page = this.render(events, actions);
+    const page = this.session.render(events, actions);
     const what = [match.query && `containing "${match.query}"`, match.person && `from ${match.person}`].filter(Boolean).join(' and ');
-    return [`${this.title()}: latest items ${what}.`, this.legend(page), ...(page.lines.length ? page.lines : ['(none)'])].filter(Boolean).join('\n');
-  }
-
-  private title() {
-    if (this.generic()) return `Chat record of ${this.conversation}`;
-    const { type, id } = this.identity;
-    if (type === 'private') return `Chat record of the private chat with ${this.name(Number(id))} (${id})`;
-    const name = this.store.groupName(this.conversation);
-    return `Chat record of group ${id}${name ? ` (${name})` : ''}`;
-  }
-  private legend(page: Page) {
-    if (!page.lines.length) return '';
-    const people = [...this.names].filter(([id]) => id !== this.selfId).map(([id, name]) => `${name}=${personRef('qq', String(id))}`).join(', ');
-    return `Conversation: ${this.conversation}. People: ${people || 'none'}; "me" is you. Times are +08:00. #xxxxxxxx refs can be cited as sources and opened with read_event or view_event_image.`;
-  }
-  private name(userId: number): string {
-    if (userId === this.selfId) return 'me';
-    let name = this.names.get(userId);
-    if (name === undefined) {
-      const sender = this.store.latestSender(personRef('qq', String(userId)));
-      name = String(sender?.card || sender?.nickname || userId);
-      // Two people sharing a display name must stay distinguishable; an observation gives everyone's QQ.
-      if (this.observed ? name !== String(userId) : [...this.names.values()].includes(name)) name = `${name}(${userId})`;
-      this.names.set(userId, name);
-    }
-    return name;
-  }
-  /** today, when given, is the date the lines begin in, so a record of today needs no date line. */
-  private render(events: EnvironmentEvent[], actions: Action[], today = ''): Page {
-    if (this.generic()) {
-      const items = [...events.map(event => ({ at: event.at, text: `${eventRef(event.id)} [${event.kind}] ${event.source?.own ? 'me' : [event.source?.actorName, event.source?.actor].filter(Boolean).join(' ')}: ${clip(event.text, eventRef(event.id), this.observed?.limit ?? LINE_LIMIT)}` })), ...actions.map(action => ({ at: action.createdAt, text: `${action.id} me: ${action.kind} ${clip(JSON.stringify(action.args), action.id, this.observed?.limit ?? LINE_LIMIT)} → ${clip(JSON.stringify(action.result), action.id, this.observed?.limit ?? LINE_LIMIT)}` }))].sort((a, b) => a.at - b.at);
-      return { lines: items.map(item => `${day(item.at) === today ? '' : day(item.at) + ' '}${clock(item.at)} ${item.text}`), last: items.at(-1)?.at };
-    }
-    for (const event of events) {
-      const sender = event.payload.sender as { card?: string; nickname?: string } | undefined;
-      const name = sender?.card || sender?.nickname;
-      if (qqActor(event) !== undefined && qqActor(event) !== this.selfId && name && !this.names.has(qqActor(event)!) && (this.observed || ![...this.names.values()].includes(name))) this.names.set(qqActor(event)!, this.observed ? `${name}(${qqActor(event)})` : name);
-    }
-    // Echoes of this account's sends and reactions duplicate the actions that made them.
-    const sent = new Set(actions.filter(isSend).map(action => Number((action.result as { message_id?: unknown } | null)?.message_id)));
-    const reacted = new Set(actions.filter(action => operation(action) === 'set_group_reaction').map(action => `${action.args.message_id}:${action.args.code}`));
-    const echo = (event: EnvironmentEvent) => event.kind === 'message' ? qqActor(event) === this.selfId && sent.has(Number(event.payload.message_id))
-      : event.kind.startsWith('notice:group_msg_emoji_like:') && Number(event.payload.operator_id ?? qqActor(event)) === this.selfId && Array.isArray(event.payload.likes) && event.payload.likes.every((like: { emoji_id?: unknown }) => reacted.has(`${event.payload.message_id}:${like.emoji_id}`));
-    const items: Item[] = [
-      ...events.filter(event => !echo(event)).map(event => ({ at: event.at, event })),
-      ...actions.map(action => ({ at: action.createdAt, action })),
-    ].sort((a, b) => a.at - b.at);
-    // Reactions join the line of the message they react to; everything else stays in time order.
-    const messages = new Map<number, number>();
-    const lines: string[] = [];
-    let date = today;
-    for (const item of items) {
-      const reaction = this.reaction(item);
-      const line = reaction && messages.get(reaction.messageId);
-      if (line !== undefined) { lines[line] += `\n  ↳ ${reaction!.text}`; continue; }
-      if (day(item.at) !== date) { date = day(item.at); lines.push(`— ${date} —`); }
-      lines.push(`${clock(item.at)} ${reaction ? `${reaction.text} to ${this.target(reaction.messageId, true)}${this.messageId(reaction.messageId)}` : this.line(item)}`);
-      const messageId = item.event?.kind === 'message' ? Number(item.event.payload.message_id) : isSend(item.action) ? Number((item.action!.result as { message_id?: unknown } | null)?.message_id) : NaN;
-      if (Number.isFinite(messageId)) messages.set(messageId, lines.length - 1);
-    }
-    // Skipped echoes still count, so the next page cannot start inside this one.
-    const times = [...events.map(event => event.at), ...actions.map(action => action.createdAt)];
-    return { lines, last: times.length ? Math.max(...times) : undefined };
-  }
-  private reaction(item: Item): { messageId: number; text: string } | undefined {
-    const { event, action } = item;
-    if (event?.kind.startsWith('notice:group_msg_emoji_like:')) {
-      const likes = Array.isArray(event.payload.likes) ? event.payload.likes as { emoji_id?: unknown; count?: unknown }[] : [];
-      const who = this.name(Number(event.payload.operator_id ?? qqActor(event)));
-      return { messageId: Number(event.payload.message_id), text: `${who} ${event.kind.endsWith(':remove') ? 'removed reaction' : 'reacted'} ${likes.map(like => `[emoji ${emojiLabel(like.emoji_id, this.faces)}]`).join('') || '[emoji]'}` };
-    }
-    if (action && operation(action) === 'set_group_reaction') return { messageId: Number(action.args.message_id), text: `me ${action.args.is_set === false ? 'removed reaction' : 'reacted'} [emoji ${emojiLabel(action.args.code, this.faces)}]` };
-  }
-  /** quote adds the start of the message, for a reaction shown apart from it. */
-  private target(messageId: number, quote = false): string {
-    const event = this.store.messageById(this.conversation, messageId);
-    if (event && qqActor(event) !== this.selfId) {
-      const text = quote ? this.segments(Array.isArray(event.payload.message) ? event.payload.message : event.text).replace(/\s+/g, ' ') : '';
-      return `${eventRef(event.id)} (${this.name(qqActor(event) ?? 0)}${text ? `: ${text.length > QUOTE_LIMIT ? `${text.slice(0, QUOTE_LIMIT)}…` : text}` : ''})`;
-    }
-    if (event) return 'my message';
-    return this.store.sentMessage(messageId, requireConversationRef(this.conversation)) ? 'my message' : `message ${messageId}`;
-  }
-  private line(item: Item): string {
-    const { event, action } = item;
-    if (action) return this.actionLine(action);
-    const ref = eventRef(event!.id);
-    const payload = event!.payload;
-    const who = payload.post_type === 'message_sent' ? 'me' : this.name(qqActor(event!) ?? 0);
-    if (event!.kind === 'message') return `${ref}${this.messageId(Number(payload.message_id))} ${who}: ${clip(this.segments(Array.isArray(payload.message) ? payload.message : event!.text), ref, this.observed?.limit)}`;
-    if (event!.kind === 'notice:notify:input_status') return `${ref} ${who} is typing`;
-    if (event!.kind === 'notice:group_recall:' || event!.kind === 'notice:friend_recall:') {
-      const operator = this.name(Number(payload.operator_id ?? qqActor(event!)));
-      return `${ref} ${operator} recalled ${Number(payload.operator_id) === Number(payload.user_id) || payload.operator_id == null ? 'their' : `${this.name(Number(payload.user_id))}'s`} message ${this.target(Number(payload.message_id))}`;
-    }
-    if (event!.kind === 'notice:notify:poke') return `${ref} ${who} ${String(payload.action || 'poked')} ${this.name(Number(payload.target_id))}${String(payload.suffix ?? '')}`;
-    const target = payload.target_id ?? payload.operator_id;
-    return `${ref} [${event!.kind}] ${who}${target != null && Number(target) !== qqActor(event!) ? ` → ${this.name(Number(target))}` : ''}${payload.duration ? ` (${payload.duration}s)` : ''}${this.observed ? details(payload, chatKeys) : ''}`;
-  }
-  /** The message_id an observation gives with a message, for replying to it, reacting to it, or recalling it. */
-  private messageId(messageId: number) { return this.observed && Number.isFinite(messageId) ? ` [message_id ${messageId}]` : ''; }
-  private actionLine(action: Action): string {
-    const caption = this.actionCaption?.(action);
-    if (caption !== undefined) return caption;
-    const args = action.args;
-    const kind = operation(action);
-    if (kind === 'send_group_msg' || kind === 'send_private_msg') return `me: ${clip(this.segments(args.message))}`;
-    if (kind === 'send_custom_face') return 'me: [saved sticker]';
-    if (kind === 'send_group_ai_record') return `me: [AI voice] ${clip(String(args.text ?? ''))}`;
-    if (['group_poke', 'friend_poke', 'send_poke'].includes(kind)) return `me poked ${this.name(Number(args.user_id ?? args.target_id))}`;
-    if (kind === 'delete_msg') return `me recalled ${this.target(Number(args.message_id))}`;
-    return `me used ${kind}`;
-  }
-  private segments(message: unknown): string {
-    if (typeof message === 'string') return message;
-    if (!Array.isArray(message)) return '';
-    // An observation numbers images as the pictures that follow it are labeled.
-    let images = 0;
-    return message.map((segment: { type?: string; data?: Record<string, any> }) => {
-      const data = segment.data ?? {};
-      switch (segment.type) {
-        case 'text': return String(data.text ?? '');
-        case 'at': return data.qq === 'all' ? '@all ' : `@${this.name(Number(data.qq))} `;
-        case 'reply': return `[reply to ${this.target(Number(data.id))}] `;
-        case 'image': { const image = this.observed ? `image ${images++}` : 'image'; return data.summary && data.summary !== '[图片]' ? `[${image} ${data.summary}]` : `[${image}]`; }
-        case 'face': return `[face ${emojiLabel(data.id, this.faces)}]`;
-        case 'mface': return `[sticker ${data.summary ?? ''}]`;
-        case 'record': return '[voice]';
-        case 'video': return '[video]';
-        case 'file': return `[file ${data.name ?? ''}]`;
-        case 'forward': return this.observed && data.id ? `[forwarded chat ${data.id}]` : '[forwarded chat]';
-        case 'json': { try { return `[card ${JSON.parse(String(data.data)).prompt ?? ''}]`; } catch { return '[card]'; } }
-        default: return `[${segment.type}]`;
-      }
-    }).join('').trim();
+    return [`${this.session.title()}: latest items ${what}.`, this.session.legend(page), ...(page.lines.length ? page.lines : ['(none)'])].filter(Boolean).join('\n');
   }
 }
 
-const qqActor = (event: EnvironmentEvent) => { const actor = event.source?.actor && parsePersonRef(event.source.actor); return actor ? Number(actor.id) : undefined; };
-const operation = (action: Action) => action.kind.includes('__') ? action.kind.slice(action.kind.indexOf('__') + 2) : action.kind;
-const isSend = (action?: Action) => !!action && ['send_group_msg', 'send_private_msg', 'send_custom_face', 'send_group_ai_record'].includes(operation(action));
-function clip(text: string, ref?: string, limit = LINE_LIMIT) {
-  const flat = text.replace(/\s*\n\s*/g, ' ⏎ ');
-  return flat.length > limit ? `${flat.slice(0, limit)}… [+${flat.length - limit} chars${ref ? `; read_event ${ref}` : ''}]` : flat;
-}
-export { clip as clipRecordText };
-/** Fields a line already says, by its kind, time, conversation, people, or message. */
+/** Fields a non-chat pushed event already says, by its kind or envelope. */
 const pushKeys = new Set(['time', 'self_id', 'post_type', 'notice_type', 'request_type', 'meta_event_type', 'sub_type']);
-const chatKeys = new Set([...pushKeys, 'group_id', 'user_id', 'operator_id', 'target_id', 'sender_id', 'duration']);
-/** What else an event carries, such as a request's flag or a changed card, so a line leaves out nothing a thought may act on. */
-function details(payload: Record<string, unknown>, said: Set<string>) {
-  const rest = Object.entries(payload).filter(([key, value]) => !said.has(key) && value !== undefined);
-  return rest.length ? ` ${JSON.stringify(Object.fromEntries(rest))}` : '';
-}
 
 /**
  * The events of one observation as lines: each chat's events in the form of its record, and the program's own events, such as wakes,
  * notes, and requests, one line each, in the order each first appears. Text runs up to limit characters before read_event is needed.
  */
-export function observationText(store: Store, events: EnvironmentEvent[], faces: Record<string, string>, limit: number): string {
+export function observationText(
+  store: Store,
+  events: EnvironmentEvent[],
+  faces: Record<string, string>,
+  limit: number,
+  extraFormatters: readonly ChatRecordFormatter[] = [],
+): string {
   const groups = new Map<string, EnvironmentEvent[]>();
   for (const event of events) { const key = eventChat(event) ?? event.id; groups.set(key, [...groups.get(key) ?? [], event]); }
-  const today = day(Date.now());
+  const today = recordDay(Date.now());
   return [...groups].map(([key, items]) => {
-    if (key !== items[0]!.id) return new ChatRecord(store, key, faces, { limit }).observe(items);
+    if (key !== items[0]!.id) return new ChatRecord(store, key, faces, { limit }, undefined, extraFormatters).observe(items);
     const event = items[0]!; const ref = eventRef(event.id);
     const pushed = typeof event.payload.post_type === 'string';
     // A push's text only repeats its kind. A review's prompt is its instructions, which must arrive whole.
-    const text = pushed && event.kind.includes(event.text) ? '' : ` ${event.kind === 'memory_maintenance' ? event.text : clip(event.text, ref, limit)}`;
-    const extra = event.kind === 'wake' || pushed ? details(event.payload, pushKeys) : '';
-    return `${day(event.at) === today ? '' : `${day(event.at)} `}${clock(event.at)} ${ref} [${event.kind}]${event.source?.actor ? ` ${event.source.actor}` : ''}${text}${extra}`;
+    const text = pushed && event.kind.includes(event.text) ? '' : ` ${event.kind === 'memory_maintenance' ? event.text : clipRecordText(event.text, ref, limit)}`;
+    const extra = event.kind === 'wake' || pushed ? recordDetails(event.payload, pushKeys) : '';
+    return `${recordDay(event.at) === today ? '' : `${recordDay(event.at)} `}${recordClock(event.at)} ${ref} [${event.kind}]${event.source?.actor ? ` ${event.source.actor}` : ''}${text}${extra}`;
   }).join('\n');
 }

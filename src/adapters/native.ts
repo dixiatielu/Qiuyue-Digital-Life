@@ -80,6 +80,23 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
     chatActions: [...actions].filter(([, action]) => !action.readOnly).map(([name]) => name),
     ...(stale ? { staleActions: [...actions].filter(([, action]) => stale.has(action.name)).map(([name]) => name) } : {}),
     chatTarget,
+    trackedConversations: currentStore => currentStore.activeConversations(identity, ['group', 'thread'], 10),
+    ...(adapter.display ? {
+      display: {
+        platform: adapter.platform,
+        ...(adapter.display.event ? {
+          projectEvent: event => event.source?.platform === adapter.platform && event.source.accountId === adapter.accountId
+            ? adapter.display!.event!(event)
+            : undefined,
+        } : {}),
+        ...(adapter.display.action ? {
+          projectAction: action => {
+            const def = actions.get(action.kind);
+            return def ? adapter.display!.action!(def.name, action.args, action.result) : undefined;
+          },
+        } : {}),
+      },
+    } : {}),
     ...(ending ? {
       endsThought: (tool, details) => {
         const action = actions.get(tool);
@@ -113,11 +130,13 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
           signal: controller.signal,
           publish: event => {
             if (!active || controller.signal.aborted) throw new Error('Adapter stopped.');
-            const { conversation, actor, actorName, own = false, addressed = false, attention = 'normal', ...raw } = event;
+            const { conversation, conversationName, actor, actorName, messageId, own = false, addressed = false, attention = 'normal', ephemeral, ...raw } = event;
             store.receive({ ...raw, at: raw.at ?? Date.now(), key: `adapter:${adapter.platform}:${adapter.accountId}:${raw.key}`, source: {
               ...identity, instance: adapter.instance, own, addressed, attention,
               ...(actor === undefined ? {} : { actor: personRef(adapter.platform, actor), actorName }),
-              ...(conversation ? { conversation: conversationRef(identity, conversation.type, conversation.id), conversationType: conversation.type } : {}),
+              ...(messageId === undefined ? {} : { messageId }),
+              ...(ephemeral ? { ephemeral } : {}),
+              ...(conversation ? { conversation: conversationRef(identity, conversation.type, conversation.id), conversationType: conversation.type, ...(conversationName ? { conversationName } : {}) } : {}),
             } });
           },
           storage: { get: (key, fallback) => store.setting(`adapter:${adapter.platform}:${adapter.accountId}:${key}`, fallback), set: (key, value) => { if (!active) throw new Error('Adapter stopped.'); store.setSetting(`adapter:${adapter.platform}:${adapter.accountId}:${key}`, value); } },

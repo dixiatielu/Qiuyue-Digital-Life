@@ -118,9 +118,13 @@ ctx.adapter({
   conversation: (operation, args) => args.channel_id
     ? { type: "channel", id: String(args.channel_id) } : undefined,
   encodeMedia: media => media.path ? { file: media.path, filename: media.filename, contentType: media.mimeType } : undefined, // optional
+  display: { // optional: inert message projection for WebUI/TUI; returned image URLs are sanitized by the host
+    event: event => undefined,
+    action: (operation, args, result) => undefined,
+  },
   start: async context => {
     // Validate the logged-in account, then publish every relevant native event.
-    // context.publish accepts raw payload, conversation, actor, own and addressed.
+    // context.publish accepts raw payload, conversation, conversationName, actor, actorName, messageId, own, addressed, attention, and ephemeral.
     // Use context.storage for durable cursors; observe context.signal on shutdown.
   },
   stop: () => client.close()

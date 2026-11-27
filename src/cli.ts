@@ -101,13 +101,16 @@ async function main() {
   if (readiness.problems.length) throw new Error(readiness.problems.join('\n'));
   const store = new Store(config.database, config.life.enabled);
   const release = store.acquireDaemon();
-  const monitor = new Monitor(config, store, 2000, credentials.get);
   let runtime: LifeRuntime | undefined;
   let brain: PiBrain;
   let reviewer: PiBrain;
   let plugins: PluginHost;
   const recall = config.embedding.enabled ? new SemanticRecall(config, store, new EmbeddingClient(config.embedding, fetch, credentials.get), () => plugins.knownEmojiNames()) : undefined;
   plugins = createPlugins(config, store, recall, credentials.get);
+  const monitor = new Monitor(config, store, 2000, credentials.get, {
+    projectors: () => plugins.displayProjectors(),
+    previewUrl: value => plugins.mediaPreviewUrl(value),
+  });
   const pluginManager = new PluginManager(config, plugins, store, () => loadConfig(configPath), credentials.get, recall, () => new Credentials(credentials.paths).get);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   const stopServices = async () => {

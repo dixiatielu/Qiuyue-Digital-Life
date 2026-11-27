@@ -134,6 +134,11 @@ export interface NativeAdapterDefinition {
   conversation?(operation: string, args: Record<string, unknown>): { type: import('./identity.js').ConversationType; id: string } | undefined;
   /** Encode a resolved local media reference (such as a gallery drawing ID) into this platform's native parameter format. */
   encodeMedia?(media: AdapterMediaAsset): unknown;
+  /** Optional inert display projection for live monitoring (WebUI/TUI). Returned image URLs are sanitized by the host. */
+  display?: {
+    event?(event: PluginEvent): { sender?: string; sourceName?: string; message?: { direction: 'incoming' | 'outgoing'; parts: { kind: 'text' | 'image' | 'mention' | 'reply' | 'face' | 'record' | 'video' | 'file' | 'forward' | 'card' | 'attachment'; text: string; url?: string }[] } } | undefined;
+    action?(operation: string, args: Record<string, unknown>, result: unknown): { source?: string; message?: { direction: 'incoming' | 'outgoing'; parts: { kind: 'text' | 'image' | 'mention' | 'reply' | 'face' | 'record' | 'video' | 'file' | 'forward' | 'card' | 'attachment'; text: string; url?: string }[] } } | undefined;
+  };
   /** Images come from the event's actual native media, and are loaded only when shown. */
   images?(event: PluginEvent): { label: string; autoView?: boolean; load(signal: AbortSignal): Promise<{ data: Uint8Array; mimeType: string }> }[];
   start?(context: AdapterContext): void | Promise<void>;
@@ -144,8 +149,10 @@ export interface AdapterContext {
   publish(event: {
     key: string; kind: string; at?: number; text: string; payload: Record<string, unknown>;
     conversation?: { type: import('./identity.js').ConversationType; id: string };
-    actor?: string; actorName?: string; own?: boolean; addressed?: boolean;
+    conversationName?: string;
+    actor?: string; actorName?: string; messageId?: string; own?: boolean; addressed?: boolean;
     attention?: 'normal' | 'ambient' | 'transport';
+    ephemeral?: boolean;
   }): void;
   storage: PluginContext['storage'];
 }

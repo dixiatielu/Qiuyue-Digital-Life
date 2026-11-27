@@ -125,7 +125,7 @@ export function createTools(config: Config, store: Store, context: () => Thought
       replay: 'never', executionMode: 'sequential',
       execute: async (_callId, args: any, signal) => {
         ensureCurrent(store, context(), signal);
-        const record = new ChatRecord(store, args.conversation, await plugins.emojiNames(undefined, signal), undefined, action => plugins.actionCaption(action));
+        const record = new ChatRecord(store, args.conversation, await plugins.emojiNames(undefined, signal), undefined, action => plugins.actionCaption(action), plugins.recordFormatters());
         const limit = args.limit ?? config.development.recordLines;
         if (args.query || args.person) return { content: [{ type: 'text', text: record.matches(limit, { query: args.query, person: args.person }) }], details: {} };
         if (args.from && (!/(Z|[+-]\d{2}:\d{2})$/.test(args.from) || !Number.isFinite(Date.parse(args.from)))) throw new Error('from must be an ISO time with a timezone.');

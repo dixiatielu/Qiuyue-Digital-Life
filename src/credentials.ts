@@ -1,4 +1,5 @@
 import { pluginCredentialReferences } from './plugin-manifest.js';
+import { builtinCredentialFields } from './plugins/metadata.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -89,5 +90,6 @@ export function credentialNames(config: { model: { apiKeyEnv: string }; review?:
   const plugins = pluginCredentialReferences(config.extensions).map(item => item.name);
   // A review or compaction model of its own may use a key of its own.
   const roles = [config.review?.model?.apiKeyEnv, config.compaction?.model?.apiKeyEnv].filter((name): name is string => typeof name === 'string');
-  return [...new Set([config.model.apiKeyEnv, ...roles, ...config.adapters.map(account => account.tokenEnv), config.web.searchKeyEnv, config.embedding.apiKeyEnv, config.drawing.apiKeyEnv, config.webui.tokenEnv, ...plugins])];
+  const fields = builtinCredentialFields.map(([section, field]) => (config as Record<string, any>)[section]?.[field]).filter((name): name is string => typeof name === 'string');
+  return [...new Set([...fields, ...roles, ...config.adapters.map(account => account.tokenEnv), ...plugins])];
 }

@@ -16,7 +16,7 @@ import { ChatRecord, observationText, recordTime } from './record.js';
 import { waitFor } from './async.js';
 import { memoriesInView, type SemanticRecall } from './recall.js';
 import type { OnlineActivity } from './plugins.js';
-import { conversationRef } from './identity.js';
+import { parseConversationRef } from './identity.js';
 
 /** Built-in online activities; plugins contribute their own activities through the host. */
 const onlineActivities: OnlineActivity[] = [
@@ -529,7 +529,7 @@ export class PiBrain implements Brain {
     const rests = observation.events.filter(event => event.kind === 'rest_backlog');
     const faces = await this.tools.plugins.emojiNames(observation.events, this.controller.signal);
     // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
-    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, observation.events, faces, preview)}` }];
+    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, observation.events, faces, preview, this.tools.plugins.recordFormatters())}` }];
     if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
     for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
     for (const text of this.tools.plugins.observation(observation.events, this.thought)) content.push({ type: 'text', text });
@@ -569,7 +569,7 @@ export class PiBrain implements Brain {
     const items = chats.reduce((sum, chat) => sum + chat.messages + chat.notices, 0) || 1;
     return chats.map(chat => {
       const share = Math.floor(this.contextTokens / 4 * (chat.messages + chat.notices) / items);
-      const { text, omitted } = new ChatRecord(this.store, chat.conversation, faces, undefined, action => this.tools.plugins.actionCaption(action)).span(chat.from, until, share);
+      const { text, omitted } = new ChatRecord(this.store, chat.conversation, faces, undefined, action => this.tools.plugins.actionCaption(action), this.tools.plugins.recordFormatters()).span(chat.from, until, share);
       return omitted ? `${text}\n[The earliest ${omitted} lines did not fit; read them with read_chat_record from="${recordTime(chat.from)}".]` : text;
     }).join('\n\n');
   }
@@ -602,18 +602,19 @@ export class PiBrain implements Brain {
     if (hours < 48) return minutes % 60 ? `quiet ${hours}h${minutes % 60}m` : `quiet ${hours}h`;
     return `quiet ${Math.floor(hours / 24)}d`;
   }
-  /** How long each configured group chat has been quiet, so a life wake need not guess which chats are in a lull (ADR-0014). */
+  /** How long each tracked group chat has been quiet, so a life wake need not guess which chats are in a lull (ADR-0014). */
   private groupQuietness(now: number): string | undefined {
+    const seen = new Set<string>();
     const entries: string[] = [];
-    for (const adapter of this.config.adapters) {
-      const platform = adapter.driver === 'snowluma' ? 'qq' : adapter.driver;
-      for (const groupId of adapter.groups) {
-        const ref = conversationRef({ platform, accountId: adapter.accountId }, 'group', String(groupId));
-        const latest = this.store.latestConversationActivity(ref);
-        if (!latest) continue;
-        const label = latest.name ? `${groupId} (${latest.name})` : String(groupId);
-        entries.push(`${label}: ${this.formatQuiet(now - latest.at)}`);
-      }
+    for (const ref of this.tools.plugins.trackedConversations(this.store)) {
+      if (seen.has(ref)) continue;
+      seen.add(ref);
+      const parsed = parseConversationRef(ref);
+      if (!parsed) continue;
+      const latest = this.store.latestConversationActivity(ref);
+      if (!latest) continue;
+      const label = latest.name ? `${parsed.id} (${latest.name})` : parsed.id;
+      entries.push(`${label}: ${this.formatQuiet(now - latest.at)}`);
     }
     return entries.length ? `Group chats right now: ${entries.join('; ')}.` : undefined;
   }
@@ -690,7 +691,7 @@ export class PiBrain implements Brain {
       if (!freshEvents.length) continue;
       const userMsg: Message = {
         role: 'user',
-        content: [{ type: 'text', text: `Earlier conversation before this working context began (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, freshEvents, {}, 500)}` }],
+        content: [{ type: 'text', text: `Earlier conversation before this working context began (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, freshEvents, {}, 500, this.tools.plugins.recordFormatters())}` }],
         timestamp: freshEvents.at(-1)!.at,
       };
       const assistantMsg: AssistantMessage = {

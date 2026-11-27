@@ -100,6 +100,7 @@ export function galleryPlugin(config: Config, store: Store, semantics?: Semantic
     },
     imageViewer: label => { const match = /drawing:[0-9a-f-]{36}/.exec(label); return match ? `view_drawing with id ${match[0]}` : undefined; },
     resolveMedia: value => resolveDrawingMedia(library, value),
+    mediaPreviewUrl: value => drawingIdPattern.test(value) ? `/api/gallery/${encodeURIComponent(value)}/image` : undefined,
     manage: (command, args) => {
       if (typeof args.id !== 'string' || !Number.isSafeInteger(args.revision)) throw new Error('A drawing ID and revision are required.');
       if (command === 'update') { const item = library.update(args.id, args.changes, args.revision); changed(args.id); return item; }

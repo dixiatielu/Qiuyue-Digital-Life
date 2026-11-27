@@ -87,7 +87,7 @@ test('completed conversations keep received and sent content visible while tool 
     assert.ok(!text().includes('MODEL_TEXT_NOT_SENT'));
     assert.equal(model.items.get(attempt.action.id)?.actionKind, 'qq_main__send_group_msg');
     model.toggle('run:conversation');
-    assert.match(text(), /Model output · not sent to QQ/);
+    assert.match(text(), /Model output · not sent to a conversation/);
     const output = [...model.items.values()].find(item => item.type === 'assistant')!;
     model.toggle(output.id); assert.match(text(), /MODEL_TEXT_NOT_SENT/);
     model.expanded.clear(); assert.match(text(), /练呀，今天练后半段。/);
@@ -197,7 +197,7 @@ test('conversation view keeps triggers, queued observations, tool details and un
     assert.match(rendered, /Unknown/); assert.ok(!rendered.includes('not yet included in the model'));
     model.showDetails = true; rendered = text();
     assert.match(rendered, /SYSTEM_DETAILS_ONLY/); assert.match(rendered, /"group_id"/);
-    assert.match(rendered, /Model output · not sent to QQ/); assert.match(rendered, /MODEL_OUTPUT_NOT_SENT/);
+    assert.match(rendered, /Model output · not sent to a conversation/); assert.match(rendered, /MODEL_OUTPUT_NOT_SENT/);
     model.showDetails = false; model.filter = 'errors';
     model.toggle(tool.id);
     assert.match(text(), /receipt-unknown/);

@@ -51,9 +51,14 @@ function qqSource(raw: Record<string, any>, account: AdapterConfig, kind: string
     : kind === 'message' && !own && (type === 'private' || segments.some(segment => segment.type === 'at' && self(segment.data?.qq) || segment.type === 'reply' && sent(Number(segment.data?.id))));
   const ambient = kind === 'notice:notify:input_status' || kind.startsWith('notice:group_msg_emoji_like:') || kind === 'notice:notify:poke' && own;
   const identity = { platform: 'qq', accountId: account.accountId };
+  const conversationName = typeof raw.group_name === 'string' && raw.group_name ? raw.group_name : undefined;
+  const messageId = kind === 'message' && raw.message_id != null ? String(raw.message_id) : undefined;
+  const ephemeral = kind === 'notice:notify:input_status' ? true : undefined;
   return { ...identity, instance: account.id, own, addressed, attention: isHeartbeat(kind) ? 'transport' : ambient ? 'ambient' : 'normal',
     ...(actorId === undefined ? {} : { actor: personRef('qq', String(actorId)), actorName: raw.sender?.card || raw.sender?.nickname }),
-    ...(target === undefined || !(kind === 'message' || kind.startsWith('notice:') || groupId !== undefined && kind === 'perception_gap') ? {} : { conversation: conversationRef(identity, type, String(target)), conversationType: type }) };
+    ...(messageId === undefined ? {} : { messageId }),
+    ...(ephemeral ? { ephemeral } : {}),
+    ...(target === undefined || !(kind === 'message' || kind.startsWith('notice:') || groupId !== undefined && kind === 'perception_gap') ? {} : { conversation: conversationRef(identity, type, String(target)), conversationType: type, ...(conversationName ? { conversationName } : {}) }) };
 }
 
 export class SnowLumaAdapter implements SocialAdapter {

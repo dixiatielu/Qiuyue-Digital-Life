@@ -441,3 +441,110 @@ test('drawing:<uuid> resolves to a Telegram multipart upload and records gallery
     assert.equal(uses[0]!.kind, 'tg_main__sendPhoto');
   } finally { await host.stop(); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('Telegram chat records format replies, media, reactions, echo dedup, and conversation names cleanly', async () => {
+  const { observationText } = await import('../src/record.js');
+  const store = new Store(':memory:');
+  const conv = 'telegram:900:group:-100555';
+  const t = Date.parse('2026-10-28T13:00:00Z');
+  try {
+    const first = store.receive({
+      key: 'tg:rec:1', kind: 'message', at: t, text: 'Look at the sky',
+      source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: conv, conversationType: 'group', conversationName: 'Stargazers', actor: 'telegram:user:7', actorName: 'Lin', messageId: '101', own: false, addressed: true, attention: 'normal' },
+      payload: { update_id: 1, message: { message_id: 101, chat: { id: -100555, type: 'supergroup', title: 'Stargazers' }, from: { id: 7, first_name: 'Lin' }, photo: [{ file_id: 'f1' }], caption: 'Look at the sky' } },
+    })!;
+    const reply = store.beginAction('tg:reply', 'tg_main__sendMessage', { chat_id: -100555, text: 'So clear tonight!', reply_parameters: { message_id: 101 } }, [first.id], [], null, conv).action;
+    store.finishAction(reply.id, 'success', { message_id: 102, chat: { id: -100555, type: 'supergroup' } });
+    store.db.prepare('UPDATE actions SET created_at=? WHERE id=?').run(t + 1000, reply.id);
+    // Echo of own send with same message_id must be deduplicated in the record.
+    store.receive({
+      key: 'tg:rec:2', kind: 'message', at: t + 1000, text: 'So clear tonight!',
+      source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: conv, conversationType: 'group', conversationName: 'Stargazers', actor: 'telegram:user:900', actorName: 'Qiuyue', messageId: '102', own: true, addressed: false, attention: 'ambient' },
+      payload: { update_id: 2, message: { message_id: 102, chat: { id: -100555, type: 'supergroup', title: 'Stargazers' }, from: { id: 900, first_name: 'Qiuyue' }, text: 'So clear tonight!' } },
+    });
+    // Reaction from another user folds onto message 102.
+    store.receive({
+      key: 'tg:rec:3', kind: 'notice:message_reaction', at: t + 2000, text: '[message_reaction]',
+      source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: conv, conversationType: 'group', conversationName: 'Stargazers', actor: 'telegram:user:7', actorName: 'Lin', own: false, addressed: false, attention: 'ambient' },
+      payload: { update_id: 3, message_reaction: { message_id: 102, user: { id: 7, first_name: 'Lin' }, new_reaction: [{ type: 'emoji', emoji: '✨' }] } },
+    });
+    // Own reaction action folds onto message 101.
+    const react = store.beginAction('tg:react', 'tg_main__setMessageReaction', { chat_id: -100555, message_id: 101, reaction: [{ type: 'emoji', emoji: '👍' }] }, [first.id], [], null, conv).action;
+    store.finishAction(react.id, 'success', true);
+    store.db.prepare('UPDATE actions SET created_at=? WHERE id=?').run(t + 2500, react.id);
+
+    const page = new ChatRecord(store, conv).page(t, 50).text;
+    assert.match(page, /^Chat record of group -100555 \(Stargazers\), from 2026-10-28T21:00:00\.000\+08:00:/);
+    assert.match(page, /People: Lin=telegram:user:7; "me" is you/);
+    assert.match(page, /Lin: \[image\] Look at the sky\n  ↳ me reacted 👍/);
+    assert.match(page, /me: \[reply to #\w{8} \(Lin\)\] So clear tonight!\n  ↳ Lin reacted ✨/);
+    assert.equal(page.match(/So clear tonight!/g)?.length, 1, 'echoed send is not repeated');
+    assert.ok(!page.includes('tg_main__sendMessage'), 'concise me: caption instead of raw action JSON');
+
+    const observed = observationText(store, [first], {}, 300);
+    assert.match(observed, /^Group -100555 \(Stargazers\): \[telegram:900:group:-100555\]/);
+    assert.match(observed, /\[message_id 101\] Lin\(7\): \[image 0\] Look at the sky/);
+  } finally { store.close(); }
+});
+
+test('Telegram group quietness, normalized conversation names in LifeReader, and ephemeral events work without QQ assumptions', async t => {
+  const { LifeReader } = await import('../src/webui/reader.js');
+  const { PiBrain } = await import('../src/brain.js');
+  const { createTools } = await import('../src/tools.js');
+  const { createModels, fauxProvider, fauxAssistantMessage } = await import('@earendil-works/pi-ai');
+  const now = Date.parse('2026-11-26T10:40:00Z');
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-tg-quiet-'));
+  const dbPath = join(dir, 'life.sqlite');
+  const store = new Store(dbPath);
+  const cfg = config();
+  cfg.adapters = [tg({ tools: { allow: ['sendMessage'], deny: [] } })];
+  const adapter = telegramAdapter(cfg.adapters[0]!, () => '900:test', (async url => {
+    const op = String(url).split('/').at(-1);
+    if (op === 'getMe') return response({ id: 900, username: 'qiuyue_bot' });
+    if (op === 'getWebhookInfo') return response({ url: '' });
+    return response([]);
+  }) as typeof fetch);
+  const customEphemeral = nativeAdapterPlugin({
+    instance: 'ext_main', platform: 'ext', accountId: '1', version: 'ext-1',
+    actions: [{ name: 'send', readOnly: false, inputSchema: { type: 'object', properties: {} } }],
+    execute: async () => ({ ok: true }),
+    start: ctx => {
+      ctx.publish({ key: 'typing:1', kind: 'notice:typing', at: now - 5_000, text: 'typing', payload: {}, conversation: { type: 'channel', id: 'room1' }, conversationName: 'Lounge', actor: 'u1', actorName: 'Kai', attention: 'ambient', ephemeral: true });
+      ctx.publish({ key: 'msg:1', kind: 'message', at: now - 4_000, text: 'hello room', payload: {}, conversation: { type: 'channel', id: 'room1' }, conversationName: 'Lounge', actor: 'u1', actorName: 'Kai', messageId: 'm-1', attention: 'normal' });
+    },
+  }, store);
+  const host = new PluginHost([nativeAdapterPlugin(adapter, store), customEphemeral]);
+  try {
+    await host.start();
+    // Ephemeral presence event is excluded from ChatRecord without any platform-specific SQL kind check.
+    const extRecord = new ChatRecord(store, 'ext:1:channel:room1').page(0, 20).text;
+    assert.ok(extRecord.includes('hello room'));
+    assert.ok(!extRecord.includes('notice:typing'));
+    assert.equal(store.conversationName('ext:1:channel:room1'), 'Lounge');
+
+    // Drain startup/ext events so the upcoming life wake is claimed by itself.
+    for (let batch = store.claim(10); batch; batch = store.claim(10)) store.acknowledge(batch.batchId);
+
+    const tgConv = 'telegram:900:group:-100888';
+    const msg = store.receive({
+      key: 'tg:quiet:1', kind: 'message', at: now - 25 * 60_000, text: 'anyone up?',
+      source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: tgConv, conversationType: 'group', conversationName: 'Night Owls', actor: 'telegram:user:7', actorName: 'Lin', messageId: '1', own: false, addressed: false, attention: 'normal' },
+      payload: { update_id: 10 },
+    }, true)!;
+    store.writeMemory({ kind: 'habit', title: 'Stay concise', content: 'Keep late-night notes brief.', importance: 3, sources: [msg.id], scope: `conversation:${tgConv}` }, false);
+    const reader = new LifeReader(dbPath);
+    assert.equal(reader.development()[0]?.scopeName, 'Night Owls');
+
+    store.setSetting('lifeEnabled', true);
+    const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
+    let brain!: InstanceType<typeof PiBrain>;
+    const tools = createTools(cfg, store, () => brain.thought, undefined, host);
+    brain = new PiBrain(cfg, store, tools, { model: faux.getModel(), stream: models.streamSimple.bind(models) });
+    store.schedule('Free time', 'life', now); store.enqueueDue();
+    let prompt = '';
+    faux.setResponses([context => { prompt = JSON.stringify(context.messages.findLast(m => JSON.stringify(m).includes('New environment observations'))); return fauxAssistantMessage('Quiet'); }]);
+    await brain.run(store.claim(10)!);
+    assert.ok(prompt.includes('Group chats right now: -100888 (Night Owls): quiet 25m.'));
+  } finally { await host.stop(); store.close(); rmSync(dir, { recursive: true, force: true }); }
+});

@@ -205,3 +205,19 @@ test('primary plugin pictures are loaded before incoming message images within m
     await f.brain.run(f.store.claim(10)!);
   } finally { f.store.close(); }
 });
+
+test('built-in plugin descriptors stay consistent across active IDs, credentials, and multi-adapter discovery', async () => {
+  const { activePluginIds, builtinCredentialFields, configuredPluginIds, standaloneBuiltinDescriptors } = await import('../src/plugins/metadata.js');
+  const { credentialNames } = await import('../src/credentials.js');
+  const cfg = config();
+  cfg.adapters.push({ id: 'tg_main', driver: 'telegram', accountId: '901', tokenEnv: 'TELEGRAM_BOT_TOKEN', tools: { allow: '*', deny: [] }, groups: [], maxStreamBytes: 1000, maxFileBytes: 1000, receive: 'polling' });
+  assert.deepEqual(activePluginIds(cfg), standaloneBuiltinDescriptors.map(item => item.id));
+  const configured = configuredPluginIds(cfg);
+  assert.ok(configured.includes('qq-main-snowluma-tools'));
+  assert.ok(configured.includes('adapter-tg-main'));
+  const names = credentialNames(cfg);
+  for (const [section, field] of builtinCredentialFields) {
+    assert.ok(names.includes((cfg as Record<string, any>)[section][field]), `${section}.${field}`);
+  }
+  assert.ok(names.includes('TELEGRAM_BOT_TOKEN'));
+});

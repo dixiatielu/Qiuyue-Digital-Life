@@ -10,12 +10,12 @@ import { modelReadiness, modelUse } from '../model.js';
 import { probeModel } from '../probe.js';
 import { callControl } from '../control.js';
 import { errorText } from '../domain.js';
-import { configuredPluginIds, pluginIds } from '../plugins/index.js';
+import { adapterCatalog, configuredPluginIds, pluginIds } from '../plugins/index.js';
+import { builtinCredentialFields } from '../plugins/metadata.js';
 import { discoverPlugins } from '../plugin-loader.js';
 import type { PluginManager } from '../plugin-manager.js';
 import type { ActivityPrompt } from '../plugins.js';
 import { systemInstructions } from '../prompts.js';
-import { getSnowLumaCatalog } from '../adapters/snowluma/catalog.js';
 import { ui } from '../ui-language.js';
 import { LiveMirror, ServiceJobs, alive, busyReasons, changedSince, processStartedAt, serviceCommand, serviceState } from './daemon.js';
 import { ConflictError, OperatorFiles, hash, historyKinds, type HistoryKind } from './files.js';
@@ -32,7 +32,6 @@ const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.j
 const cookie = 'qiuyue_webui';
 // These contain presentation only. Management modules and every API still require authentication.
 const loginAssets = new Set(['/app/style.css', '/app/favicon.svg', '/app/login.js', '/app/theme.js']);
-const credentialFields: [string, string][] = [['model', 'apiKeyEnv'], ['web', 'searchKeyEnv'], ['embedding', 'apiKeyEnv'], ['drawing', 'apiKeyEnv'], ['webui', 'tokenEnv']];
 
 /** Percent-decoding that answers a malformed sequence with nothing, which its caller refuses, rather than with an exception that becomes a 500. */
 const decoded = (value: string) => { try { return decodeURIComponent(value); } catch { return undefined; } };
@@ -208,7 +207,13 @@ export class WebUi {
       if (typeof id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(id)) throw new HttpError(400, 'Invalid plugin ID.');
       return callControl(this.paths.socket, { args: ['plugins', 'reload', id] });
     });
-    this.on('GET', '/api/snowluma', () => { const catalog = getSnowLumaCatalog(); return { source: catalog.source, actions: catalog.actions.map(action => ({ name: action.name, category: action.category, summary: action.summary, readOnly: action.readOnly })) }; });
+    this.on('GET', '/api/adapters/:driver/catalog', ({ params }) => {
+      const driver = decoded(params[0]!);
+      const catalog = driver ? adapterCatalog(driver) : undefined;
+      if (!catalog) throw new HttpError(404, 'Unknown adapter driver.');
+      return catalog;
+    });
+    this.on('GET', '/api/snowluma', () => adapterCatalog('snowluma')!);
 
     this.on('GET', '/api/gallery', ({ url }) => {
       const query: DrawingQuery = { limit: 24 };
@@ -294,7 +299,7 @@ export class WebUi {
     const usedBy = new Map<string, string[]>();
     const use = (name: unknown, by: string) => { if (typeof name === 'string' && name) usedBy.set(name, [...usedBy.get(name) ?? [], by]); };
     for (const adapter of config?.adapters ?? []) use(adapter.tokenEnv, `adapter:${adapter.id}`);
-    for (const [section, field] of credentialFields) use((config as any)?.[section]?.[field] ?? raw[section]?.[field], section);
+    for (const [section, field] of builtinCredentialFields) use((config as any)?.[section]?.[field] ?? raw[section]?.[field], section);
     if (config) {
       for (const owner of ['main', 'review'] as const) {
         const assigned = modelUse(config, owner);

@@ -584,3 +584,11 @@ test('the page probes a model endpoint using managed credentials and returns cap
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 }));
+
+test('adapter catalog API serves built-in driver catalogs and keeps /api/snowluma compatible', () => page(async call => {
+  const tg = await call('/api/adapters/telegram/catalog');
+  assert.equal(tg.status, 200);
+  assert.ok(Array.isArray(tg.body.actions) && tg.body.actions.some((a: any) => a.name === 'sendMessage'));
+  const unknown = await call('/api/adapters/unknown-driver/catalog');
+  assert.equal(unknown.status, 404);
+}));

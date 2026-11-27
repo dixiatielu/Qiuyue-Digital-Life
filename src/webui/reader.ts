@@ -81,7 +81,7 @@ export class LifeReader {
     if (scope.startsWith('conversation:')) {
       const chat = scope.slice('conversation:'.length);
       if (!parseConversationRef(chat)) return;
-      const row = db.prepare("SELECT json_extract(payload,'$.group_name') AS name FROM events WHERE conversation_ref=? AND json_extract(payload,'$.group_name') IS NOT NULL ORDER BY at DESC LIMIT 1").get(chat);
+      const row = db.prepare("SELECT coalesce(json_extract(source,'$.conversationName'), json_extract(payload,'$.group_name')) AS name FROM events WHERE conversation_ref=? AND (json_extract(source,'$.conversationName') IS NOT NULL OR json_extract(payload,'$.group_name') IS NOT NULL) ORDER BY at DESC LIMIT 1").get(chat);
       return row?.name ? String(row.name) : undefined;
     }
     if (scope.startsWith('person:')) {

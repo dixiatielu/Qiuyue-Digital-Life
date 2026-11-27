@@ -3,6 +3,7 @@ import { HStack, Markdown, ProcessTerminal, ScrollView, Text, TuiAltScreen, VSta
 import { callControl } from './control.js';
 import { followDisplay } from './display-client.js';
 import { busyLabel, plainText, type DisplayItem, type DisplayPacket, type DisplayStatus } from './monitor.js';
+import type { DisplayMessage } from './display-message.js';
 import { CommandInput } from './tui-commands.js';
 import { bold, dim, TuiTheme } from './tui-theme.js';
 
@@ -35,7 +36,19 @@ function argumentsOf(item: DisplayItem): Record<string, unknown> {
   try { const value = JSON.parse(item.text); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; }
 }
 const actionKind = (item: DisplayItem) => (item.actionKind ?? item.title.replace(/^(?:Action|行动) · /, '')).split('__').at(-1)!;
-const isMessage = (item: DisplayItem) => ['send_group_msg', 'send_private_msg', 'send_custom_face', 'send_group_ai_record'].includes(actionKind(item));
+const isMessage = (item: DisplayItem) => Boolean(item.message) || ['send_group_msg', 'send_private_msg', 'send_custom_face', 'send_group_ai_record', 'sendMessage', 'sendPhoto', 'sendSticker'].includes(actionKind(item));
+function displayMessageText(message: DisplayMessage): string {
+  return message.parts.map(part => {
+    if (part.kind === 'text') return plainText(part.text);
+    if (part.kind === 'mention') return `@${plainText(part.text)}`;
+    const name = ({
+      image: ui('Image', '图片'), face: ui('Emoji', '表情'), record: ui('Voice', '语音'), video: ui('Video', '视频'),
+      reply: ui('Reply', '引用回复'), forward: ui('Forwarded messages', '转发消息'), file: ui('File', '文件'),
+      card: ui('Card', '卡片'), attachment: plainText(part.text) || ui('Attachment', '附件'),
+    } as Record<string, string>)[part.kind] ?? ui('Attachment', '附件');
+    return `[${plainText(name)}]`;
+  }).join('');
+}
 function messageText(value: unknown): string {
   if (typeof value === 'string') return plainText(value);
   if (!Array.isArray(value)) return '';
@@ -133,7 +146,7 @@ export class Timeline implements Component {
       const status = stateText ? `${item.type === 'action' ? `${mark} ` : ''}${outcome(stateText)}` : '';
       lines.push(...new Text(`${heading}${status ? `  ${status}` : ''}`, 0, 0).render(width));
       const body = item.type === 'environment' ? plainText(item.text)
-        : messageText(args.message) || (actionKind(item) === 'send_custom_face' ? ui('[Sticker]', '[表情]') : argumentSummary(item));
+        : (item.message ? displayMessageText(item.message) : messageText(args.message)) || (actionKind(item) === 'send_custom_face' ? ui('[Sticker]', '[表情]') : argumentSummary(item));
       const bodyLines = new Text(body, width > 6 ? 2 : 0, 0).render(width);
       lines.push(...(expanded ? bodyLines : bodyLines.slice(0, 8)));
       if (!expanded && bodyLines.length > 8) lines.push(dim(ui('  … Tab to read more', '  … Tab 查看全文')));
@@ -326,7 +339,7 @@ export function createTui(path: string, terminal: Terminal = new ProcessTerminal
   const header: Component = { invalidate() {}, render(width) {
     const s = model.status;
     const connection = !model.connected ? warning(ui('! Daemon disconnected · Reconnecting', '! 常驻进程断开 · 自动重连中'))
-      : s ? (['Connected', '已连接'].includes(s.connection) ? success : warning)(`● QQ ${s.connection}`) : dim(ui('Waiting for status', '等待状态'));
+      : s ? (['Connected', '已连接'].includes(s.connection) ? success : warning)(`● ${s.connection}`) : dim(ui('Waiting for status', '等待状态'));
     const health = [connection, ...(model.connected && s ? [s.paused ? warning(ui('Paused · Still receiving', '整体暂停 · 仍在接收')) : dim(ui(`Autonomous life ${s.lifeEnabled ? 'on' : 'off'}`, `自主生活 ${s.lifeEnabled ? '开' : '关'}`))] : [])];
     return [inset(`${accent('☾')} ${bold(ui('Qiuyue', '秋月'))}  ${dim(ui('Management terminal', '管理终端'))}${width >= 90 && s ? dim(` · ${s.model}`) : ''}`, width),
       ...new Text(health.join(dim(' · ')), gutter(width), 0).render(width), ''];
@@ -411,7 +424,7 @@ export function createTui(path: string, terminal: Terminal = new ProcessTerminal
           ui('Esc to close', 'Esc 关闭'),
         ].join('\n'), 0);
       }).catch(error => { if (!stopped) setNote(ui(`Action not confirmed: ${error.message}`, `操作未确认：${error.message}`), 0); });
-    } else setNote(ui('Enter a supported management command; use /help to view commands. Ordinary text is not sent to the Agent or QQ.', '请输入支持的管理命令；/help 查看。普通文字不会发送给 Agent 或 QQ。'), 0);
+    } else setNote(ui('Enter a supported management command; use /help to view commands. Ordinary text is not sent to the Agent or any chat.', '请输入支持的管理命令；/help 查看。普通文字不会发送给 Agent 或任何聊天。'), 0);
     tui.requestRender();
   };
   input.onSubmit = value => { input.setValue(''); showNote = false; clearTimeout(noteTimer); localCommands(value); };

@@ -2,6 +2,9 @@ import type { NativeActionDefinition } from './platform.js';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
 import type { ThoughtContext, ToolImage, ToolRuntime } from './tool-runtime.js';
+import type { Store } from './store.js';
+import type { DisplayProjector } from './display-message.js';
+import type { ChatRecordFormatter } from './record-format.js';
 import { waitFor } from './async.js';
 import type { AdapterMediaAsset, UserActivity } from './plugin-sdk.js';
 import type { ActivityPrompt } from './prompts.js';
@@ -60,8 +63,16 @@ export interface LifePlugin {
   chatActions?: string[];
   staleActions?: string[];
   chatTarget?(tool: string, args: unknown): string | undefined;
+  /** Group or channel conversations tracked for life-wake quietness awareness (ADR-0014). */
+  trackedConversations?(store: Store): string[];
   images?(event: EnvironmentEvent, helpers?: ImageHelpers): PluginImage[];
   resolveMedia?(value: string): string | ResolvedMedia | undefined;
+  /** Map a plugin-owned media reference (e.g. drawing:<uuid>) to a browser-safe relative preview URL. */
+  mediaPreviewUrl?(value: string): string | undefined;
+  /** Optional inert display projector for live monitoring (Monitor / WebUI / TUI). */
+  display?: DisplayProjector;
+  /** Optional conversation record formatter for chat records and observations. */
+  recordFormatter?: ChatRecordFormatter;
   start?(): void | Promise<void>;
   stop?(): void | Promise<void>;
   /** Stop scheduling background work while a replacement is prepared; return a resume function. */
@@ -213,6 +224,21 @@ export class PluginHost {
   chatTarget(tool: string, args: unknown, staleOnly = false): string | undefined {
     for (const plugin of this.plugins) if (this.enabled(plugin) && (staleOnly ? plugin.staleActions : plugin.chatActions)?.includes(tool)) {
       const chat = plugin.chatTarget?.(tool, args); if (chat) return chat;
+    }
+  }
+  trackedConversations(store: Store): string[] {
+    return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.trackedConversations?.(store) ?? []);
+  }
+  displayProjectors(): DisplayProjector[] {
+    return this.plugins.filter(plugin => this.enabled(plugin) && plugin.display).map(plugin => plugin.display!);
+  }
+  recordFormatters(): ChatRecordFormatter[] {
+    return this.plugins.filter(plugin => this.enabled(plugin) && plugin.recordFormatter).map(plugin => plugin.recordFormatter!);
+  }
+  mediaPreviewUrl(value: string): string | undefined {
+    for (const plugin of this.plugins) if (this.enabled(plugin)) {
+      const url = plugin.mediaPreviewUrl?.(value);
+      if (url !== undefined) return url;
     }
   }
   images(event: EnvironmentEvent): PluginImage[] {

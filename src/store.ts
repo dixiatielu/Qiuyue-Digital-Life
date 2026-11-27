@@ -1,4 +1,4 @@
-import { personRef, parseConversationRef, requireConversationRef, parsePersonRef, validateSource, type PlatformIdentity } from './identity.js';
+import { personRef, parseConversationRef, requireConversationRef, parsePersonRef, validateSource, type ConversationType, type PlatformIdentity } from './identity.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -20,6 +20,10 @@ const carriesEvidence = (recordId: string) => recordId.startsWith('m:') || recor
 /** A memory and the memories resting on it, through memories alone: what merely had it in view when a plan was set does not rest on it. */
 const restingOn = "dependent(id) AS (SELECT ? UNION SELECT owner_id FROM sources JOIN dependent ON source_id=dependent.id WHERE owner_id LIKE 'm:%')";
 const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND json_extract(source,'$.conversationType') IN ('group','channel','thread') AND addressed=0";
+/** Backward-compatible transport check: prefer canonical source.attention='transport', while still matching historical heartbeat rows. */
+const transportEventSql = "(coalesce(json_extract(source,'$.attention'),'')='transport' OR kind='meta_event:heartbeat' OR kind LIKE 'meta_event:heartbeat:%')";
+/** Backward-compatible ephemeral check: prefer canonical source.ephemeral=true, while still matching historical typing rows. */
+const nonEphemeralEventSql = "coalesce(json_extract(source,'$.ephemeral'),0)=0 AND kind!='notice:notify:input_status'";
 /** Parameters: whether life wakes may be claimed, then whether the digital life rests. */
 const claimable = `status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') AND (?=0 OR NOT (${restHolds}))`;
 /** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
@@ -247,7 +251,7 @@ export class Store {
   private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined, ...(row.source ? { source: parse(row.source) } : {}) }; }
   event(eventId: string): EnvironmentEvent | undefined { const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(eventId); return row ? this.eventRow(row) : undefined; }
   /** A review's prompt is perceived by the review alone, which has it as its observation (ADR-0012). */
-  recent(limit: number): EnvironmentEvent[] { return this.db.prepare("SELECT * FROM events WHERE status='processed' AND kind!='meta_event:heartbeat' AND kind NOT LIKE 'meta_event:heartbeat:%' AND kind!='memory_maintenance' AND coalesce(json_extract(source,'$.attention'),'')!='transport' ORDER BY at DESC LIMIT ?").all(limit).reverse().map(row => this.eventRow(row)); }
+  recent(limit: number): EnvironmentEvent[] { return this.db.prepare(`SELECT * FROM events WHERE status='processed' AND NOT ${transportEventSql} AND kind!='memory_maintenance' ORDER BY at DESC LIMIT ?`).all(limit).reverse().map(row => this.eventRow(row)); }
   claim(limit: number, allowLife = true, resting = false): { batchId: string; events: EnvironmentEvent[] } | undefined {
     return this.transaction(() => {
       const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} AND kind!='rest_backlog' ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, resting ? 1 : 0, limit);
@@ -280,8 +284,8 @@ export class Store {
   releaseClaims() { const ids = this.db.prepare("SELECT id FROM events WHERE status='processing'").all().map(row => String(row.id)); this.db.prepare("UPDATE events SET status='pending',batch_id=NULL WHERE status='processing'").run(); this.notifyEvents(ids); }
   recover() {
     this.transaction(() => {
-      // Heartbeats queued by older versions must not wake the model or advance reflection counters.
-      this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE status IN ('pending','processing') AND (kind='meta_event:heartbeat' OR kind LIKE 'meta_event:heartbeat:%')").run();
+      // Transport events queued by older versions must not wake the model or advance reflection counters.
+      this.db.prepare(`UPDATE events SET status='processed',batch_id=NULL WHERE status IN ('pending','processing') AND ${transportEventSql}`).run();
       this.releaseClaims();
       const pending = this.db.prepare("SELECT id FROM actions WHERE status='pending'").all();
       this.db.prepare("UPDATE actions SET status='unknown',result=? WHERE status='pending'").run(json({ reason: 'Process interrupted; the remote outcome is unconfirmed' }));
@@ -300,7 +304,7 @@ export class Store {
   pending() { return Number(this.db.prepare("SELECT count(*) AS n FROM events WHERE status='pending'").get()!.n); }
   processedCount() { return this.setting<number>('processedTotal'); }
   latestGroupMessage(conversation: string): number | undefined {
-    const row = this.db.prepare(`SELECT json_extract(payload,'$.message_id') AS message_id FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1`).get(conversation);
+    const row = this.db.prepare(`SELECT coalesce(json_extract(source,'$.messageId'), json_extract(payload,'$.message_id')) AS message_id FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1`).get(conversation);
     return row?.message_id == null ? undefined : Number(row.message_id);
   }
   private memoryRow(row: Record<string, any>): Memory {
@@ -736,7 +740,7 @@ export class Store {
   }
   private recordFilter(conversation: string): { target: string | number; events: string; actions: string } {
     requireConversationRef(conversation);
-    return { target: conversation, events: "conversation_ref=? AND kind!='notice:notify:input_status' AND (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND coalesce(json_extract(source,'$.attention'),'')!='transport'", actions: "status='success' AND conversation=?" };
+    return { target: conversation, events: `conversation_ref=? AND ${nonEphemeralEventSql} AND (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND coalesce(json_extract(source,'$.attention'),'')!='transport'`, actions: "status='success' AND conversation=?" };
   }
 
   /** A page of one conversation from a time on: messages and notices, with this account's completed actions there. Events sharing the last time stay together. */
@@ -762,26 +766,48 @@ export class Store {
     return { events: events.reverse(), actions: actions.reverse() };
   }
   /** The message a reply or reaction points at, when it is still retained. */
-  messageById(conversation: string, messageId: number): EnvironmentEvent | undefined {
+  messageById(conversation: string, messageId: string | number): EnvironmentEvent | undefined {
     const filter = this.recordFilter(conversation);
-    const row = this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND json_extract(payload,'$.message_id')=? ORDER BY at DESC LIMIT 1`).get(filter.target, messageId);
+    const textId = String(messageId);
+    const numericId = Number(messageId);
+    const row = Number.isFinite(numericId)
+      ? this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND (json_extract(source,'$.messageId')=? OR json_extract(payload,'$.message_id')=?) ORDER BY at DESC LIMIT 1`).get(filter.target, textId, numericId)
+      : this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND json_extract(source,'$.messageId')=? ORDER BY at DESC LIMIT 1`).get(filter.target, textId);
     return row ? this.eventRow(row) : undefined;
   }
-  sentMessage(messageId: number, account: PlatformIdentity): boolean { return !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND json_extract(result,'$.message_id')=? AND conversation LIKE ? LIMIT 1").get(messageId, `${account.platform}:${encodeURIComponent(account.accountId)}:%`); }
+  sentMessage(messageId: string | number, account: PlatformIdentity): boolean {
+    const numericId = Number(messageId);
+    const prefix = `${account.platform}:${encodeURIComponent(account.accountId)}:%`;
+    return Number.isFinite(numericId)
+      ? !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND (json_extract(result,'$.message_id')=? OR json_extract(result,'$.message_id')=?) AND conversation LIKE ? LIMIT 1").get(numericId, String(messageId), prefix)
+      : !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND json_extract(result,'$.message_id')=? AND conversation LIKE ? LIMIT 1").get(String(messageId), prefix);
+  }
   latestSender(person: string): { card?: string; nickname?: string } | undefined {
     const row = this.db.prepare("SELECT json_extract(source,'$.actorName') AS name, json_extract(payload,'$.sender') AS sender FROM events WHERE actor_ref=? AND (json_extract(source,'$.actorName') IS NOT NULL OR json_extract(payload,'$.sender') IS NOT NULL) ORDER BY at DESC LIMIT 1").get(person);
     return row ? row.name ? { nickname: String(row.name) } : parse(row.sender) : undefined;
   }
-  groupName(conversation: string): string | undefined {
-    const row = this.db.prepare("SELECT json_extract(payload,'$.group_name') AS name FROM events WHERE conversation_ref=? AND json_extract(payload,'$.group_name') IS NOT NULL ORDER BY at DESC LIMIT 1").get(conversation);
-    return row ? String(row.name) : undefined;
+  latestActorName(person: string): string | undefined {
+    const sender = this.latestSender(person);
+    return sender?.card || sender?.nickname || undefined;
   }
-  /** Latest message timestamp and known group name for a conversation, using the conversation index. */
+  /** Known human-readable name for a conversation, preferring normalized source.conversationName over legacy payload.group_name. */
+  conversationName(conversation: string): string | undefined {
+    const row = this.db.prepare("SELECT coalesce(json_extract(source,'$.conversationName'), json_extract(payload,'$.group_name')) AS name FROM events WHERE conversation_ref=? AND (json_extract(source,'$.conversationName') IS NOT NULL OR json_extract(payload,'$.group_name') IS NOT NULL) ORDER BY at DESC LIMIT 1").get(conversation);
+    return row?.name ? String(row.name) : undefined;
+  }
+  groupName(conversation: string): string | undefined { return this.conversationName(conversation); }
+  /** Latest message timestamp and known conversation name, using the conversation index. */
   latestConversationActivity(conversation: string): { at: number; name?: string } | undefined {
-    const row = this.db.prepare("SELECT at, json_extract(payload,'$.group_name') AS name FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1").get(conversation);
+    const row = this.db.prepare("SELECT at, coalesce(json_extract(source,'$.conversationName'), json_extract(payload,'$.group_name')) AS name FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1").get(conversation);
     if (!row) return;
-    const name = row.name ? String(row.name) : this.groupName(conversation);
+    const name = row.name ? String(row.name) : this.conversationName(conversation);
     return { at: Number(row.at), ...(name ? { name } : {}) };
+  }
+  /** Recent active conversations for one platform account, filtered by conversation type. */
+  activeConversations(account: PlatformIdentity, types: readonly ConversationType[], limit = 10): string[] {
+    if (!types.length || limit <= 0) return [];
+    const prefix = `${account.platform}:${encodeURIComponent(account.accountId)}:%`;
+    return this.db.prepare(`SELECT conversation_ref FROM events WHERE kind='message' AND conversation_ref LIKE ? AND json_extract(source,'$.conversationType') IN (${types.map(() => '?').join(',')}) GROUP BY conversation_ref ORDER BY max(at) DESC LIMIT ?`).all(prefix, ...types, limit).map(row => String(row.conversation_ref));
   }
   action(row: Record<string, any>): Action { return { id: row.id, key: row.action_key, fingerprint: row.fingerprint, kind: row.kind, args: parse(row.args), sources: parse(row.source_ids), status: row.status, result: row.result ? parse(row.result) : null, createdAt: row.created_at, ...(row.conversation ? { conversation: row.conversation } : {}) }; }
   actions(limit = 20): Action[] { return this.db.prepare('SELECT * FROM actions ORDER BY created_at DESC LIMIT ?').all(limit).map(row => this.action(row)); }

@@ -4,11 +4,17 @@ export interface EventSource extends PlatformIdentity {
   instance: string;
   conversation?: string;
   conversationType?: ConversationType;
+  /** Human-readable name of the conversation (e.g. group name, channel title), normalized by the adapter. */
+  conversationName?: string;
   actor?: string;
   actorName?: string;
+  /** Platform-native message identifier when this event represents a message, normalized as a string. */
+  messageId?: string;
   own: boolean;
   addressed: boolean;
   attention: 'normal' | 'ambient' | 'transport';
+  /** Transient presence signals (such as typing indicators) excluded from chat records. */
+  ephemeral?: boolean;
 }
 const part = (value: string) => {
   if (typeof value !== 'string' || !value || value.length > 256) throw new Error('Platform identifiers must be non-empty strings of at most 256 characters.');
@@ -44,6 +50,9 @@ export function validateSource(source: EventSource) {
   personRef(source.platform, source.accountId);
   if (!/^[a-z][a-z0-9_]{0,23}$/.test(source.instance)) throw new Error('Invalid platform instance.');
   if (source.conversation) { const chat = requireConversationRef(source.conversation); if (chat.platform !== source.platform || chat.accountId !== source.accountId || chat.type !== source.conversationType) throw new Error('Conversation must belong to the event account.'); }
+  if (source.conversationName !== undefined && typeof source.conversationName !== 'string') throw new Error('Conversation name must be a string.');
   if (source.actor && parsePersonRef(source.actor)?.platform !== source.platform) throw new Error('Actor must belong to the event platform.');
+  if (source.messageId !== undefined && typeof source.messageId !== 'string') throw new Error('Message ID must be a string.');
+  if (source.ephemeral !== undefined && typeof source.ephemeral !== 'boolean') throw new Error('Ephemeral flag must be boolean.');
   if (typeof source.own !== 'boolean' || typeof source.addressed !== 'boolean' || !['normal', 'ambient', 'transport'].includes(source.attention)) throw new Error('Invalid event attention context.');
 }

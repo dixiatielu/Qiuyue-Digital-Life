@@ -266,6 +266,23 @@ class PluginScope {
       chatActions: [...base.chatActions ?? [], ...adapters.flatMap(adapter => adapter.chatActions ?? [])],
       staleActions: [...base.staleActions ?? [], ...adapters.flatMap(adapter => adapter.staleActions ?? [])],
       chatTarget: (name, args) => base.chatTarget?.(name, args) ?? adapters.map(adapter => adapter.chatTarget?.(name, args)).find(Boolean),
+      trackedConversations: currentStore => adapters.flatMap(adapter => adapter.trackedConversations?.(currentStore) ?? []),
+      ...(adapters.some(adapter => adapter.display) ? {
+        display: {
+          projectEvent: (event, imageUrl) => {
+            for (const adapter of adapters) {
+              const projected = adapter.display?.projectEvent?.(event, imageUrl);
+              if (projected) return projected;
+            }
+          },
+          projectAction: (action, imageUrl) => {
+            for (const adapter of adapters) {
+              const projected = adapter.display?.projectAction?.(action, imageUrl);
+              if (projected) return projected;
+            }
+          },
+        },
+      } : {}),
       endsThought: (name, details) => Boolean(base.endsThought?.(name, details) || adapters.some(adapter => adapter.endsThought?.(name, details))),
       nativeActions: {
         accounts: adapters.flatMap(adapter => adapter.nativeActions?.accounts ?? []),
