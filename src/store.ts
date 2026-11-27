@@ -1,114 +1,65 @@
-import { personRef, parseConversationRef, requireConversationRef, parsePersonRef, validateSource, type ConversationType, type PlatformIdentity } from './identity.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
-import type { Action, EnvironmentEvent, LifeSettings, Memory, MemoryKind, Pursuit, Wake } from './domain.js';
-import { developmentKinds, isDevelopment, isHeartbeat } from './domain.js';
-import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { validateSource, type ConversationType, type PlatformIdentity } from './identity.js';
+import { isHeartbeat, type Action, type EnvironmentEvent, type LifeSettings, type Memory, type MemoryKind, type Pursuit, type Wake } from './domain.js';
+import { contextRecordId, persistableMessage, type ContextCheckpoint } from './context.js';
+import {
+  actionFingerprint,
+  claimableSql,
+  digest,
+  entryTitle,
+  eventRef,
+  initStoreSchema,
+  json,
+  makeId,
+  parse,
+  restHoldsSql,
+  transportEventSql,
+  type DevelopmentLimits,
+  type MemoryInput,
+  type PendingTiming,
+  type RevisionReach,
+  type Revisit,
+  type StoreNotice,
+} from './store/schema.js';
+import { readActionRow, readEvent, readEventRow } from './store/queries.js';
+import { MemoryStore } from './store/memory.js';
+import { ConversationStore } from './store/conversations.js';
 
-const json = (value: unknown) => JSON.stringify(value);
-const parse = <T>(value: unknown): T => JSON.parse(String(value)) as T;
-/** Match JSON Schema's character counts, including for supplementary Unicode characters. */
-const characters = (value: string): number => [...value].length;
-const id = (prefix: string) => `${prefix}:${randomUUID()}`;
-export const digest = (value: unknown): string => createHash('sha256').update(json(value)).digest('hex');
-/** While the digital life rests, group chat not addressed to it waits instead of starting or steering a thought (ADR-0016). */
-/** Memories and events carry evidence on to what cites them; a plan, pursuit, or the activity cites only what its thought had in view. */
-const carriesEvidence = (recordId: string) => recordId.startsWith('m:') || recordId.startsWith('e:');
-/** A memory and the memories resting on it, through memories alone: what merely had it in view when a plan was set does not rest on it. */
-const restingOn = "dependent(id) AS (SELECT ? UNION SELECT owner_id FROM sources JOIN dependent ON source_id=dependent.id WHERE owner_id LIKE 'm:%')";
-const restHolds = "(kind='message' OR kind LIKE 'notice:%') AND json_extract(source,'$.conversationType') IN ('group','channel','thread') AND addressed=0";
-/** Backward-compatible transport check: prefer canonical source.attention='transport', while still matching historical heartbeat rows. */
-const transportEventSql = "(coalesce(json_extract(source,'$.attention'),'')='transport' OR kind='meta_event:heartbeat' OR kind LIKE 'meta_event:heartbeat:%')";
-/** Backward-compatible ephemeral check: prefer canonical source.ephemeral=true, while still matching historical typing rows. */
-const nonEphemeralEventSql = "coalesce(json_extract(source,'$.ephemeral'),0)=0 AND kind!='notice:notify:input_status'";
-/** Parameters: whether life wakes may be claimed, then whether the digital life rests. */
-const claimable = `status='pending' AND (?=1 OR coalesce(json_extract(payload,'$.wakeKind'),'')!='life') AND (?=0 OR NOT (${restHolds}))`;
-/** Memories spontaneous recall may bring up: current ones, apart from development, which is supplied by scope (ADR-0012). */
-const recallable = `active=1 AND kind NOT IN (${developmentKinds.map(kind => `'${kind}'`).join(',')})`;
-/** Internal scheduling events cannot supply external evidence. */
-const programEvents = new Set(['wake', 'memory_maintenance', 'memory_revision', 'perception_gap', 'rest_backlog']);
-/** Habits and practices hold everywhere unless they belong to one group alone; what one person wants of it belongs to its impression of them. */
-/** Chat records cite events by the first eight characters of their ID. */
-export const eventRef = (eventId: string) => `#${eventId.slice(2, 10)}`;
-/** The items of content written as one numbered or bulleted list under at most one heading line; undefined when it is anything else. */
-function listItems(content: string): string[] | undefined {
-  const lines = content.split(/\r?\n|\\n/).map(line => line.trim()).filter(Boolean);
-  const marker = /^(?:\d+\s*[.、)）:：]|[-*•·])\s*/;
-  const body = marker.test(lines[0] ?? '') ? lines : lines.slice(1);
-  if (body.length < 2 || !body.every(line => marker.test(line))) return;
-  const items = body.map(line => line.replace(marker, '').trim());
-  return items.every(Boolean) ? items : undefined;
-}
-/** A handle for what was written without a title, such as an entry split from a list: its opening clause, or its start where that is too short to look for it by. */
-export function entryTitle(item: string): string {
-  const opening = (item.split(/[，。；：,;:!?！？（(「]/, 1)[0] ?? '').trim();
-  const title = [...([...opening].length >= 4 ? opening : item.trim())];
-  return title.length > 30 ? `${title.slice(0, 30).join('')}…` : title.join('');
-}
-const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
-export const actionFingerprint = (kind: string, args: Record<string, unknown>) => digest({ kind, args: canonical(args) });
-
-/** What a revision reaches; see Store.revisionReach. */
-export interface RevisionReach { withdrawn: { id: string; kind: string; title: string }[]; cites: { id: string; kind: string; title: string }[] }
-/** What bounds the digital life's own writes: one entry of development, the entries of one kind in a scope, or about a person, together, and one experience. */
-export interface DevelopmentLimits { entryChars: number; scopeChars: number; experienceChars?: number }
-/** A memory to go back over, with the stretch of each chat its events come from. */
-export interface Revisit { memory: Memory; spans: { conversation: string; from: number; to: number; events: number }[] }
-export interface MemoryInput { kind: MemoryKind; title: string; content: string; importance: number; subjects?: string[]; sources: string[]; supersedes?: string; scope?: string; fictional?: boolean }
-/** Local receive times of claimable events: the earliest waking one, the latest of any kind, and the earliest ambient one. */
-export interface PendingTiming { first?: number; last?: number; ambient?: number }
-export type StoreNotice =
-  | { kind: 'environment'; event: EnvironmentEvent }
-  | { kind: 'action'; action: Action }
-  | { kind: 'trace'; at: number; id: number; name: string; data: unknown }
-  | { kind: 'state' };
+export {
+  actionFingerprint,
+  digest,
+  entryTitle,
+  eventRef,
+  type DevelopmentLimits,
+  type MemoryInput,
+  type PendingTiming,
+  type RevisionReach,
+  type Revisit,
+  type StoreNotice,
+};
 
 export class Store {
   readonly db: DatabaseSync;
   private listeners = new Set<(notice: StoreNotice) => void>();
   private notices: StoreNotice[] = [];
+  private readonly memories: MemoryStore;
+  private readonly conversations: ConversationStore;
+
   constructor(path: string, lifeEnabled = false) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     if (path !== ':memory:' && existsSync(`${path}.identities.lock`)) throw new Error('Identity migration is in progress.');
     this.db = new DatabaseSync(path);
-    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='events'").get() && Number(this.db.prepare('PRAGMA user_version').get()!.user_version) !== 2) { this.db.close(); throw new Error('Database identity format needs migration. Stop the daemon and run identities migrate --config <path>.'); }
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch_id TEXT, received_at INTEGER, addressed INTEGER NOT NULL DEFAULT 0, source TEXT, conversation_ref TEXT, actor_ref TEXT, ambient_flag INTEGER NOT NULL DEFAULT 0);
-      CREATE INDEX IF NOT EXISTS events_pending ON events(status, at);
-      CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, importance INTEGER NOT NULL, subjects TEXT NOT NULL, conversations_json TEXT NOT NULL, fictional INTEGER NOT NULL, supersedes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, scope TEXT);
-      CREATE TABLE IF NOT EXISTS sources(owner_id TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(owner_id,source_id));
-      CREATE INDEX IF NOT EXISTS source_dependents ON sources(source_id);
-      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED, title, content, tokenize='trigram');
-      CREATE TRIGGER IF NOT EXISTS memory_insert AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(id,title,content) VALUES(new.id,new.title,new.content); END;
-      CREATE TRIGGER IF NOT EXISTS memory_delete AFTER DELETE ON memories BEGIN DELETE FROM memories_fts WHERE id=old.id; END;
-      CREATE TABLE IF NOT EXISTS memory_vectors(memory_id TEXT NOT NULL, chunk INTEGER NOT NULL, model TEXT NOT NULL, line TEXT NOT NULL, vector BLOB NOT NULL, PRIMARY KEY(memory_id,chunk));
-      CREATE TRIGGER IF NOT EXISTS memory_vectors_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_vectors WHERE memory_id=old.id; END;
-      CREATE TABLE IF NOT EXISTS memory_recalls(memory_id TEXT PRIMARY KEY, spontaneous INTEGER NOT NULL DEFAULT 0, deliberate INTEGER NOT NULL DEFAULT 0, last_at INTEGER NOT NULL);
-      CREATE TRIGGER IF NOT EXISTS memory_recalls_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_recalls WHERE memory_id=old.id; END;
-      CREATE TABLE IF NOT EXISTS memory_revisits(memory_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
-      CREATE TRIGGER IF NOT EXISTS memory_revisits_delete AFTER DELETE ON memories BEGIN DELETE FROM memory_revisits WHERE memory_id=old.id; END;
-      CREATE TABLE IF NOT EXISTS tombstones(source_key TEXT PRIMARY KEY);
-      CREATE TABLE IF NOT EXISTS wakes(id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL, due_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', rest INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE IF NOT EXISTS pursuits(id TEXT PRIMARY KEY, title TEXT NOT NULL, progress TEXT NOT NULL, fictional INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'active', started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS actions(id TEXT PRIMARY KEY, action_key TEXT UNIQUE NOT NULL, fingerprint TEXT NOT NULL, kind TEXT NOT NULL, args TEXT NOT NULL, source_ids TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at INTEGER NOT NULL, conversation TEXT);
-      CREATE INDEX IF NOT EXISTS action_fingerprint ON actions(fingerprint,status);
-      CREATE TABLE IF NOT EXISTS action_triggers(action_id TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY(action_id,event_id));
-      CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, at INTEGER NOT NULL, run_id TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS calls_time ON calls(at);
-      CREATE INDEX IF NOT EXISTS actions_time ON actions(created_at);
-      CREATE TABLE IF NOT EXISTS trace(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS context_records(id TEXT PRIMARY KEY, at INTEGER NOT NULL, message TEXT NOT NULL, source_ids TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS working_context(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL);
-    `);
-    this.db.exec('CREATE INDEX IF NOT EXISTS event_conversation ON events(conversation_ref,at); CREATE INDEX IF NOT EXISTS event_actor ON events(actor_ref,at); CREATE INDEX IF NOT EXISTS action_conversation ON actions(conversation,created_at)');
-    // sentMessage runs for every quoted message and lifeWakesSince once a minute while idle; without these each scanned its whole table.
-    this.db.exec("CREATE INDEX IF NOT EXISTS action_message ON actions(json_extract(result,'$.message_id')) WHERE status='success'; CREATE INDEX IF NOT EXISTS event_wakes ON events(at) WHERE kind='wake'; CREATE INDEX IF NOT EXISTS trace_time ON trace(at)");
-    for (const [key, value] of Object.entries({ paused: false, lifeEnabled, generation: 0, activity: '', reflectionWatermark: 0, processedTotal: 0, reviewMarks: {}, restingSince: null })) this.db.prepare('INSERT OR IGNORE INTO settings VALUES (?,?)').run(key, json(value));
-    this.db.exec('PRAGMA user_version=2');
+    initStoreSchema(this.db, lifeEnabled);
+    this.memories = new MemoryStore(this);
+    this.conversations = new ConversationStore({
+      db: this.db,
+      transaction: work => this.transaction(work),
+      notify: notice => this.notify(notice),
+      log: (kind, data) => this.log(kind, data),
+    });
   }
   close() { this.db.close(); }
   bindPlatformAccount(instance: string, identity: PlatformIdentity) {
@@ -175,7 +126,7 @@ export class Store {
   logs(limit = 30) { return this.db.prepare('SELECT * FROM trace ORDER BY id DESC LIMIT ?').all(limit).map(row => ({ id: Number(row.id), at: Number(row.at), kind: String(row.kind), data: parse(row.data) })); }
   visibleHistory() {
     return {
-      events: this.db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 30').all().reverse().map(row => this.eventRow(row)),
+      events: this.db.prepare('SELECT * FROM events ORDER BY at DESC LIMIT 30').all().reverse().map(readEventRow),
       messages: this.db.prepare("SELECT id,at,message FROM context_records WHERE json_extract(message,'$.role') IN ('assistant','toolResult') ORDER BY at DESC,rowid DESC LIMIT 40").all().reverse().map(row => ({ id: String(row.id), at: Number(row.at), message: parse<AgentMessage>(row.message) })),
       actions: this.actions().reverse(),
       logs: this.logs(20).reverse(),
@@ -227,7 +178,7 @@ export class Store {
     if ((input.kind === 'message' || input.kind.startsWith('notice:') || input.kind.startsWith('request:')) && !input.source) throw new Error('Platform events require a canonical source.');
     processed ||= isHeartbeat(input.kind) || input.source?.attention === 'transport';
     if (this.db.prepare('SELECT 1 FROM tombstones WHERE source_key=?').get(input.key)) return;
-    const eventId = id('e'); const receivedAt = Date.now();
+    const eventId = makeId('e'); const receivedAt = Date.now();
     const result = this.db.prepare('INSERT OR IGNORE INTO events(id,source_key,kind,at,text,payload,status,received_at,addressed,source,conversation_ref,actor_ref,ambient_flag) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(eventId, input.key, input.kind, input.at, input.text, json(input.payload), processed ? 'processed' : 'pending', receivedAt, Number(input.source?.addressed ?? false), input.source ? json(input.source) : null, input.source?.conversation ?? null, input.source?.actor ?? null, Number(input.source?.attention === 'ambient'));
     if (!result.changes) return;
     const event: EnvironmentEvent = { ...input, id: eventId, status: processed ? 'processed' : 'pending', receivedAt };
@@ -237,7 +188,6 @@ export class Store {
   resolve(reference: string): string {
     const lengthened = /^e:([0-9a-f]{8})-/.exec(reference);
     if (lengthened && !this.event(reference)) {
-      // A full ID made up from a reference is right only in the reference's digits, so those decide when they name one event.
       const matches = this.eventsStarting(lengthened[1]!);
       return matches.length === 1 ? matches[0]! : reference;
     }
@@ -248,30 +198,25 @@ export class Store {
     return matches[0]!;
   }
   private eventsStarting(digits: string): string[] { return this.db.prepare('SELECT id FROM events WHERE id>=? AND id<? LIMIT 2').all(`e:${digits}`, `e:${digits}~`).map(row => String(row.id)); }
-  private eventRow(row: Record<string, any>): EnvironmentEvent { return { id: row.id, key: row.source_key, kind: row.kind, at: row.at, text: row.text, payload: parse(row.payload), status: row.status, receivedAt: row.received_at ?? undefined, ...(row.source ? { source: parse(row.source) } : {}) }; }
-  event(eventId: string): EnvironmentEvent | undefined { const row = this.db.prepare('SELECT * FROM events WHERE id=?').get(eventId); return row ? this.eventRow(row) : undefined; }
+  event(eventId: string): EnvironmentEvent | undefined { return readEvent(this.db, eventId); }
   /** A review's prompt is perceived by the review alone, which has it as its observation (ADR-0012). */
-  recent(limit: number): EnvironmentEvent[] { return this.db.prepare(`SELECT * FROM events WHERE status='processed' AND NOT ${transportEventSql} AND kind!='memory_maintenance' ORDER BY at DESC LIMIT ?`).all(limit).reverse().map(row => this.eventRow(row)); }
+  recent(limit: number): EnvironmentEvent[] { return this.db.prepare(`SELECT * FROM events WHERE status='processed' AND NOT ${transportEventSql} AND kind!='memory_maintenance' ORDER BY at DESC LIMIT ?`).all(limit).reverse().map(readEventRow); }
   claim(limit: number, allowLife = true, resting = false): { batchId: string; events: EnvironmentEvent[] } | undefined {
     return this.transaction(() => {
-      const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimable} AND kind!='rest_backlog' ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, resting ? 1 : 0, limit);
+      const claimed = this.db.prepare(`SELECT * FROM events WHERE ${claimableSql} AND kind!='rest_backlog' ORDER BY at,rowid LIMIT ?`).all(allowLife ? 1 : 0, resting ? 1 : 0, limit);
       const backlogs = this.db.prepare("SELECT * FROM events WHERE status='pending' AND kind='rest_backlog' ORDER BY at,rowid").all();
       if (!claimed.length && !backlogs.length) return;
-      // A life wake starts a thought of its own instead of riding along with chat (ADR-0015).
       const life = (row: Record<string, any>) => row.kind === 'wake' && parse<Record<string, unknown>>(row.payload).wakeKind === 'life';
       const cut = claimed.findIndex(row => life(row) !== life(claimed[0]!));
       const rows = cut < 0 ? claimed : claimed.slice(0, cut);
-      // Held chat is context for this observation, including a life wake, not a later thought.
-      // Attach every pending note even beyond the batch limit, also after a failed run or restart.
       rows.push(...backlogs);
-      const batchId = id('b');
+      const batchId = makeId('b');
       for (const row of rows) this.db.prepare("UPDATE events SET status='processing',batch_id=? WHERE id=?").run(batchId, String(row.id));
       this.notifyEvents(rows.map(row => String(row.id)));
-      return { batchId, events: rows.map(row => this.eventRow(row)) };
+      return { batchId, events: rows.map(readEventRow) };
     });
   }
   acknowledge(batchId: string) { this.transaction(() => this.markObserved(batchId)); }
-  /** A claimed batch always has status 'processing', which the pending index finds without scanning every event. */
   private batch(batchId: string): string[] { return this.db.prepare("SELECT id FROM events WHERE status='processing' AND batch_id=?").all(batchId).map(row => String(row.id)); }
   private markObserved(batchId: string) {
     const ids = this.batch(batchId);
@@ -290,332 +235,38 @@ export class Store {
       const pending = this.db.prepare("SELECT id FROM actions WHERE status='pending'").all();
       this.db.prepare("UPDATE actions SET status='unknown',result=? WHERE status='pending'").run(json({ reason: 'Process interrupted; the remote outcome is unconfirmed' }));
       for (const row of pending) this.notify({ kind: 'action', action: this.actionById(String(row.id))! });
-      // A review the last process never finished is over; left open, it reads as still under way.
       if (this.db.prepare("SELECT kind FROM trace WHERE kind IN ('review_started','review_finished','review_stopped') ORDER BY id DESC LIMIT 1").get()?.kind === 'review_started') this.log('review_stopped', { message: 'Process interrupted' });
       this.notify({ kind: 'state' });
     });
   }
   pendingTiming(allowLife = true, resting = false): PendingTiming {
-    // Rows from before received_at existed count as long overdue.
-    const row = this.db.prepare(`SELECT min(CASE WHEN ambient_flag THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient_flag THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimable}`).get(allowLife ? 1 : 0, resting ? 1 : 0)!;
+    const row = this.db.prepare(`SELECT min(CASE WHEN ambient_flag THEN NULL ELSE coalesce(received_at,0) END) AS first, max(coalesce(received_at,0)) AS last, min(CASE WHEN ambient_flag THEN coalesce(received_at,0) END) AS ambient FROM events WHERE ${claimableSql}`).get(allowLife ? 1 : 0, resting ? 1 : 0)!;
     const time = (value: unknown) => value == null ? undefined : Number(value);
     return { first: time(row.first), last: time(row.last), ambient: time(row.ambient) };
   }
   pending() { return Number(this.db.prepare("SELECT count(*) AS n FROM events WHERE status='pending'").get()!.n); }
   processedCount() { return this.setting<number>('processedTotal'); }
-  latestGroupMessage(conversation: string): number | undefined {
-    const row = this.db.prepare(`SELECT coalesce(json_extract(source,'$.messageId'), json_extract(payload,'$.message_id')) AS message_id FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1`).get(conversation);
-    return row?.message_id == null ? undefined : Number(row.message_id);
-  }
-  private memoryRow(row: Record<string, any>): Memory {
-    return { id: row.id, kind: row.kind, title: row.title, content: row.content, importance: row.importance, subjects: parse(row.subjects), conversations: parse(row.conversations_json), fictional: Boolean(row.fictional), sources: this.db.prepare('SELECT source_id FROM sources WHERE owner_id=?').all(row.id).map(x => String(x.source_id)), supersedes: row.supersedes ?? undefined, ...(row.scope ? { scope: row.scope } : {}), active: Boolean(row.active), createdAt: row.created_at };
-  }
-  memory(memoryId: string): Memory | undefined { const row = this.db.prepare('SELECT * FROM memories WHERE id=?').get(memoryId); return row ? this.memoryRow(row) : undefined; }
-  /** Check independent source and size errors together, even when a tool call is missing another required field. Never writes. */
-  inspectMemoryWrite(input: Partial<MemoryInput>, limits?: DevelopmentLimits) {
-    const sources = new Set<string>(); const problems: string[] = [];
-    if (Array.isArray(input.sources)) for (const ref of new Set(input.sources)) {
-      if (typeof ref !== 'string' || !ref.length || ref.length > 100) { problems.push('Each source must be a non-empty event or memory ID of at most 100 characters.'); continue; }
-      try {
-        const source = this.resolve(ref); const event = this.event(source); const memory = this.memory(source);
-        if (!event && !memory) problems.push(`Source does not exist or has been deleted: ${ref}`);
-        else if (memory && !memory.active) {
-          const current = this.currentVersion(source);
-          problems.push(`Source has been revised; read its current version first: ${ref}${current ? `. ${current}` : ''}`);
-        } else sources.add(source);
-      } catch (error) { problems.push(error instanceof Error ? error.message : String(error)); }
-    }
-    // An experience that tells one thing comes to mind as that thing, and can be checked against the events of it alone (ADR-0027).
-    if (limits?.experienceChars && input.kind === 'experience' && typeof input.content === 'string' && characters(input.content) > limits.experienceChars) problems.push(`An experience tells one thing that happened in at most ${limits.experienceChars} characters, under a title that names it; this content has ${characters(input.content)}. Save each thing as an experience of its own, with the events of that thing in its sources, and leave out what is not worth keeping. A long text of your own belongs in a note.${input.supersedes ? ' To break up a longer experience, supersede it with one of the things it tells and write the others as new experiences.' : ''}`);
-    if (limits && input.kind && isDevelopment(input.kind) && typeof input.content === 'string') {
-      const scope = input.scope ?? (input.kind === 'impression' ? undefined : 'global');
-      // An entry that says one thing can be revised, checked against its own evidence, and retired alone (ADR-0025).
-      if (characters(input.content) > limits.entryChars) problems.push(`${input.kind === 'impression' ? 'An' : 'A'} ${input.kind} entry says one thing in at most ${limits.entryChars} characters, so that it can be revised alone; this content has ${characters(input.content)}. Save each point as an entry of its own, with the evidence for that point in its sources. What happened that showed it to you belongs in sources or an experience, not in the entry.${input.supersedes ? ' To break up a longer entry, supersede it with one of its points and write the others as new entries.' : ''}`);
-      if (typeof scope === 'string') {
-        const cap = limits.scopeChars;
-        // Each kind has its own budget in a scope; replacing an entry frees its old content.
-        const used = this.db.prepare('SELECT content FROM memories WHERE active=1 AND scope=? AND kind=? AND id IS NOT ?').all(scope, input.kind, typeof input.supersedes === 'string' ? input.supersedes : null).reduce((sum, row) => sum + characters(String(row.content)), 0);
-        const length = characters(input.content);
-        if (used + length > cap) problems.push(`Your ${input.kind}s in ${scope} would reach ${used + length} characters, above the limit of ${cap}; retire entries you no longer see with retire_memory, or fold entries that say the same thing into one with supersedes, first. This write has room for ${Math.max(0, cap - used)} characters; its content has ${length}. Shorten it before retrying.`);
-      }
-    }
-    return { sources: [...sources], problems };
-  }
-  /**
-   * Limits bound the digital life's own development writes; operator corrections pass none. A revision withdraws what rested on
-   * the old version unless it only goes back over how a memory is kept (ADR-0027), which leaves what rested on it in place.
-   */
-  writeMemory(input: MemoryInput, allowFiction: boolean, limits?: DevelopmentLimits, keepDependents = false): Memory {
-    if (!input.content.trim() || characters(input.content) > 12_000 || characters(input.title) > 200) throw new Error('Memory content is empty or too long.');
-    if (!['experience', 'understanding', 'fiction', 'note'].includes(input.kind) && !isDevelopment(input.kind)) throw new Error('Unknown memory type.');
-    if (!Number.isInteger(input.importance) || input.importance < 1 || input.importance > 10) throw new Error('Importance must be between 1 and 10.');
-    // A review and a conversation may revise the same version; the later one merges into what the first wrote (ADR-0012).
-    const previous = input.supersedes ? this.memory(input.supersedes) : undefined;
-    if (input.supersedes && (!previous || !previous.active)) {
-      const current = previous && this.currentVersion(previous.id);
-      throw new Error(current ? `The memory to revise has already been revised. ${current} Revise that version instead, keeping what it added.` : 'The memory to revise does not exist or has already been revised.');
-    }
-    const { sources, problems } = this.inspectMemoryWrite(input, limits);
-    if (problems.length) throw new Error(problems.join('\n'));
-    const scope = isDevelopment(input.kind) ? input.scope ?? (input.kind === 'impression' ? undefined : 'global') : undefined;
-    let subjects = input.subjects ?? [];
-    if (isDevelopment(input.kind)) {
-      if (!scope || !(input.kind === 'impression' ? parsePersonRef(scope.slice('person:'.length)) && scope.startsWith('person:') : scope === 'global' || scope.startsWith('conversation:') && parseConversationRef(scope.slice('conversation:'.length)))) throw new Error('A habit or practice scope is global (the default) or conversation:<canonical ref>; an impression scope is person:<platform>:user:<id>.');
-      if (input.kind === 'impression') subjects = [...new Set([...subjects, scope.slice('person:'.length)])];
-      // Self-description drawn only from its own output would feed back into every later thought.
-      if (input.kind !== 'practice' && !this.restsOnOthers(sources)) throw new Error('A habit or impression cannot rest only on your own messages, notes, or judgments; cite how others acted or responded.');
-    }
-    // A diary entry about a fictional day is fiction too, whatever its kind.
-    let fictional = input.kind === 'fiction' || input.fictional === true;
-    if (!sources.length && !fictional) throw new Error('A memory must reference IDs of actual experiences or existing memories.');
-    const conversations = new Set<string>();
-    for (const source of sources) {
-      const event = this.event(source); const memory = this.memory(source);
-      if (event?.source?.conversation) conversations.add(event.source.conversation);
-      for (const chat of memory?.conversations ?? []) conversations.add(chat);
-      fictional ||= memory?.fictional ?? false;
-    }
-    if (fictional && !allowFiction) throw new Error('Fictional daily life is disabled; fictional experiences and derived content cannot be saved.');
-    for (const chat of previous?.conversations ?? []) conversations.add(chat);
-    fictional ||= previous?.fictional ?? false;
-    if (fictional && !allowFiction) throw new Error('Fictional daily life and revisions must retain their fictional sources.');
-    const memoryId = id('m');
-    this.transaction(() => {
-      this.db.prepare('INSERT INTO memories(id,kind,title,content,importance,subjects,conversations_json,fictional,supersedes,active,created_at,scope) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(memoryId, input.kind, input.title, input.content, input.importance, json(subjects), json([...conversations]), fictional ? 1 : 0, input.supersedes ?? null, 1, Date.now(), scope ?? null);
-      for (const source of sources) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(memoryId, source);
-      if (previous) {
-        // A correction invalidates dependent interpretations, while preserving their history.
-        if (keepDependents) this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(previous.id);
-        else this.db.prepare(`WITH RECURSIVE ${restingOn} UPDATE memories SET active=0 WHERE id IN (SELECT id FROM dependent) AND id!=?`).run(previous.id, memoryId);
-        this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(memoryId, previous.id);
-      }
-      this.log('memory_written', { id: memoryId, kind: input.kind, supersedes: input.supersedes, ...(scope ? { scope } : {}) });
-    });
-    return this.memory(memoryId)!;
-  }
-  /** The version that replaced a revised memory and still holds, described for whoever would revise or cite the old one. */
-  private currentVersion(memoryId: string): string | undefined {
-    const rows = this.db.prepare('WITH RECURSIVE later(id) AS (SELECT ? UNION SELECT memories.id FROM memories JOIN later ON memories.supersedes=later.id) SELECT * FROM memories WHERE active=1 AND id IN (SELECT id FROM later) ORDER BY created_at DESC,rowid DESC').all(memoryId);
-    if (!rows.length) return;
-    // A list split into entries holds as all of them (ADR-0025).
-    if (rows.length > 1) return `It was split into ${rows.length} entries, which hold now: ${rows.reverse().map(row => `${row.id} (${row.title})`).join('; ')}. The one you mean is among them.`;
-    const current = this.memoryRow(rows[0]!);
-    return `Its current version is ${current.id} (${current.title}): ${current.content}`;
-  }
-  /** Which of these memories are current. */
-  activeMemories(memoryIds: string[]): Set<string> { return new Set(this.db.prepare('SELECT id FROM memories WHERE active=1 AND id IN (SELECT value FROM json_each(?))').all(json(memoryIds)).map(row => String(row.id))); }
-  /** What revising a memory reaches: the memories resting on it, which leave everyday recall with it, and the plans, pursuits, and activity under way that cite any of them. */
-  revisionReach(memoryId: string): RevisionReach {
-    const resting = json(this.db.prepare(`WITH RECURSIVE ${restingOn} SELECT id FROM dependent`).all(memoryId).map(row => String(row.id)));
-    const withdrawn = this.db.prepare('SELECT id, kind, title FROM memories WHERE active=1 AND id!=? AND id IN (SELECT value FROM json_each(?))').all(memoryId, resting).map(row => ({ id: String(row.id), kind: String(row.kind), title: String(row.title) }));
-    const reached = new Set(this.db.prepare('SELECT DISTINCT owner_id FROM sources WHERE source_id IN (SELECT value FROM json_each(?))').all(resting).map(row => String(row.owner_id)));
-    const activity = this.settings().activity;
-    const cites = [
-      ...this.wakes().filter(wake => reached.has(wake.id)).map(wake => ({ id: wake.id, kind: wake.kind, title: wake.title })),
-      ...this.pursuits().filter(pursuit => reached.has(pursuit.id)).map(pursuit => ({ id: pursuit.id, kind: 'pursuit', title: pursuit.title })),
-      ...(activity && reached.has('state:activity') ? [{ id: 'state:activity', kind: 'activity', title: activity }] : []),
-    ];
-    return { withdrawn, cites };
-  }
-  /** Revisions the digital life did not make in a thought of its own, such as an operator correction or what a review handed on, come to it as one event, with what they reached. Its own revisions report this in their result. */
-  noticeRevisions(revisions: { memory: Memory; reach: RevisionReach }[]) {
-    // One forgotten meanwhile leaves nothing to notice.
-    const held = revisions.filter(({ memory }) => this.memory(memory.id));
-    if (!held.length) return;
-    const list = (items: { id: string; title: string }[]) => items.map(item => `${item.id} (${item.title})`).join('; ');
-    const once = <T extends { id: string }>(items: T[]) => [...new Map(items.map(item => [item.id, item])).values()];
-    const withdrawn = once(held.flatMap(({ reach }) => reach.withdrawn)); const cites = once(held.flatMap(({ reach }) => reach.cites));
-    const one = held.length === 1;
-    const replaced = held.map(({ memory }) => `${memory.id} replaces ${memory.supersedes}`).join('; ');
-    this.transaction(() => {
-      const revision = this.receive({ key: `revision:${held.map(({ memory }) => memory.id).join(',')}`, kind: 'memory_revision', at: Date.now(), text: `${one ? 'An understanding was' : 'Understandings were'} revised outside your thoughts: ${replaced}.${withdrawn.length ? ` Memories resting on the old ${one ? 'version' : 'versions'} have left everyday recall: ${list(withdrawn)}.` : ''}${cites.length ? ` What is under way cites ${one ? 'it' : 'them'}: ${list(cites)}; check whether it still holds.` : ''}`, payload: { revisions: held.map(({ memory }) => ({ memoryId: memory.id, supersedes: memory.supersedes ?? null })), withdrawn, cites } });
-      if (revision) for (const { memory } of held) this.db.prepare('INSERT INTO sources VALUES (?,?)').run(revision.id, memory.id);
-    });
-  }
-  private ownMessage(source: string): boolean {
-    const event = this.event(source); if (!event) return false;
-    return event.source?.own === true || event.payload.origin === 'self';
-  }
-  /** Whether the sources, or the memories they cite in turn, reach something it did not produce itself (ADR-0012): recalling its own judgment is not new evidence. Only memories pass on what they cite; a wake event leads to its plan, which cites whatever was in view when it was set. */
-  private restsOnOthers(sources: string[]): boolean {
-    const reached = this.db.prepare("WITH RECURSIVE reach(id) AS (SELECT value FROM json_each(?) UNION SELECT source_id FROM sources JOIN reach ON owner_id=reach.id WHERE owner_id LIKE 'm:%') SELECT id FROM reach").all(json(sources)).map(row => String(row.id));
-    return reached.some(source => { const event = this.event(source); return event !== undefined && event.payload.origin !== 'self' && !programEvents.has(event.kind) && !this.ownMessage(source); });
-  }
-  /** Development that applies in any of the given scopes, oldest first. */
-  development(scopes: string[]): Memory[] {
-    if (!scopes.length) return [];
-    return this.db.prepare(`SELECT * FROM memories WHERE active=1 AND scope IN (${scopes.map(() => '?').join(',')}) ORDER BY created_at,rowid`).all(...scopes).map(row => this.memoryRow(row));
-  }
-  /** Development that no longer holds leaves everyday use; its history remains. */
-  retireMemory(memoryId: string): Memory {
-    const memory = this.memory(memoryId);
-    if (!memory?.active || !isDevelopment(memory.kind)) throw new Error('Only a current habit, practice, or impression can be retired.');
-    this.transaction(() => { this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(memoryId); this.log('memory_retired', { id: memoryId, kind: memory.kind, scope: memory.scope }); });
-    return { ...memory, active: false };
-  }
-  /**
-   * Once, split habits, practices, and impressions kept as one numbered list into an entry for each item (ADR-0025, ADR-0026). Nothing is reworded:
-   * an item becomes an entry with the list's scope, importance, and time, resting on the list and so on its evidence, and the
-   * list leaves use as a replaced version does. A long entry that is not plainly such a list is left for the digital life to split.
-   */
-  splitDevelopment(entryChars: number): number {
-    return this.transaction(() => {
-      if (this.setting('developmentSplit', false)) return 0;
-      const insert = this.db.prepare('INSERT INTO memories(id,kind,title,content,importance,subjects,conversations_json,fictional,supersedes,active,created_at,scope) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)');
-      let split = 0;
-      for (const row of this.db.prepare("SELECT * FROM memories WHERE active=1 AND kind IN ('habit','practice','impression') ORDER BY created_at,rowid").all()) {
-        const items = listItems(String(row.content));
-        if (characters(String(row.content)) <= entryChars || !items) continue;
-        const ids = items.map(item => {
-          const entryId = id('m');
-          insert.run(entryId, row.kind!, entryTitle(item), item, row.importance!, row.subjects!, row.conversations_json!, row.fictional!, row.id!, row.created_at!, row.scope!);
-          this.db.prepare('INSERT INTO sources VALUES (?,?)').run(entryId, String(row.id));
-          return entryId;
-        });
-        this.db.prepare('UPDATE memories SET active=0 WHERE id=?').run(String(row.id));
-        this.log('development_split', { id: row.id, kind: row.kind, scope: row.scope, entries: ids.length });
-        // Each is a memory written, which recall embeds when it hears of it.
-        for (const entryId of ids) this.log('memory_written', { id: entryId, kind: row.kind, supersedes: row.id, scope: row.scope });
-        split++;
-      }
-      this.setSetting('developmentSplit', true);
-      return split;
-    });
-  }
-  search(query: string, limit = 8, subjects: string[] = [], historical = false): Memory[] {
-    const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])].slice(0, 30);
-    const candidates = new Map<string, Record<string, any>>();
-    const active = historical ? '' : ' AND active=1';
-    for (const row of this.db.prepare(`SELECT * FROM memories WHERE 1=1${active} ORDER BY importance DESC,created_at DESC LIMIT 200`).all()) candidates.set(String(row.id), row);
-    for (const term of terms) {
-      for (const row of this.db.prepare(`SELECT * FROM memories WHERE (instr(lower(title),?)>0 OR instr(lower(content),?)>0)${active} LIMIT 100`).all(term, term)) candidates.set(String(row.id), row);
-      for (const row of this.db.prepare(`SELECT * FROM memories WHERE EXISTS (SELECT 1 FROM json_each(subjects) WHERE instr(lower(value),?)>0)${active} LIMIT 100`).all(term)) candidates.set(String(row.id), row);
-      if (term.length >= 3) for (const row of this.db.prepare(`SELECT m.* FROM memories m JOIN memories_fts f ON f.id=m.id WHERE memories_fts MATCH ?${active} LIMIT 100`).all(`"${term.replaceAll('"', '""')}"`)) candidates.set(String(row.id), row);
-    }
-    for (const subject of subjects) for (const row of this.db.prepare(`SELECT * FROM memories WHERE EXISTS (SELECT 1 FROM json_each(subjects) WHERE value=?)${active}`).all(subject)) candidates.set(String(row.id), row);
-    const now = Date.now();
-    return [...candidates.values()].map(row => {
-      const memory = this.memoryRow(row);
-      const text = `${memory.title} ${memory.content}`.toLowerCase();
-      const matches = terms.filter(term => text.includes(term) || memory.subjects.some(subject => subject.toLowerCase().includes(term))).length;
-      const person = memory.subjects.some(x => subjects.includes(x)) ? 8 : 0;
-      const recency = Math.exp(-(now - memory.createdAt) / (30 * 86_400_000));
-      return { memory, score: matches * 5 + person + memory.importance / 3 + recency, relevant: !query.trim() || matches > 0 || person > 0 };
-    }).filter(x => x.relevant).sort((a, b) => b.score - a.score).slice(0, limit).map(x => x.memory);
-  }
-  /**
-   * Keep how often each memory comes to mind: by itself in a thought, or found by a deliberate search. The trace says when and how
-   * alike it was, by ID alone, so nothing a forgotten memory said stays in it; the counts go with the memory.
-   */
-  noteRecalled(how: 'spontaneous' | 'deliberate', memories: { id: string; similarity?: number }[], detail: { runId?: string; reviewing?: boolean } = {}) {
-    if (!memories.length) return;
-    const now = Date.now();
-    const count = this.db.prepare(`INSERT INTO memory_recalls(memory_id,${how},last_at) SELECT id,1,? FROM memories WHERE id=? ON CONFLICT(memory_id) DO UPDATE SET ${how}=${how}+1,last_at=excluded.last_at`);
-    const write = () => {
-      for (const memory of memories) count.run(now, memory.id);
-      this.log('memory_recalled', { how, ...detail, memories: memories.map(({ id, similarity }) => ({ id, ...(similarity === undefined ? {} : { similarity: Math.round(similarity * 1000) / 1000 }) })) });
-    };
-    if (this.db.isTransaction) write(); else this.transaction(write);
-  }
-  /** How often a memory has come to mind, and when it last did. */
-  recalls(memoryId: string): { spontaneous: number; deliberate: number; lastAt: number } | undefined {
-    const row = this.db.prepare('SELECT * FROM memory_recalls WHERE memory_id=?').get(memoryId);
-    return row ? { spontaneous: Number(row.spontaneous), deliberate: Number(row.deliberate), lastAt: Number(row.last_at) } : undefined;
-  }
-  recallableIds(): Set<string> { return new Set(this.db.prepare(`SELECT id FROM memories WHERE ${recallable}`).all().map(row => String(row.id))); }
-  /** Memories a deliberate search may find: current ones of every kind, and with historical their earlier versions too. */
-  searchableIds(historical: boolean): Set<string> { return new Set(this.db.prepare(`SELECT id FROM memories${historical ? '' : ' WHERE active=1'}`).all().map(row => String(row.id))); }
-  /** Vectors from another embedding model cannot be compared with this one's. */
-  dropOtherVectors(model: string) { this.db.prepare('DELETE FROM memory_vectors WHERE model!=?').run(model); }
-  /** Vectors of each memory's lines for one embedding model, in line order. */
-  memoryVectors(model: string): { memoryId: string; line: string; vector: Float32Array }[] {
-    return this.db.prepare('SELECT * FROM memory_vectors WHERE model=? ORDER BY memory_id,chunk').all(model)
-      .map(row => ({ memoryId: String(row.memory_id), line: String(row.line), vector: new Float32Array(Uint8Array.from(row.vector as Uint8Array).buffer) }));
-  }
-  /** Memories with no vectors for this model yet, oldest first. Every kind and version is embedded, since a deliberate search can reach them all. */
-  unindexedMemories(model: string, limit: number): Memory[] {
-    return this.db.prepare(`SELECT * FROM memories WHERE NOT EXISTS (SELECT 1 FROM memory_vectors v WHERE v.memory_id=memories.id AND v.model=?) ORDER BY created_at,rowid LIMIT ?`).all(model, limit).map(row => this.memoryRow(row));
-  }
-  /** Replace a memory's vectors; a memory deleted meanwhile keeps none. */
-  saveMemoryVectors(memoryId: string, model: string, lines: { line: string; vector: Float32Array }[]): boolean {
-    return this.transaction(() => {
-      if (!this.db.prepare('SELECT 1 FROM memories WHERE id=?').get(memoryId)) return false;
-      this.db.prepare('DELETE FROM memory_vectors WHERE memory_id=?').run(memoryId);
-      const insert = this.db.prepare('INSERT INTO memory_vectors VALUES (?,?,?,?,?)');
-      lines.forEach(({ line, vector }, chunk) => insert.run(memoryId, chunk, model, line, new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength)));
-      return true;
-    });
-  }
-  /** What forgetting a record takes with it: the evidence it rests on, every memory resting on any of that, and what was set with any of it in view.
-   * Memories and events carry evidence. A plan, pursuit, or the activity only cites what its thought had in view (ADR-0017), so one is taken when something forgotten was in its view, with its own wake event, but nothing is reached through the rest of what it had in view. */
-  forgetPlan(root: string): string[] {
-    if (!this.memory(root) && !this.event(root)) throw new Error('Record does not exist.');
-    const selected = new Set<string>([root]);
-    const sourcesOf = this.db.prepare('SELECT source_id FROM sources WHERE owner_id=?'); const ownersOf = this.db.prepare('SELECT owner_id FROM sources WHERE source_id=?');
-    // Explicit forgetting includes original evidence, preventing re-extraction from it. A wake event leads to its plan and stops there.
-    const ancestors = [root];
-    while (ancestors.length) {
-      const owner = ancestors.pop()!; if (!carriesEvidence(owner)) continue;
-      for (const row of sourcesOf.all(owner)) { const source = String(row.source_id); if (!selected.has(source)) { selected.add(source); ancestors.push(source); } }
-    }
-    const resting = (from: string[]) => {
-      const dependents = [...from];
-      while (dependents.length) for (const row of ownersOf.all(dependents.pop()!)) {
-        const child = String(row.owner_id);
-        if (carriesEvidence(child) && !selected.has(child)) { selected.add(child); dependents.push(child); }
-      }
-    };
-    resting([...selected]);
-    const inView = [...new Set([...selected].flatMap(item => ownersOf.all(item).map(row => String(row.owner_id))))].filter(owner => !selected.has(owner));
-    for (const owner of inView) selected.add(owner);
-    resting(inView);
-    return [...selected];
-  }
-  forget(root: string): string[] {
-    const selected = this.forgetPlan(root);
-    this.transaction(() => {
-      for (const selectedId of selected) {
-        const event = this.event(selectedId);
-        if (event) this.db.prepare('INSERT OR IGNORE INTO tombstones VALUES (?)').run(event.key);
-        this.db.prepare('DELETE FROM sources WHERE owner_id=? OR source_id=?').run(selectedId, selectedId);
-        this.db.prepare('DELETE FROM memories WHERE id=?').run(selectedId);
-        this.db.prepare('DELETE FROM events WHERE id=?').run(selectedId);
-        this.db.prepare('DELETE FROM wakes WHERE id=?').run(selectedId);
-        this.db.prepare('DELETE FROM pursuits WHERE id=?').run(selectedId);
-        if (selectedId === 'state:activity') this.setSetting('activity', '');
-      }
-      // Action results can contain the original message text; retain only outcome metadata.
-      const chosen = new Set(selected); const citing: string[] = [];
-      for (const row of this.db.prepare('SELECT id,source_ids FROM actions').iterate()) if (parse<string[]>(row.source_ids).some(x => chosen.has(x))) citing.push(String(row.id));
-      for (const actionId of citing) this.db.prepare("UPDATE actions SET args='{}',result=?,source_ids='[]' WHERE id=?").run(json({ redacted: true }), actionId);
-      this.db.exec('DELETE FROM working_context; DELETE FROM context_records;');
-      this.bumpGeneration(); this.log('memory_forgotten', { ids: selected });
-    });
-    return selected;
-  }
+
   retain(days: number, now = Date.now()): number {
     const before = now - days * 86_400_000;
     this.db.prepare('DELETE FROM working_context WHERE updated_at<?').run(before);
     this.db.prepare("DELETE FROM context_records WHERE at<? AND id NOT IN (SELECT j.value FROM working_context,json_each(json_extract(data,'$.messageIds')) j)").run(before);
-    // A plan or pursuit that ended before the period leaves with what it had in view, so only memories and what is still under way keep a raw event (ADR-0006).
     this.transaction(() => {
       const ended = "SELECT id FROM wakes WHERE status IN ('done','cancelled') AND due_at<?1 UNION ALL SELECT id FROM pursuits WHERE status!='active' AND updated_at<?1";
       this.db.prepare(`DELETE FROM sources WHERE owner_id IN (${ended}) OR source_id IN (${ended})`).run(before);
       this.db.prepare("DELETE FROM wakes WHERE status IN ('done','cancelled') AND due_at<?").run(before);
       this.db.prepare("DELETE FROM pursuits WHERE status!='active' AND updated_at<?").run(before);
     });
-    // The diagnostic trace and the per-call ledger are raw records too; the daily budget reads only today's calls.
     this.db.prepare('DELETE FROM trace WHERE at<?').run(before); this.db.prepare('DELETE FROM calls WHERE at<?').run(before);
-    // What an unresolved action cites stays (ADR-0008). Such actions are few, so their sources are read once here;
-    // asking per event scanned every action row, with its whole source list, for each expired event.
     const unresolved = this.db.prepare("SELECT rowid FROM actions WHERE status IN ('pending','unknown')").all();
     const guarded = new Set(unresolved.flatMap(row => parse<unknown[]>(this.db.prepare('SELECT source_ids FROM actions WHERE rowid=?').get(Number(row.rowid))!.source_ids)).filter(source => typeof source === 'string'));
     return Number(this.db.prepare("DELETE FROM events WHERE status='processed' AND at<? AND NOT EXISTS (SELECT 1 FROM sources WHERE source_id=events.id) AND id NOT IN (SELECT value FROM json_each(?))").run(before, json([...guarded])).changes);
   }
+
   schedule(title: string, kind: Wake['kind'], dueAt: number, sources: string[] = [], rest = false): Wake {
     if (!Number.isFinite(dueAt)) throw new Error('Invalid wake time.');
     if (this.wakes().length >= 100) throw new Error('The 100 unfinished activity limit has been reached; organize existing commitments and plans first.');
-    const wakeId = id('w');
+    const wakeId = makeId('w');
     this.transaction(() => {
       this.db.prepare('INSERT INTO wakes(id,title,kind,due_at,rest) VALUES (?,?,?,?,?)').run(wakeId, title, kind, dueAt, rest ? 1 : 0);
       for (const source of sources) this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(wakeId, source);
@@ -624,18 +275,14 @@ export class Store {
   }
   wakes(): Wake[] { return this.db.prepare("SELECT * FROM wakes WHERE status IN ('pending','queued') ORDER BY due_at").all().map(row => ({ id: String(row.id), title: String(row.title), kind: row.kind as Wake['kind'], dueAt: Number(row.due_at), status: row.status as Wake['status'], ...(row.rest ? { rest: true } : {}) })); }
   finishWake(wakeId: string, status: 'done' | 'cancelled') { if (!this.db.prepare('UPDATE wakes SET status=? WHERE id=?').run(status, wakeId).changes) throw new Error('Activity does not exist.'); }
-  /** Life plans that have come and gone, latest first, so a life wake sees how its days have actually gone. */
   pastLifePlans(limit: number): Wake[] { return this.db.prepare("SELECT * FROM wakes WHERE kind='life' AND status IN ('done','cancelled') ORDER BY due_at DESC LIMIT ?").all(limit).map(row => ({ id: String(row.id), title: String(row.title), kind: 'life', dueAt: Number(row.due_at), status: row.status as Wake['status'] })); }
   private pursuitRow(row: Record<string, any>): Pursuit { return { id: row.id, title: row.title, progress: row.progress, fictional: Boolean(row.fictional), status: row.status, startedAt: row.started_at, updatedAt: row.updated_at }; }
-  /** Pursuits still under way, most recently advanced first. */
   pursuits(): Pursuit[] { return this.db.prepare("SELECT * FROM pursuits WHERE status='active' ORDER BY updated_at DESC,rowid DESC").all().map(row => this.pursuitRow(row)); }
-  /** Start a pursuit, or record where an active one stands now. */
   updatePursuit(input: { id?: string; title: string; progress: string; fictional: boolean }, sources: string[], allowFiction: boolean): Pursuit {
     if (!input.title.trim() || input.title.length > 200 || !input.progress.trim() || input.progress.length > 1000) throw new Error('A pursuit needs a title of at most 200 characters and progress of at most 1000.');
     return this.transaction(() => {
       const previous = input.id ? this.db.prepare("SELECT * FROM pursuits WHERE id=? AND status='active'").get(input.id) : undefined;
       if (input.id && !previous) throw new Error('No active pursuit has this ID.');
-      // As with memories, what began as fiction stays fiction.
       const fictional = input.fictional || Boolean(previous?.fictional);
       if (fictional && !allowFiction) throw new Error('Fictional daily life is disabled; fictional pursuits cannot be kept.');
       const now = Date.now();
@@ -643,7 +290,7 @@ export class Store {
       if (pursuitId) this.db.prepare('UPDATE pursuits SET title=?,progress=?,fictional=?,updated_at=? WHERE id=?').run(input.title, input.progress, fictional ? 1 : 0, now, pursuitId);
       else {
         if (this.pursuits().length >= 8) throw new Error('Eight pursuits are already under way; finish or drop one first.');
-        pursuitId = id('p');
+        pursuitId = makeId('p');
         this.db.prepare('INSERT INTO pursuits VALUES (?,?,?,?,?,?,?)').run(pursuitId, input.title, input.progress, fictional ? 1 : 0, 'active', now, now);
       }
       for (const source of sources) this.db.prepare('INSERT OR IGNORE INTO sources VALUES (?,?)').run(pursuitId, source);
@@ -665,11 +312,8 @@ export class Store {
       }
     });
   }
-  /** Whether the digital life rests now: until a wake it marked as rest comes due, and only while life mode is on (ADR-0015, ADR-0016). */
   resting(now = Date.now()): boolean { return this.settings().lifeEnabled && this.db.prepare("SELECT 1 FROM wakes WHERE rest=1 AND status='pending' AND due_at>? LIMIT 1").get(now) !== undefined; }
-  /** Group chat a rest is holding back, in order. */
-  restHeld(): EnvironmentEvent[] { return this.db.prepare(`SELECT * FROM events WHERE status='pending' AND ${restHolds} ORDER BY at,rowid`).all().map(row => this.eventRow(row)); }
-  /** Record pending events as perceived without an observation of their own. They do not count toward memory review, which still finds them in the chat record. */
+  restHeld(): EnvironmentEvent[] { return this.db.prepare(`SELECT * FROM events WHERE status='pending' AND ${restHoldsSql} ORDER BY at,rowid`).all().map(readEventRow); }
   setAside(eventIds: string[]) {
     const write = () => {
       for (const eventId of eventIds) this.db.prepare("UPDATE events SET status='processed',batch_id=NULL WHERE id=? AND status='pending'").run(eventId);
@@ -677,197 +321,73 @@ export class Store {
     };
     if (this.db.isTransaction) write(); else this.transaction(write);
   }
-  /** When someone other than the digital life last did something that can start a thought. */
   lastHeard(): number | undefined {
-    // Events are stored in the order they were received, so the newest match is the latest one; a maximum would read every event.
     const row = this.db.prepare("SELECT coalesce(received_at,at) AS at FROM events WHERE (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND json_extract(source,'$.own')=0 AND NOT ambient_flag ORDER BY rowid DESC LIMIT 1").get();
     return row ? Number(row.at) : undefined;
   }
-  /** Life wakes since the given time, scheduled or offered as free time. */
   lifeWakesSince(since: number): { at: number; freeTime: boolean }[] {
     return this.db.prepare("SELECT at, json_extract(payload,'$.freeTime') AS free FROM events WHERE kind='wake' AND json_extract(payload,'$.wakeKind')='life' AND at>=? ORDER BY at").all(since).map(row => ({ at: Number(row.at), freeTime: Boolean(row.free) }));
   }
-  /** Where review stopped reading a conversation: the time of its first unread item. Review looks back at most a day. */
   reviewMark(conversation: string, now = Date.now()): number { return Math.max(this.setting<Record<string, number>>('reviewMarks')[conversation] ?? 0, now - 86_400_000); }
   markReviewed(conversation: string, through: number) {
     const marks = this.setting<Record<string, number>>('reviewMarks');
     if (through > (marks[conversation] ?? 0)) this.setSetting('reviewMarks', { ...marks, [conversation]: through });
   }
-  /**
-   * Experiences to go back over, which no review has yet: those from before an experience told one thing, which tell more than
-   * one may now, the most often recalled first and then the oldest (ADR-0027, ADR-0028). Nothing written since can be one, so
-   * going back ends when these are done. One written within the last day is left to settle.
-   */
-  revisitDue(limit: number, experienceChars: number, now = Date.now()): Revisit[] {
-    const rows = this.db.prepare(`SELECT m.*, coalesce(r.spontaneous+r.deliberate,0) AS recalls FROM memories m LEFT JOIN memory_recalls r ON r.memory_id=m.id
-      WHERE m.active=1 AND m.kind='experience' AND m.created_at<? AND NOT EXISTS (SELECT 1 FROM memory_revisits v WHERE v.memory_id=m.id) AND length(m.content)>?
-      ORDER BY recalls DESC, m.created_at, m.rowid LIMIT ?`).all(now - 86_400_000, experienceChars, limit);
-    const spans = this.db.prepare('SELECT e.conversation_ref AS conversation, min(e.at) AS first, max(e.at) AS last, count(*) AS events FROM sources s JOIN events e ON e.id=s.source_id WHERE s.owner_id=? AND e.conversation_ref IS NOT NULL GROUP BY 1 ORDER BY first');
-    return rows.map(row => ({ memory: this.memoryRow(row), spans: spans.all(String(row.id)).map(span => ({ conversation: String(span.conversation), from: Number(span.first), to: Number(span.last), events: Number(span.events) })) }));
-  }
-  /** What the digital life noted in conversation since a time and still holds, for a review to check against the record (ADR-0028). Diary and fiction are its own. */
-  notedSince(at: number): Memory[] {
-    const ids = this.db.prepare("SELECT json_extract(data,'$.id') AS id FROM trace WHERE kind='remembered' AND at>? AND json_extract(data,'$.where')='conversation' ORDER BY id").all(at).map(row => String(row.id));
-    return ids.map(memoryId => this.memory(memoryId)).filter((memory): memory is Memory => memory !== undefined && memory.active && !['note', 'fiction'].includes(memory.kind));
-  }
-  /** Whether any experience from before the bound is still to be gone back over, however lately written. */
-  revisitPending(experienceChars: number): boolean {
-    return this.db.prepare("SELECT 1 FROM memories m WHERE m.active=1 AND m.kind='experience' AND length(m.content)>? AND NOT EXISTS (SELECT 1 FROM memory_revisits v WHERE v.memory_id=m.id) LIMIT 1").get(experienceChars) !== undefined;
-  }
-  /** These memories have been gone back over, or were written while doing so. */
-  markRevisited(memoryIds: string[], now = Date.now()) {
-    const mark = this.db.prepare('INSERT OR IGNORE INTO memory_revisits SELECT id, ? FROM memories WHERE id=?');
-    for (const memoryId of memoryIds) mark.run(now, memoryId);
-  }
-  /** Conversations with messages from others that review has not read yet. */
-  reviewBacklog(now = Date.now()): { conversation: string; messages: number; since: number }[] {
-    return this.db.prepare(`WITH marks AS (SELECT key AS conversation, value AS at FROM json_each((SELECT value FROM settings WHERE key='reviewMarks')))
-      SELECT c.conversation, count(*) AS messages, min(c.at) AS since FROM (SELECT conversation_ref AS conversation, at FROM events WHERE kind='message' AND conversation_ref IS NOT NULL AND json_extract(source,'$.own')=0) c
-      LEFT JOIN marks m USING(conversation) WHERE c.at>=max(coalesce(m.at,0),?) GROUP BY c.conversation ORDER BY messages DESC`).all(now - 86_400_000)
-      .map(row => ({ conversation: String(row.conversation), messages: Number(row.messages), since: Number(row.since) }));
-  }
-  /** People with an impression who spoke in these conversations since the given times, and no later than until where one is given, latest first. */
-  impressionsIn(chats: { conversation: string; since: number; until?: number }[], limit: number): string[] {
-    const last = new Map<string, number>();
-    for (const chat of chats) {
-      const filter = this.recordFilter(chat.conversation);
-      for (const row of this.db.prepare(`SELECT actor_ref AS person, max(at) AS at FROM events WHERE ${filter.events} AND kind='message' AND at>=? AND at<=? AND json_extract(source,'$.own')=0 AND EXISTS (SELECT 1 FROM memories WHERE active=1 AND kind='impression' AND scope='person:'||events.actor_ref) GROUP BY person`).all(filter.target, chat.since, chat.until ?? Number.MAX_SAFE_INTEGER)) {
-        const person = String(row.person);
-        last.set(person, Math.max(last.get(person) ?? 0, Number(row.at)));
-      }
-    }
-    return [...last].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([person]) => person);
-  }
-  private recordFilter(conversation: string): { target: string | number; events: string; actions: string } {
-    requireConversationRef(conversation);
-    return { target: conversation, events: `conversation_ref=? AND ${nonEphemeralEventSql} AND (kind='message' OR kind LIKE 'notice:%' OR kind LIKE 'request:%') AND coalesce(json_extract(source,'$.attention'),'')!='transport'`, actions: "status='success' AND conversation=?" };
-  }
 
-  /** A page of one conversation from a time on: messages and notices, with this account's completed actions there. Events sharing the last time stay together. */
-  conversationRecord(conversation: string, from: number, limit: number, until = Number.MAX_SAFE_INTEGER): { events: EnvironmentEvent[]; actions: Action[]; complete: boolean } {
-    const filter = this.recordFilter(conversation);
-    const edge = this.db.prepare(`SELECT at FROM events WHERE ${filter.events} AND at>=? AND at<=? ORDER BY at,rowid LIMIT 1 OFFSET ?`).get(filter.target, from, until, limit - 1);
-    const end = edge ? Number(edge.at) : until;
-    return {
-      events: this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND at>=? AND at<=? ORDER BY at,rowid`).all(filter.target, from, end).map(row => this.eventRow(row)),
-      actions: this.db.prepare(`SELECT * FROM actions WHERE ${filter.actions} AND created_at>=? AND created_at<=? ORDER BY created_at`).all(filter.target, from, end).map(row => this.action(row)),
-      complete: !edge,
-    };
-  }
-  /** The latest items of one conversation containing a phrase or written by one person. */
-  conversationMatches(conversation: string, limit: number, match: { query?: string; person?: string }): { events: EnvironmentEvent[]; actions: Action[] } {
-    const filter = this.recordFilter(conversation);
-    const query = match.query?.toLowerCase();
-    if (match.person && match.person !== 'self' && !parsePersonRef(match.person)) throw new Error('Use self or a canonical person reference.');
-    const identity = requireConversationRef(conversation);
-    const mine = match.person === 'self' || identity && match.person === personRef(identity.platform, identity.accountId);
-    const events = mine ? [] : this.db.prepare(`SELECT * FROM events WHERE ${filter.events}${query ? ' AND instr(lower(text),?)>0' : ''}${match.person ? ' AND actor_ref=?' : ''} ORDER BY at DESC,rowid DESC LIMIT ?`).all(filter.target, ...(query ? [query] : []), ...(match.person ? [match.person] : []), limit).map(row => this.eventRow(row));
-    const actions = match.person && !mine ? [] : this.db.prepare(`SELECT * FROM actions WHERE ${filter.actions}${query ? ' AND instr(lower(args),?)>0' : ''} ORDER BY created_at DESC LIMIT ?`).all(filter.target, ...(query ? [query] : []), limit).map(row => this.action(row));
-    return { events: events.reverse(), actions: actions.reverse() };
-  }
-  /** The message a reply or reaction points at, when it is still retained. */
-  messageById(conversation: string, messageId: string | number): EnvironmentEvent | undefined {
-    const filter = this.recordFilter(conversation);
-    const textId = String(messageId);
-    const numericId = Number(messageId);
-    const row = Number.isFinite(numericId)
-      ? this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND (json_extract(source,'$.messageId')=? OR json_extract(payload,'$.message_id')=?) ORDER BY at DESC LIMIT 1`).get(filter.target, textId, numericId)
-      : this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND kind='message' AND json_extract(source,'$.messageId')=? ORDER BY at DESC LIMIT 1`).get(filter.target, textId);
-    return row ? this.eventRow(row) : undefined;
-  }
-  sentMessage(messageId: string | number, account: PlatformIdentity): boolean {
-    const numericId = Number(messageId);
-    const prefix = `${account.platform}:${encodeURIComponent(account.accountId)}:%`;
-    return Number.isFinite(numericId)
-      ? !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND (json_extract(result,'$.message_id')=? OR json_extract(result,'$.message_id')=?) AND conversation LIKE ? LIMIT 1").get(numericId, String(messageId), prefix)
-      : !!this.db.prepare("SELECT 1 FROM actions WHERE status='success' AND json_extract(result,'$.message_id')=? AND conversation LIKE ? LIMIT 1").get(String(messageId), prefix);
-  }
-  latestSender(person: string): { card?: string; nickname?: string } | undefined {
-    const row = this.db.prepare("SELECT json_extract(source,'$.actorName') AS name, json_extract(payload,'$.sender') AS sender FROM events WHERE actor_ref=? AND (json_extract(source,'$.actorName') IS NOT NULL OR json_extract(payload,'$.sender') IS NOT NULL) ORDER BY at DESC LIMIT 1").get(person);
-    return row ? row.name ? { nickname: String(row.name) } : parse(row.sender) : undefined;
-  }
-  latestActorName(person: string): string | undefined {
-    const sender = this.latestSender(person);
-    return sender?.card || sender?.nickname || undefined;
-  }
-  /** Known human-readable name for a conversation, preferring normalized source.conversationName over legacy payload.group_name. */
-  conversationName(conversation: string): string | undefined {
-    const row = this.db.prepare("SELECT coalesce(json_extract(source,'$.conversationName'), json_extract(payload,'$.group_name')) AS name FROM events WHERE conversation_ref=? AND (json_extract(source,'$.conversationName') IS NOT NULL OR json_extract(payload,'$.group_name') IS NOT NULL) ORDER BY at DESC LIMIT 1").get(conversation);
-    return row?.name ? String(row.name) : undefined;
-  }
-  groupName(conversation: string): string | undefined { return this.conversationName(conversation); }
-  /** Latest message timestamp and known conversation name, using the conversation index. */
-  latestConversationActivity(conversation: string): { at: number; name?: string } | undefined {
-    const row = this.db.prepare("SELECT at, coalesce(json_extract(source,'$.conversationName'), json_extract(payload,'$.group_name')) AS name FROM events WHERE conversation_ref=? AND kind='message' ORDER BY at DESC LIMIT 1").get(conversation);
-    if (!row) return;
-    const name = row.name ? String(row.name) : this.conversationName(conversation);
-    return { at: Number(row.at), ...(name ? { name } : {}) };
-  }
-  /** Recent active conversations for one platform account, filtered by conversation type. */
-  activeConversations(account: PlatformIdentity, types: readonly ConversationType[], limit = 10): string[] {
-    if (!types.length || limit <= 0) return [];
-    const prefix = `${account.platform}:${encodeURIComponent(account.accountId)}:%`;
-    return this.db.prepare(`SELECT conversation_ref FROM events WHERE kind='message' AND conversation_ref LIKE ? AND json_extract(source,'$.conversationType') IN (${types.map(() => '?').join(',')}) GROUP BY conversation_ref ORDER BY max(at) DESC LIMIT ?`).all(prefix, ...types, limit).map(row => String(row.conversation_ref));
-  }
-  action(row: Record<string, any>): Action { return { id: row.id, key: row.action_key, fingerprint: row.fingerprint, kind: row.kind, args: parse(row.args), sources: parse(row.source_ids), status: row.status, result: row.result ? parse(row.result) : null, createdAt: row.created_at, ...(row.conversation ? { conversation: row.conversation } : {}) }; }
-  actions(limit = 20): Action[] { return this.db.prepare('SELECT * FROM actions ORDER BY created_at DESC LIMIT ?').all(limit).map(row => this.action(row)); }
-  actionById(actionId: string): Action | undefined { const row = this.db.prepare('SELECT * FROM actions WHERE id=?').get(actionId); return row ? this.action(row) : undefined; }
-  /** Processed non-own events that triggered a completed action, in chronological order. */
-  actionTriggers(actionId: string): EnvironmentEvent[] {
-    return this.db.prepare("SELECT e.* FROM action_triggers t JOIN events e ON e.id=t.event_id WHERE t.action_id=? AND e.status='processed' AND coalesce(json_extract(e.source,'$.own'),0)=0 ORDER BY e.at,e.rowid").all(actionId).map(row => this.eventRow(row));
-  }
-  /** Latest processed non-own chat events in one conversation up to a timestamp, for seeding historical turns after a context reset. */
-  recentConversationEvents(conversation: string, beforeAt: number, limit: number): EnvironmentEvent[] {
-    const filter = this.recordFilter(conversation);
-    return this.db.prepare(`SELECT * FROM events WHERE ${filter.events} AND status='processed' AND at<=? AND coalesce(json_extract(source,'$.own'),0)=0 ORDER BY at DESC,rowid DESC LIMIT ?`).all(filter.target, beforeAt, limit).reverse().map(row => this.eventRow(row));
-  }
-  /** One memory in everyday use, from before a time if given, chosen at random. */
-  randomMemory(kinds: MemoryKind[], before = Number.MAX_SAFE_INTEGER): Memory | undefined {
-    const row = this.db.prepare(`SELECT * FROM memories WHERE active=1 AND kind IN (${kinds.map(() => '?').join(',')}) AND created_at<? ORDER BY random() LIMIT 1`).get(...kinds, before);
-    return row ? this.memoryRow(row) : undefined;
-  }
-  lastMemoryAt(kind: MemoryKind): number | undefined { const row = this.db.prepare('SELECT max(created_at) AS at FROM memories WHERE kind=?').get(kind); return row?.at == null ? undefined : Number(row.at); }
-  lastSuccessfulAction(kind: string): Action | undefined { const row = this.db.prepare("SELECT * FROM actions WHERE kind=? AND status='success' ORDER BY created_at DESC LIMIT 1").get(kind); return row ? this.action(row) : undefined; }
-  /** Latest time each experience kind was recorded; read-only tool calls leave an experience but no action. */
-  lastExperienced(kinds: string[]): Record<string, number> {
-    if (!kinds.length) return {};
-    const rows = this.db.prepare(`SELECT kind, max(at) AS at FROM events WHERE kind IN (${kinds.map(() => '?').join(',')}) GROUP BY kind`).all(...kinds);
-    return Object.fromEntries(rows.map(row => [String(row.kind), Number(row.at)]));
-  }
-  beginAction(key: string, kind: string, args: Record<string, unknown>, sources: string[], triggers: string[] = [], hourlyLimit?: number | null, conversation?: string): { action: Action; fresh: boolean } {
-    if (conversation) requireConversationRef(conversation);
-    return this.transaction(() => {
-      const fingerprint = actionFingerprint(kind, args);
-      const existing = this.db.prepare('SELECT * FROM actions WHERE action_key=?').get(key);
-      if (existing) {
-        if (existing.fingerprint !== fingerprint) throw new Error('The same action key cannot be used for different actions.');
-        return { action: this.action(existing), fresh: false };
-      }
-      const unknown = this.db.prepare("SELECT * FROM actions WHERE fingerprint=? AND status IN ('pending','unknown') LIMIT 1").get(fingerprint);
-      if (unknown) return { action: this.action(unknown), fresh: false };
-      // Replaying the same observation after an abort must not repeat a completed action,
-      // even when the runtime assigns a fresh key. New events may produce the same text.
-      for (const trigger of triggers) {
-        const completed = this.db.prepare("SELECT a.* FROM actions a JOIN action_triggers t ON t.action_id=a.id WHERE a.fingerprint=? AND a.status='success' AND t.event_id=? LIMIT 1").get(fingerprint, trigger);
-        if (completed) return { action: this.action(completed), fresh: false };
-      }
-      if (hourlyLimit != null && this.hourlyActions() >= hourlyLimit) throw new Error('The external action rate limit has been reached.');
-      const actionId = id('a');
-      this.db.prepare('INSERT INTO actions(id,action_key,fingerprint,kind,args,source_ids,status,result,created_at,conversation) VALUES (?,?,?,?,?,?,?,?,?,?)').run(actionId, key, fingerprint, kind, json(args), json(sources), 'pending', null, Date.now(), conversation ?? null);
-      for (const trigger of triggers) this.db.prepare('INSERT OR IGNORE INTO action_triggers VALUES (?,?)').run(actionId, trigger);
-      const action = this.action(this.db.prepare('SELECT * FROM actions WHERE id=?').get(actionId)!);
-      this.notify({ kind: 'action', action }); return { action, fresh: true };
-    });
-  }
-  finishAction(actionId: string, status: Action['status'], result: unknown, conversation?: string) {
-    const existing = this.db.prepare('SELECT result FROM actions WHERE id=?').get(actionId);
-    const redacted = existing?.result && parse<{ redacted?: boolean }>(existing.result).redacted;
-    this.db.prepare('UPDATE actions SET status=?,result=?,conversation=coalesce(?,conversation) WHERE id=?').run(status, json(redacted ? { redacted: true } : result), conversation ?? null, actionId);
-    this.log('action_result', { id: actionId, status });
-    const action = this.actionById(actionId); if (action) this.notify({ kind: 'action', action });
-  }
-  hourlyActions(now = Date.now()) { return Number(this.db.prepare('SELECT count(*) AS n FROM actions WHERE created_at>?').get(now - 3_600_000)!.n); }
-  dailyCalls(now = Date.now()) { return Number(this.db.prepare("SELECT count(*) AS n FROM calls WHERE at>=?").get(Math.floor((now + 8 * 3_600_000) / 86_400_000) * 86_400_000 - 8 * 3_600_000)!.n); }
-  chargeCall(runId: string, limit: number | null) { return this.transaction(() => { if (limit !== null && this.dailyCalls() >= limit) throw new Error('The daily model call budget has been exhausted.'); const callId = id('call'); this.db.prepare('INSERT INTO calls VALUES (?,?,?)').run(callId, Date.now(), runId); return callId; }); }
+  // Memory domain delegates
+  memory(memoryId: string): Memory | undefined { return this.memories.memory(memoryId); }
+  inspectMemoryWrite(input: Partial<MemoryInput>, limits?: DevelopmentLimits) { return this.memories.inspectMemoryWrite(input, limits); }
+  writeMemory(input: MemoryInput, allowFiction: boolean, limits?: DevelopmentLimits, keepDependents = false): Memory { return this.memories.writeMemory(input, allowFiction, limits, keepDependents); }
+  activeMemories(memoryIds: string[]): Set<string> { return this.memories.activeMemories(memoryIds); }
+  revisionReach(memoryId: string): RevisionReach { return this.memories.revisionReach(memoryId); }
+  noticeRevisions(revisions: { memory: Memory; reach: RevisionReach }[]) { return this.memories.noticeRevisions(revisions); }
+  development(scopes: string[]): Memory[] { return this.memories.development(scopes); }
+  retireMemory(memoryId: string): Memory { return this.memories.retireMemory(memoryId); }
+  splitDevelopment(entryChars: number): number { return this.memories.splitDevelopment(entryChars); }
+  search(query: string, limit = 8, subjects: string[] = [], historical = false): Memory[] { return this.memories.search(query, limit, subjects, historical); }
+  noteRecalled(how: 'spontaneous' | 'deliberate', memories: { id: string; similarity?: number }[], detail: { runId?: string; reviewing?: boolean } = {}) { return this.memories.noteRecalled(how, memories, detail); }
+  recalls(memoryId: string) { return this.memories.recalls(memoryId); }
+  recallableIds() { return this.memories.recallableIds(); }
+  searchableIds(historical: boolean) { return this.memories.searchableIds(historical); }
+  dropOtherVectors(model: string) { return this.memories.dropOtherVectors(model); }
+  memoryVectors(model: string) { return this.memories.memoryVectors(model); }
+  unindexedMemories(model: string, limit: number) { return this.memories.unindexedMemories(model, limit); }
+  saveMemoryVectors(memoryId: string, model: string, lines: { line: string; vector: Float32Array }[]) { return this.memories.saveMemoryVectors(memoryId, model, lines); }
+  forgetPlan(root: string) { return this.memories.forgetPlan(root); }
+  forget(root: string) { return this.memories.forget(root); }
+  revisitDue(limit: number, experienceChars: number, now = Date.now()) { return this.memories.revisitDue(limit, experienceChars, now); }
+  notedSince(at: number) { return this.memories.notedSince(at); }
+  revisitPending(experienceChars: number) { return this.memories.revisitPending(experienceChars); }
+  markRevisited(memoryIds: string[], now = Date.now()) { return this.memories.markRevisited(memoryIds, now); }
+  randomMemory(kinds: MemoryKind[], before = Number.MAX_SAFE_INTEGER) { return this.memories.randomMemory(kinds, before); }
+  lastMemoryAt(kind: MemoryKind) { return this.memories.lastMemoryAt(kind); }
+
+  // Conversation, action ledger, and budget delegates
+  latestGroupMessage(conversation: string) { return this.conversations.latestGroupMessage(conversation); }
+  reviewBacklog(now = Date.now()) { return this.conversations.reviewBacklog(now); }
+  impressionsIn(chats: { conversation: string; since: number; until?: number }[], limit: number) { return this.conversations.impressionsIn(chats, limit); }
+  conversationRecord(conversation: string, from: number, limit: number, until = Number.MAX_SAFE_INTEGER) { return this.conversations.conversationRecord(conversation, from, limit, until); }
+  conversationMatches(conversation: string, limit: number, match: { query?: string; person?: string }) { return this.conversations.conversationMatches(conversation, limit, match); }
+  messageById(conversation: string, messageId: string | number) { return this.conversations.messageById(conversation, messageId); }
+  sentMessage(messageId: string | number, account: PlatformIdentity) { return this.conversations.sentMessage(messageId, account); }
+  latestSender(person: string) { return this.conversations.latestSender(person); }
+  latestActorName(person: string) { return this.conversations.latestActorName(person); }
+  conversationName(conversation: string) { return this.conversations.conversationName(conversation); }
+  groupName(conversation: string) { return this.conversations.conversationName(conversation); }
+  latestConversationActivity(conversation: string) { return this.conversations.latestConversationActivity(conversation); }
+  activeConversations(account: PlatformIdentity, types: readonly ConversationType[], limit = 10) { return this.conversations.activeConversations(account, types, limit); }
+  action(row: Record<string, any>): Action { return readActionRow(row); }
+  actions(limit = 20): Action[] { return this.conversations.actions(limit); }
+  actionById(actionId: string): Action | undefined { return this.conversations.actionById(actionId); }
+  actionTriggers(actionId: string) { return this.conversations.actionTriggers(actionId); }
+  recentConversationEvents(conversation: string, beforeAt: number, limit: number) { return this.conversations.recentConversationEvents(conversation, beforeAt, limit); }
+  lastSuccessfulAction(kind: string) { return this.conversations.lastSuccessfulAction(kind); }
+  lastExperienced(kinds: string[]) { return this.conversations.lastExperienced(kinds); }
+  beginAction(key: string, kind: string, args: Record<string, unknown>, sources: string[], triggers: string[] = [], hourlyLimit?: number | null, conversation?: string) { return this.conversations.beginAction(key, kind, args, sources, triggers, hourlyLimit, conversation); }
+  finishAction(actionId: string, status: Action['status'], result: unknown, conversation?: string) { return this.conversations.finishAction(actionId, status, result, conversation); }
+  hourlyActions(now = Date.now()) { return this.conversations.hourlyActions(now); }
+  dailyCalls(now = Date.now()) { return this.conversations.dailyCalls(now); }
+  chargeCall(runId: string, limit: number | null) { return this.conversations.chargeCall(runId, limit); }
+
   status() { return { ...this.settings(), pendingEvents: this.pending(), modelCallsToday: this.dailyCalls(), actionsThisHour: this.hourlyActions(), memories: this.db.prepare('SELECT count(*) AS n FROM memories').get()!.n, wakes: this.wakes(), pursuits: this.pursuits(), actions: this.actions() }; }
 }

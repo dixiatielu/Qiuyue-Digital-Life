@@ -283,3 +283,40 @@ test('with no daemon a management command answers from the life that exists and 
     try { assert.equal(store.settings().paused, true); assert.equal(store.settings().lifeEnabled, true); } finally { store.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('shared read-only store queries serve both Store and read-only LifeReader consistently', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { LifeReader } = await import('../src/webui/reader.js');
+  const { readConversationName, readDevelopmentMemories, readLatestActorName, readMemoryCounts, readMemoryDetail } = await import('../src/store/queries.js');
+  const dir = mkdtempSync(join(tmpdir(), 'qiuyue-ro-queries-'));
+  const dbPath = join(dir, 'life.sqlite');
+  const store = new Store(dbPath);
+  try {
+    const conv = 'telegram:900:group:-100777';
+    const msg = store.receive({
+      key: 'tg:ro:1', kind: 'message', at: Date.now(), text: 'Hi from shared query test',
+      source: { platform: 'telegram', accountId: '900', instance: 'tg_main', conversation: conv, conversationType: 'group', conversationName: 'Book Club', actor: 'telegram:user:42', actorName: 'Mina', messageId: '1', own: false, addressed: true, attention: 'normal' },
+      payload: {},
+    }, true)!;
+    const habit = store.writeMemory({ kind: 'habit', title: 'Book notes', content: 'Keep notes brief.', importance: 4, sources: [msg.id], scope: `conversation:${conv}` }, false);
+    const updated = store.writeMemory({ kind: 'habit', title: 'Book notes', content: 'Keep notes brief and clear.', importance: 5, sources: [msg.id], scope: `conversation:${conv}`, supersedes: habit.id }, false);
+
+    const ro = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      assert.equal(readConversationName(ro, conv), 'Book Club');
+      assert.equal(readLatestActorName(ro, 'telegram:user:42'), 'Mina');
+      assert.deepEqual(readMemoryCounts(ro), { habit: 1 });
+      const dev = readDevelopmentMemories(ro);
+      assert.equal(dev.length, 1);
+      assert.equal(dev[0]!.scopeName, 'Book Club');
+      const detail = readMemoryDetail(ro, updated.id)!;
+      assert.equal(detail.versions.length, 1);
+      assert.equal(detail.versions[0]!.id, habit.id);
+      assert.equal(detail.scopeName, 'Book Club');
+    } finally { ro.close(); }
+
+    const reader = new LifeReader(dbPath);
+    assert.equal(reader.development()[0]?.scopeName, 'Book Club');
+    assert.equal(reader.memory(updated.id)?.versions[0]?.id, habit.id);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});

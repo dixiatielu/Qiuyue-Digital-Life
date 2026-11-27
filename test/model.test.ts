@@ -156,3 +156,16 @@ test('catalog and custom models both use the configured file credential without 
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('model config, catalog resolution, and transport modules operate independently', async () => {
+  const { compatKeysForApi, filterCompatForApi, modelBudget, modelUse } = await import('../src/model-config.js');
+  const { resolveModelWithInfo } = await import('../src/model-catalog.js');
+  assert.ok(compatKeysForApi('openai-completions').includes('maxTokensField'));
+  assert.deepEqual(filterCompatForApi('openai-completions', { maxTokensField: 'max_tokens', bogus: true }), { maxTokensField: 'max_tokens' });
+  const cfg = config();
+  const use = modelUse(cfg, 'main');
+  assert.equal(use.thinkingSource, 'model');
+  const resolved = resolveModelWithInfo({ ...custom, baseModel: 'openai/gpt-4o' });
+  assert.equal(resolved.inheritedFrom, 'openai/gpt-4o');
+  assert.equal(modelBudget(resolved.model, 65536, 8192, 2048).budget, 65536 - 8192 - 2048);
+});

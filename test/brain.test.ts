@@ -707,3 +707,25 @@ test('pausing, resuming, and the life switch keep the working context; a change 
     await f.brain.run(f.store.claim(10)!);
   } finally { await runtime.stop(); f.store.close(); }
 });
+
+test('extracted brain observation and compaction helpers preserve deterministic formatting and folding', async () => {
+  const { formatQuiet, stableJson } = await import('../src/brain-observation.js');
+  const { foldThoughtMessages, setAsideSummary } = await import('../src/brain-compaction.js');
+  assert.equal(stableJson({ b: 1, a: [2, { d: 4, c: 3 }] }), stableJson({ a: [2, { c: 3, d: 4 }], b: 1 }));
+  assert.equal(formatQuiet(30_000), 'just active');
+  assert.equal(formatQuiet(18 * 60_000), 'quiet 18m');
+  assert.equal(formatQuiet(125 * 60_000), 'quiet 2h5m');
+  assert.equal(formatQuiet(72 * 3_600_000), 'quiet 3d');
+
+  const folded = foldThoughtMessages([
+    { role: 'user', content: 'hi', timestamp: 1 },
+    answer('internal draft only'),
+  ], { everything: true, noopCalls: new Set(), imageViewer: () => undefined });
+  assert.equal(folded.changed, true);
+  assert.equal(folded.counts.replies, 1);
+  assert.equal(folded.messages.length, 1);
+
+  const note = setAsideSummary([{ role: 'user', content: 'old', timestamp: 1_700_000_000_000 }], ['ctx:1'], 500, 'budget');
+  assert.match(note, /No summary was written for 1 older messages/);
+  assert.match(note, /budget/);
+});

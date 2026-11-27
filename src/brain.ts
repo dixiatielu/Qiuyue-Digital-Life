@@ -1,67 +1,31 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createModelBackend, initialThinkingLevel, modelBudget, modelRoute, modelUse, shouldMergeConsecutiveUsers, withToolLoader, type ModelOwner } from './model.js';
-import { createInitialSystemMessage, getCurrentTools, isContextOverflow, isRecoverableLength, normalizeContext, toToolDeclaration, type AssistantMessage, type ImageContent, type Message, type Model, type TextContent, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai';
+import { createInitialSystemMessage, getCurrentTools, toToolDeclaration, type AssistantMessage, type Model } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
 import type { Monitor } from './monitor.js';
-import type { EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
-import { errorText, eventChat, ambientEvent, ownEvent } from './domain.js';
+import type { EnvironmentEvent, Observation } from './domain.js';
+import { eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, digest } from './store.js';
-import { normalizeImageBlocks, prepareModelImage } from './image.js';
+import { normalizeImageBlocks } from './image.js';
 import { ensureCurrent, FIND_TOOLS, type ThoughtContext, type ToolSet } from './tools.js';
-import { compactionSplit, contextRecordId, estimatedContextTokens, estimateTokens, fitLines, foldImages, foldNoopCalls, foldReplies, foldToolResults, IMAGE_TOKENS, portableMessages, pruneToolResults, summaryEnvelope, SUMMARY_PREFIX, textTokens, TokenMeter, toModelMessages, type ContextCheckpoint, type TokenMeasurement } from './context.js';
-import { actionSummary, applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
-import { ChatRecord, observationText, recordTime } from './record.js';
-import { waitFor } from './async.js';
-import { memoriesInView, type SemanticRecall } from './recall.js';
-import type { OnlineActivity } from './plugins.js';
-import { parseConversationRef } from './identity.js';
+import { foldNoopCalls, foldReplies, portableMessages, TokenMeter, toModelMessages, type ContextCheckpoint } from './context.js';
+import { applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
+import type { SemanticRecall } from './recall.js';
+import {
+  buildObservationMessage,
+  buildRuntimeSnapshot,
+  buildSeedTurns,
+  runtimeMessage,
+  shownRuntimeSnapshot,
+  stableJson,
+} from './brain-observation.js';
+import { ContextCompactor, foldThoughtMessages, type ModelRequest } from './brain-compaction.js';
 
-/** Built-in online activities; plugins contribute their own activities through the host. */
-const onlineActivities: OnlineActivity[] = [
-  { activity: 'Write or reread your diary', tools: ['remember', 'recall'], memoryKind: 'note' },
-];
-/** The summarized text of a continuity summary, without its framing line and record references. */
-function summaryBody(message: AgentMessage) {
-  if (message.role !== 'user' || typeof message.content !== 'string' || !message.content.startsWith(SUMMARY_PREFIX)) return;
-  const body = message.content.slice(message.content.indexOf('\n') + 1);
-  const end = body.lastIndexOf('\nOriginal record IDs: ');
-  return end < 0 ? body : body.slice(0, end);
-}
-/** Local date, weekday, and time; models often misjudge the weekday when left to work it out from an ISO timestamp. */
-function localParts(at: number) {
-  return Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at).map(part => [part.type, part.value]));
-}
-function localTime(at: number) {
-  const parts = localParts(at);
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.weekday} ${parts.hour}:${parts.minute}`;
-}
-/** Canonical JSON for matching repeated tool calls regardless of key order. */
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value as Record<string, unknown>).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
-  return JSON.stringify(value) ?? 'undefined';
-}
 /** Tools whose own execution checks live state for no-op updates (so A -> B -> A remains allowed in one thought). */
 const stateCheckedTools = new Set(['set_activity', 'update_pursuit']);
-/** A day of life runs from 05:00 local time, so staying up past midnight does not start the next one. */
-const lifeDay = (at: number) => localTime(at - 5 * 3_600_000).slice(0, 10);
-interface ObservationMessage { role: 'observation'; batchId: string; content: (TextContent | ImageContent)[]; eventIds: string[]; lifeOnly: boolean; timestamp: number }
-interface ModelRequest { callId: string; runId: string; owner: ModelOwner; purpose: 'thought' | 'review' | 'compaction'; provider: string; model: string; api: string; startedAt: number; attempt?: number }
-interface BackgroundCompaction {
-  identity: string;
-  thought: ThoughtContext;
-  runId: string;
-  controller: AbortController;
-  meter: TokenMeter;
-  original: AgentMessage[];
-  prefix: string[];
-  promise: Promise<void>;
-  summary?: Message;
-  record?: Record<string, unknown>;
-}
-declare module '@earendil-works/pi-agent-core' { interface CustomAgentMessages { observation: ObservationMessage } }
+
 export interface Brain {
   readonly streaming: boolean;
   readonly thought: ThoughtContext;
@@ -108,6 +72,7 @@ export class PiBrain implements Brain {
   private pendingRoute = '';
   private compactions: Record<string, unknown>[] = [];
   private readonly stream: StreamFn;
+  private readonly compactor: ContextCompactor;
   /** Where the thought is: preparing a model request, waiting on the model, or acting on its answer. */
   private phase: 'idle' | 'preparing' | 'calling' | 'acting' = 'idle';
   /** Chats this thought has acted in or was started from (ADR-0002). */
@@ -122,12 +87,22 @@ export class PiBrain implements Brain {
   private activeRequest?: ModelRequest;
   /** The thought as it stood after its last completed turn, which a later failed call does not undo (ADR-0024). */
   private completed?: { messages: AgentMessage[]; seen: string[]; sources: string[]; compactions: number; anchor: ContextCheckpoint['anchor']; turns: number };
-  private background?: BackgroundCompaction;
   private lastCallId?: string;
   private sessionId: string = crypto.randomUUID();
   private lastAssistant?: AssistantMessage;
   private readonly summaryBackend?: { model: Model<any>; stream: StreamFn };
-  constructor(private config: Config, private store: Store, private tools: ToolSet, backend?: { model: Model<any>; stream: StreamFn }, private monitor?: Monitor, private recall?: SemanticRecall, private credential: CredentialReader = environmentCredential, private owner: ModelOwner = 'main', compactionBackend?: { model: Model<any>; stream: StreamFn }) {
+
+  constructor(
+    private config: Config,
+    private store: Store,
+    private tools: ToolSet,
+    backend?: { model: Model<any>; stream: StreamFn },
+    private monitor?: Monitor,
+    private recall?: SemanticRecall,
+    private credential: CredentialReader = environmentCredential,
+    private owner: ModelOwner = 'main',
+    compactionBackend?: { model: Model<any>; stream: StreamFn },
+  ) {
     const use = modelUse(config, owner);
     const { model, stream: transport } = backend ?? createModelBackend(use.thinking, credential);
     // Transports that load tools dynamically are told which tool loads the others (ADR-0023).
@@ -138,6 +113,20 @@ export class PiBrain implements Brain {
     this.summaryBackend = summary && { model: summary.model, stream: loading(summary.stream) };
     if (!model.input.includes('image')) throw new Error('Select a model that supports image input.');
     this.identity = contextIdentity(config, tools);
+    this.compactor = new ContextCompactor({
+      config, store, owner, credential, meter: this.meter, stream: this.stream, summaryBackend: this.summaryBackend,
+      getIdentity: () => this.identity,
+      getSessionId: () => this.sessionId,
+      getThought: () => this.thought,
+      getRunId: () => this.runId,
+      getCompactions: () => this.compactions,
+      setRuntimeSnapshot: snapshot => { this.runtimeSnapshot = snapshot; },
+      startRequest: (target, purpose, attempt) => this.startRequest(target, purpose, attempt),
+      finishRequest: (response, aborted) => this.finishRequest(response, aborted),
+      recordRequestFinished: (request, response, aborted) => this.recordRequestFinished(request, response, aborted),
+      notifyCompacting: () => this.display(monitor => monitor.requestStarted('compacting')),
+      runtimeContext: thinking => this.runtimeContext(thinking),
+    });
     const initialThinking = initialThinkingLevel(model, use.thinking.thinkingLevel ?? 'off');
     const mergeUsers = shouldMergeConsecutiveUsers(use.thinking, model);
     this.agent = new Agent({
@@ -182,7 +171,6 @@ export class PiBrain implements Brain {
         const runtime = this.runtimeContext(true);
         let messages = [...context.messages];
         // Replies before the newest observation belong to turns already answered; only their actions stay (ADR-0024).
-        // A reply that took no action ended its request, so it was never the input to one and leaving it out costs no cache.
         const latest = messages.findLastIndex(message => message.role === 'observation');
         const foldEarlier = (list: AgentMessage[]) => {
           const dropped = foldNoopCalls(list, this.noopCalls);
@@ -191,24 +179,23 @@ export class PiBrain implements Brain {
         };
         const earlier = foldEarlier(messages.slice(0, Math.max(latest, 0)));
         if (earlier.changed) {
-          // The meter's list leaves out system messages, so find the newest observation by itself rather than by index.
-          this.meter.rebase(messages, before => { const at = before.indexOf(messages[latest]!); const cut = at < 0 ? before.length : at; return [...foldEarlier(before.slice(0, cut)).messages, ...before.slice(cut)]; }, this.route(currentModel));
+          this.meter.rebase(messages, before => { const at = before.indexOf(messages[latest]!); const cut = at < 0 ? before.length : at; return [...foldEarlier(before.slice(0, cut)).messages, ...before.slice(cut)]; }, modelRoute(currentModel));
           messages = [...earlier.messages, ...messages.slice(latest)];
         }
-        const shown = this.shown(messages, runtime);
+        const shown = shownRuntimeSnapshot(this.runtimeSnapshot, messages, runtime);
         const view = shown ? carry(runtime, shown, ids => store.activeMemories(ids)) : runtime;
         const update = runtimeUpdate(view, shown);
-        if (update) messages.push(this.runtimeMessage(update));
+        if (update) messages.push(runtimeMessage(update));
         this.runtimeSnapshot = view;
         const { budget } = this.budget(currentModel);
-        const route = this.route(currentModel);
-        let measured: TokenMeasurement;
+        const route = modelRoute(currentModel);
         // Main thoughts use the full budget while idle compaction runs separately.
         // Reviews have no idle period, so still make room on their first request.
         const limit = owner === 'review' && first ? Math.floor(budget * config.compaction.idleRatio) : budget;
-        ({ messages, measured } = await this.shrink(messages, limit, budget, currentModel, runtime, signal));
-        if (measured.tokens > budget) throw new Error('Required state or the latest observation exceeds the context budget; reduce the batch size or organize pending items.');
-        store.log('context_budget', { runId: this.runId, owner, ...measured, inputBudget: budget, outputReserveTokens: modelUse(config, owner).limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
+        const shrunk = await this.compactor.shrink(messages, limit, budget, currentModel, runtime, signal);
+        messages = shrunk.messages;
+        if (shrunk.measured.tokens > budget) throw new Error('Required state or the latest observation exceeds the context budget; reduce the batch size or organize pending items.');
+        store.log('context_budget', { runId: this.runId, owner, ...shrunk.measured, inputBudget: budget, outputReserveTokens: modelUse(config, owner).limits.outputReserveTokens, safetyTokens: config.limits.contextSafetyTokens });
         ensureCurrent(store, this.thought, signal);
         // A preemption that came during preparation ends the thought before its call; what preparation did is kept.
         if (this.preempted) this.agent.abort(); else this.startRequest(currentModel, owner === 'main' ? 'thought' : 'review');
@@ -247,38 +234,24 @@ export class PiBrain implements Brain {
       }
     });
   }
+
   /** A preempted thought takes no more steering while it winds down. */
   get streaming() { return this.agent.state.isStreaming && !this.preempted; }
   private display(update: (monitor: Monitor) => void) { if (this.monitor) { try { update(this.monitor); } catch {} } }
-  abort() { this.cancelBackground(); this.controller.abort(); this.agent.abort(); }
-  private cancelBackground() { this.background?.controller.abort(); this.background = undefined; }
-  private instructions() {
-    return systemInstructions(this.config, this.activityPrompts(), this.tools.deferred());
-  }
+  abort() { this.compactor.cancelBackground(); this.controller.abort(); this.agent.abort(); }
+  private instructions() { return systemInstructions(this.config, this.activityPrompts(), this.tools.deferred()); }
   /** Read-only management preview, using this brain's actual tool permissions. */
   activityPrompts() { return this.tools.plugins.activityPrompts(new Set(this.tools.current().map(tool => tool.name))); }
-  /** What the working context already shows of runtime state: what runtime_data has said, and the actions whose results came back to it as tool results. */
-  private shown(messages: AgentMessage[], runtime: RuntimeSnapshot): RuntimeSnapshot | undefined {
-    const previous = this.runtimeSnapshot;
-    if (!previous) return;
-    const known = new Set(((previous.actualActions ?? []) as { id: string }[]).map(action => action.id));
-    const fresh = (runtime.actualActions as { id: string }[]).filter(action => !known.has(action.id));
-    if (!fresh.length) return previous;
-    const results = messages.flatMap(message => message.role === 'toolResult' ? message.content.flatMap(block => block.type === 'text' ? [block.text] : []) : []);
-    const seen = fresh.filter(action => results.some(text => text.includes(action.id)));
-    return seen.length ? { ...previous, actualActions: [...((previous.actualActions ?? []) as unknown[]), ...seen] } : previous;
-  }
-  private runtimeMessage(data: RuntimeSnapshot): Message {
-    return { role: 'user', content: `<runtime_data>\n${JSON.stringify(data)}\n</runtime_data>`, timestamp: Date.now() };
-  }
+
   private chargeCall() {
     this.turns++;
     if (this.config.limits.maxTurnsPerRun !== null && this.turns > this.config.limits.maxTurnsPerRun) throw new Error('The turn limit for this reasoning run has been reached.');
     return this.store.chargeCall(this.runId, this.config.limits.modelCallsPerDay);
   }
-  private startRequest(model: Model<any>, purpose: 'thought' | 'review' | 'compaction', attempt?: number) {
+  private startRequest(model: Model<any>, purpose: 'thought' | 'review' | 'compaction', attempt?: number): ModelRequest {
     this.activeRequest = { callId: this.chargeCall(), runId: this.runId, owner: this.owner, purpose, provider: model.provider, model: model.id, api: model.api, startedAt: Date.now(), ...(attempt === undefined ? {} : { attempt }) };
     this.store.log('model_request_started', this.activeRequest);
+    return this.activeRequest;
   }
   private finishRequest(response?: AssistantMessage, aborted = this.controller.signal.aborted) {
     const request = this.activeRequest;
@@ -292,7 +265,6 @@ export class PiBrain implements Brain {
     const known = usage && (status === 'success' || [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].some(value => value > 0));
     this.store.log('model_request_finished', { ...request, finishedAt: Date.now(), status, stopReason: response?.stopReason, usage: known ? usage : null });
   }
-  private route(model: Model<any>) { return modelRoute(model); }
   private budget(model: Model<any>) {
     const { limits } = modelUse(this.config, this.owner);
     const { window, budget } = modelBudget(model, limits.contextTokens, limits.outputReserveTokens, limits.contextSafetyTokens);
@@ -300,153 +272,23 @@ export class PiBrain implements Brain {
     return { window, budget };
   }
   private get contextTokens() { return this.budget(this.agent.state.model).window; }
-  /** Bring the context under limit: prune old tool results first, and summarize older exchanges only if that is not enough. */
-  private async shrink(messages: AgentMessage[], limit: number, budget: number, model: Model<any>, runtime: RuntimeSnapshot, signal?: AbortSignal) {
-    const route = this.route(model);
-    const background = this.background;
-    if (background) {
-      if (!this.matchesBackground(background, messages)) this.cancelBackground();
-      else {
-        // Only a full context waits. Ordinary messages keep using the uncompressed history.
-        if (!background.summary && this.meter.measure(messages, route).tokens > budget) {
-          try { await (signal ? waitFor(background.promise, signal) : background.promise); }
-          catch { ensureCurrent(this.store, this.thought, signal); }
-        }
-        ensureCurrent(this.store, this.thought, signal);
-        messages = this.applyBackground(messages, runtime);
-      }
-    }
-    let measured = this.meter.measure(messages, route);
-    const before = measured.tokens;
-    if (measured.tokens <= limit) return { messages, measured };
-    this.store.archiveContext(messages, [...this.thought.sources]);
-    const pruned = pruneToolResults(messages, Math.min(this.config.compaction.keepRecentTokens, budget));
-    messages = pruned.messages;
-    measured = this.meter.measure(messages, route);
-    if (pruned.changed) this.store.log('context_pruned', { runId: this.runId, results: pruned.changed, beforeTokens: before, afterTokens: measured.tokens });
-    if (measured.tokens > limit) {
-      // A delta may depend on a base that compaction removes. Keep a complete current state.
-      const snapshot = this.runtimeMessage(runtimeUpdate(runtime)!);
-      const latest = messages.at(-1);
-      if (!(latest?.role === 'user' && latest.content === snapshot.content)) messages.push(snapshot);
-      this.runtimeSnapshot = runtime;
-      try { messages = await this.compact(messages, budget, model, signal); }
-      catch (error) {
-        // Below the full budget, compaction only makes room ahead of time; the request can go on without it.
-        if (measured.tokens > budget || signal?.aborted) throw error;
-        ensureCurrent(this.store, this.thought, signal);
-        this.store.log('context_compaction_skipped', { runId: this.runId, message: errorText(error) });
-      }
-      measured = this.meter.measure(messages, route);
-    }
-    return { messages, measured };
+
+  private runtimeContext(thinking = false): RuntimeSnapshot {
+    return buildRuntimeSnapshot({
+      config: this.config, store: this.store, recall: this.recall, observations: this.observations,
+      contextTokens: this.contextTokens, thought: this.thought, broughtToMind: this.broughtToMind,
+      runId: this.runId, owner: this.owner, thinking,
+    });
   }
-  private async compact(messages: AgentMessage[], budget: number, ownerModel: Model<any>, signal?: AbortSignal, background?: BackgroundCompaction, keepRecentTokens?: number): Promise<AgentMessage[]> {
-    const thought = background?.thought ?? this.thought;
-    const meter = background?.meter ?? this.meter;
-    const runId = background?.runId ?? this.runId;
-    const use = modelUse(this.config, this.owner);
-    const { model, stream } = this.summaryBackend ?? { model: ownerModel, stream: this.stream };
-    const { window } = modelBudget(model, use.compactionContextTokens, this.config.compaction.summaryMaxTokens, this.config.limits.contextSafetyTokens);
-    const summaryLimit = this.config.compaction.summaryMaxTokens;
-    const { system, pinned, removed, kept } = compactionSplit(messages, Math.min(keepRecentTokens ?? this.config.compaction.keepRecentTokens, budget), budget, summaryLimit + 100, this.owner === 'review');
-    if (!removed.length) throw new Error('No older exchanges can be safely compacted; reduce the latest input or increase the context budget.');
-    const ids = this.store.archiveContext(removed, [...thought.sources]);
-    if (background) background.prefix = background.original.slice(0, 1 + removed.length).map(contextRecordId);
-    const { framing, references, reserve } = summaryEnvelope(ids);
-    const outputLimit = summaryLimit - reserve;
-    if (outputLimit < 64) throw new Error('The summary token limit is too small to retain the required source references.');
-    // Models cannot count their own tokens; aiming well below the cut-off leaves room to finish.
-    const target = Math.floor(outputLimit * 0.6);
-    const instructions = `Internal working context consolidation: Produce a brief continuity summary for the same digital life, aiming for about ${target} tokens (Chinese runs about one token per character); output stops at ${outputLimit}. Summarize only the first ${removed.length} older messages after the system message${pinned.length ? ' and the retained review prompt' : ''}. An existing summary among them is material to condense, not a prefix to keep: the limit covers it too, so merge it in and shorten it, dropping what is settled, superseded, or already saved with remember. Put the most important first; if output stops early, only the end is lost. If recent exchanges follow, use them only to correct outdated judgments; their originals are retained separately. Do not call tools or take external action. Preserve people, times, group or private settings, changes in relationship impressions and their evidence, current topics, unfinished matters, and actual action outcomes. Distinguish reported claims, inferences, fiction, success, failure, and unknown outcomes. Old state may be outdated; follow later runtime_data. Update outdated judgments in existing summaries. Use read_context to retrieve originals when needed; older records include ${ids.slice(-12).join(', ')}. Retain relevant source IDs and necessary ctx: record IDs in the summary.`;
-    const directive: Message = { role: 'user', content: instructions, timestamp: Date.now() };
-    // Reuse the complete warm prefix when it fits; the old prefix remains a fallback for oversized new input.
-    let request: AgentMessage[] = [system, ...pinned, ...removed, ...kept, directive];
-    const fits = (candidate: AgentMessage[]) => meter.measure(candidate, this.route(model)).tokens + summaryLimit + this.config.limits.contextSafetyTokens <= window;
-    const includedRecentContext = fits(request);
-    if (!includedRecentContext) request = [system, ...pinned, ...removed, directive];
-    const sized = includedRecentContext || fits(request);
-    const requestTokens = sized ? meter.measure(request, this.route(model)).tokens : 0;
-    const availableOutput = Math.max(outputLimit, window - requestTokens - this.config.limits.contextSafetyTokens);
-    // Reasoning tokens share maxOutputTokens with visible text while never entering the saved context;
-    // give reasoning models room from the output reserve so thinking does not truncate the summary,
-    // while fitLines still enforces outputLimit on the retained summary text.
-    const requestMaxTokens = Math.min(
-      model.maxTokens,
-      model.reasoning ? Math.max(outputLimit, Math.min(Math.max(use.limits.outputReserveTokens, outputLimit * 2), availableOutput)) : outputLimit,
-    );
-    const sameRoute = this.route(model) === this.route(ownerModel);
-    const compactionMergeUsers = shouldMergeConsecutiveUsers(use.compaction, model);
-    const effectiveCompactionLevel = initialThinkingLevel(model, use.compactionThinkingLevel);
-    const replacement = (text: string) => {
-      const summary: Message = { role: 'user', content: framing + text + references, timestamp: Date.now() };
-      const compacted = [system, ...pinned, summary, ...kept];
-      const before = estimatedContextTokens(messages); const after = estimatedContextTokens(compacted);
-      return after < before && after <= budget ? { summary, compacted, before, after } : undefined;
-    };
-    let result: ReturnType<typeof replacement>; let truncated = false; let transient = false;
-    let failure = 'The history to consolidate exceeds the context budget; a continuity summary cannot be generated safely.';
-    for (let attempt = 0; sized && !result && attempt <= this.config.compaction.retries; attempt++) {
-      ensureCurrent(this.store, thought, signal);
-      let requestInfo: ModelRequest;
-      if (background) {
-        if (this.config.limits.maxTurnsPerRun !== null && attempt >= this.config.limits.maxTurnsPerRun) throw new Error('The compaction call limit has been reached.');
-        requestInfo = { callId: this.store.chargeCall(runId, this.config.limits.modelCallsPerDay), runId, owner: this.owner, purpose: 'compaction', provider: model.provider, model: model.id, api: model.api, startedAt: Date.now(), attempt };
-        this.store.log('model_request_started', requestInfo);
-      } else {
-        this.startRequest(model, 'compaction', attempt);
-        requestInfo = this.activeRequest!;
-        this.display(monitor => monitor.requestStarted('compacting'));
-      }
-      const finish = (response?: AssistantMessage) => background ? this.recordRequestFinished(requestInfo, response, signal?.aborted) : this.finishRequest(response, signal?.aborted);
-      let response: AssistantMessage;
-      try {
-        const portable = sameRoute ? request : portableMessages(request);
-        const responseWork = (async () => (await stream(model, normalizeContext({ messages: toModelMessages(portable, { mergeUsers: compactionMergeUsers }) }), {
-          apiKey: this.credential(use.compaction.apiKeyEnv),
-          reasoning: effectiveCompactionLevel === 'off' ? undefined : effectiveCompactionLevel,
-          sessionId: sameRoute ? this.sessionId : undefined,
-          cacheRetention: use.compaction.cacheRetention ?? 'short',
-          signal,
-          maxTokens: requestMaxTokens,
-        })).result())();
-        response = await (background && signal ? waitFor(responseWork, signal) : responseWork);
-        finish(response);
-      } catch (error) { finish(); throw error; }
-      ensureCurrent(this.store, thought, signal);
-      this.store.log('context_summary_completed', { runId, callId: requestInfo.callId, owner: this.owner, attempt, usage: response.usage, stopReason: response.stopReason });
-      transient = response.stopReason === 'error' || response.stopReason === 'aborted';
-      const written = transient || response.content.some(item => item.type === 'toolCall') ? '' : response.content.filter((item): item is TextContent => item.type === 'text').map(item => item.text).join('\n').trim();
-      // A summary cut off at the limit keeps its complete lines, which come in order of importance.
-      const text = fitLines(written, outputLimit, response.stopReason === 'stop');
-      result = text ? replacement(text) : undefined;
-      truncated = text !== written;
-      failure = result ? '' : text ? 'The continuity summary did not reduce the context or still exceeds the budget.' : `The continuity summary was not generated completely: ${response.errorMessage ?? response.stopReason}`;
-    }
-    // The same history would fail the same way on every retry, so set it aside rather than fail the run.
-    // Only a transport failure, which a later run may not meet, still fails it.
-    if (!result && !transient) { result = replacement(this.setAside(removed, ids, outputLimit, failure)); truncated = false; }
-    if (!result) throw new Error(failure);
-    ensureCurrent(this.store, thought, signal);
-    const record = { runId, owner: this.owner, provider: model.provider, model: model.id, beforeTokens: result.before, afterTokens: result.after, removedMessages: removed.length, includedRecentContext, ...(truncated ? { truncated } : {}), ...(failure ? { setAside: failure } : {}), firstKeptRecordId: kept[0] ? contextRecordId(kept[0]) : undefined, summaryRecordId: contextRecordId(result.summary) };
-    if (background) { background.summary = result.summary; background.record = record; }
-    else {
-      this.store.archiveContext([result.summary], [...thought.sources]);
-      this.meter.reset(); this.compactions.push(record);
-    }
-    return result.compacted;
+  private message(observation: Observation) {
+    return buildObservationMessage({
+      config: this.config, store: this.store, tools: this.tools, model: this.agent.state.model,
+      contextTokens: this.contextTokens, thought: this.thought, observation, signal: this.controller.signal,
+    });
   }
-  /** Without a summary, older messages leave under a note; their originals stay archived and their events recallable. */
-  private setAside(removed: AgentMessage[], ids: string[], limit: number, reason: string) {
-    const index = removed.findIndex(message => summaryBody(message) !== undefined);
-    const times = removed.map(message => message.timestamp);
-    const span = times.length ? ` from ${recordTime(Math.min(...times))} to ${recordTime(Math.max(...times))}` : '';
-    const note = `[No summary was written for ${removed.length} older messages${span} (${reason}). Use recall, read_event, or read_chat_record for that period, or read_context for the originals${index >= 0 ? `; the earlier summary carried forward above is ${ids[index]} in full` : ''}.]`;
-    const previous = index >= 0 ? fitLines(summaryBody(removed[index]!)!, limit - textTokens(note) - 1) : '';
-    return previous ? `${previous}\n${note}` : note;
-  }
+
   private resetContext() {
-    this.cancelBackground();
+    this.compactor.cancelBackground();
     this.sessionId = crypto.randomUUID();
     this.agent.sessionId = this.sessionId;
     this.tools.loading.restore([]);
@@ -472,14 +314,13 @@ export class PiBrain implements Brain {
       sources: [...this.thought.sources],
       anchor: this.meter.anchor,
       sessionId: this.sessionId,
-      route: this.route(this.agent.state.model),
+      route: modelRoute(this.agent.state.model),
     };
   }
   private restore(checkpoint: ContextCheckpoint) {
-    const currentRoute = this.route(this.agent.state.model);
+    const currentRoute = modelRoute(this.agent.state.model);
     const handoff = Boolean(checkpoint.route && checkpoint.route !== currentRoute);
     const restoredMessages = handoff ? portableMessages(checkpoint.messages) : checkpoint.messages;
-    // What a saved context declares is what it had loaded.
     this.tools.loading.restore(getCurrentTools(toModelMessages(restoredMessages)).map(tool => tool.name));
     this.agent.reset(); this.agent.state.tools = this.tools.declared();
     this.runtimeSnapshot = undefined;
@@ -505,212 +346,6 @@ export class PiBrain implements Brain {
     this.contextGeneration = checkpoint.generation;
     this.thought.sources = new Set(checkpoint.sources);
   }
-  /** The runtime state for a model call; thinking is set for a call of the thought under way, whose recollections are then counted. */
-  private runtimeContext(thinking = false) {
-    const recent = this.store.recent(this.config.memory.recentEvents);
-    const { recalled, development, listed } = memoriesInView(this.config, this.store, this.recall, this.observations);
-    for (const source of [...recent, ...recalled.map(item => item.memory)]) this.thought.sources.add(source.id);
-    // When each was formed, so a judgment from last night's review reads as that rather than as settled.
-    const entries = (kind: MemoryKind) => development.filter(memory => memory.kind === kind).map((memory: Memory) => ({ id: memory.id, scope: memory.scope, title: memory.title, content: memory.content, createdAt: new Date(memory.createdAt).toISOString() }));
-    const runtime = { platformAccounts: this.store.setting('platformAccounts', {}), now: new Date().toISOString(), timeZone: 'Asia/Shanghai', adapters: this.config.adapters.map(({ id, driver, accountId, tools }) => ({ id, driver, accountId, tools })), settings: this.store.settings(), allowFiction: this.config.life.allowFiction, activeCommitmentsAndPlans: this.store.wakes(), pursuits: this.store.pursuits(), recentEvents: recent.map(event => ({ id: event.id, kind: event.kind, at: event.at, ...(event.source ? { source: event.source } : {}), text: event.text.slice(0, 400), truncated: event.text.length > 400 })), recalled: recalled.map(({ memory, line }) => ({ ...memory, content: memory.content.slice(0, 2000), truncated: memory.content.length > 2000, matchedLine: line })), actualActions: this.store.actions(10).map(action => actionSummary(action)), myHabits: entries('habit'), practices: entries('practice'), impressions: entries('impression'), impressionIndex: listed.map(memory => ({ id: memory.id, scope: memory.scope, title: memory.title })) };
-    // Commitments, current activity, pursuits, and development are never selected by probabilistic recall.
-    while (estimateTokens(runtime) > this.contextTokens / 4 && runtime.recentEvents.length) runtime.recentEvents.shift();
-    while (estimateTokens(runtime) > this.contextTokens / 4 && runtime.recalled.length) runtime.recalled.pop();
-    if (thinking) {
-      // Counted once a thought, however many calls it makes, and only for what stayed within the budget.
-      const fresh = recalled.slice(0, runtime.recalled.length).filter(item => !this.broughtToMind.has(item.memory.id));
-      for (const item of fresh) this.broughtToMind.add(item.memory.id);
-      this.store.noteRecalled('spontaneous', fresh.map(item => ({ id: item.memory.id, similarity: item.similarity })), { runId: this.runId, ...(this.owner === 'review' ? { reviewing: true } : {}) });
-    }
-    return runtime;
-  }
-  private async message(observation: Observation): Promise<ObservationMessage> {
-    const preview = Math.max(80, Math.min(2000, Math.floor(this.contextTokens / (observation.events.length * 8))));
-    const rests = observation.events.filter(event => event.kind === 'rest_backlog');
-    const faces = await this.tools.plugins.emojiNames(observation.events, this.controller.signal);
-    // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
-    const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, observation.events, faces, preview, this.tools.plugins.recordFormatters())}` }];
-    if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) content.push({ type: 'text', text: this.lifeContext() });
-    for (const rest of rests) content.push({ type: 'text', text: this.restRecord(rest.payload, faces) });
-    for (const text of this.tools.plugins.observation(observation.events, this.thought)) content.push({ type: 'text', text });
-    let count = 0;
-    const fits = () => count++ < this.config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= this.contextTokens * 0.4;
-    // Plugin-produced pictures are seen before incoming chat images, within the same context budget.
-    const eventImages = observation.events.flatMap(event => this.tools.plugins.images(event).filter(image => image.autoView));
-    const orderedImages = [
-      ...eventImages.filter(image => (image.priority ?? 'primary') !== 'message'),
-      ...eventImages.filter(image => image.priority === 'message'),
-    ];
-    for (const image of orderedImages) {
-      if (!fits()) { content.push({ type: 'text', text: image.deferred }); continue; }
-      let picture;
-      try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
-      if (!picture) { count--; content.push({ type: 'text', text: image.unavailable }); continue; }
-      const prepared = await prepareModelImage(picture.data, picture.mimeType, this.agent.state.model);
-      content.push({ type: 'text', text: image.label }, { type: 'image', data: prepared.data.toString('base64'), mimeType: prepared.mimeType });
-      image.onShown?.();
-    }
-    // Supplementary plugin pictures follow the images in the chat and use the same budget.
-    for (const image of this.tools.plugins.supplementalImages(observation.events, this.thought)) {
-      if (!image.autoView) continue;
-      if (!fits()) { if (image.deferred) content.push({ type: 'text', text: image.deferred }); continue; }
-      let picture;
-      try { picture = await image.load(this.controller.signal); } catch { this.controller.signal.throwIfAborted(); }
-      if (!picture) { count--; if (image.unavailable) content.push({ type: 'text', text: image.unavailable }); continue; }
-      const prepared = await prepareModelImage(picture.data, picture.mimeType, this.agent.state.model);
-      content.push({ type: 'text', text: image.label }, { type: 'image', data: prepared.data.toString('base64'), mimeType: prepared.mimeType });
-      image.onShown?.();
-    }
-    return { role: 'observation', batchId: observation.batchId, eventIds: observation.events.map(event => event.id), lifeOnly: observation.events.every(event => event.kind === 'wake' && event.payload.wakeKind === 'life'), content, timestamp: Date.now() };
-  }
-  /** The group chat a rest held, read as a chat record from where it began. Each group's share of a quarter of the context bounds its record, which beyond that leaves out its earliest lines and says where they begin (ADR-0016). */
-  private restRecord(payload: Record<string, unknown>, faces: Record<string, string>) {
-    const { until, chats } = payload as { until: number; chats: { conversation: string; from: number; messages: number; notices: number }[] };
-    const items = chats.reduce((sum, chat) => sum + chat.messages + chat.notices, 0) || 1;
-    return chats.map(chat => {
-      const share = Math.floor(this.contextTokens / 4 * (chat.messages + chat.notices) / items);
-      const { text, omitted } = new ChatRecord(this.store, chat.conversation, faces, undefined, action => this.tools.plugins.actionCaption(action), this.tools.plugins.recordFormatters()).span(chat.from, until, share);
-      return omitted ? `${text}\n[The earliest ${omitted} lines did not fit; read them with read_chat_record from="${recordTime(chat.from)}".]` : text;
-    }).join('\n\n');
-  }
-  /** What a life wake sees of its own days: the local time, how recent plans went, what happens to come to mind, and what it can actually do online. */
-  private lifeContext() {
-    const now = Date.now(); const today = lifeDay(now); const hour = Number(localParts(now).hour);
-    const parts = [`Local time: ${localTime(now)} (Asia/Shanghai).`];
-    const plans = this.store.pastLifePlans(8);
-    if (!plans.some(wake => lifeDay(wake.dueAt) === today)) parts.push('This is your first life wake today. Sketch the day loosely: two or three things of different lengths, with no need to fill every hour or to finish them all.');
-    if (plans.length) parts.push(`Your recent life plans, latest first. Vary your days rather than repeating the same few things:\n${JSON.stringify(plans.map(wake => ({ title: wake.title, at: localTime(wake.dueAt), status: wake.status })))}`);
-    if (!this.store.pursuits().length) parts.push('You have no pursuits under way.');
-    if (this.config.life.allowFiction) parts.push('Now and then, fictional daily life brings what you did not plan: the weather turns, a shop is closed, something breaks, something catches your eye. It can change your mood and plans.');
-    const diary = this.store.lastMemoryAt('note');
-    if ((hour >= 21 || hour < 5) && (diary === undefined || lifeDay(diary) !== today)) parts.push("You have not written today's diary. If you write one, write about your own day and feelings; chats belong in it only where they truly mattered to you.");
-    // Chance recollections keep each wake from starting at the same blank page.
-    const surfaced = [this.store.randomMemory(['experience', 'note', 'fiction'], now - 86_400_000), this.store.randomMemory(['impression'])].filter((memory): memory is Memory => memory !== undefined);
-    for (const memory of surfaced) this.thought.sources.add(memory.id);
-    if (surfaced.length) parts.push(`What happens to come to mind; follow it or let it pass:\n${JSON.stringify(surfaced.map(memory => ({ id: memory.id, kind: memory.kind, ...(memory.scope ? { scope: memory.scope } : {}), title: memory.title, content: memory.content.slice(0, 300), fictional: memory.fictional, createdAt: new Date(memory.createdAt).toISOString() })))}`);
-    const groups = this.groupQuietness(now);
-    if (groups) parts.push(groups);
-    const online = this.onlineLife();
-    if (online) parts.push(online);
-    return parts.join('\n\n');
-  }
-  private formatQuiet(ms: number) {
-    const minutes = Math.max(0, Math.floor(ms / 60_000));
-    if (minutes < 1) return 'just active';
-    if (minutes < 60) return `quiet ${minutes}m`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 48) return minutes % 60 ? `quiet ${hours}h${minutes % 60}m` : `quiet ${hours}h`;
-    return `quiet ${Math.floor(hours / 24)}d`;
-  }
-  /** How long each tracked group chat has been quiet, so a life wake need not guess which chats are in a lull (ADR-0014). */
-  private groupQuietness(now: number): string | undefined {
-    const seen = new Set<string>();
-    const entries: string[] = [];
-    for (const ref of this.tools.plugins.trackedConversations(this.store)) {
-      if (seen.has(ref)) continue;
-      seen.add(ref);
-      const parsed = parseConversationRef(ref);
-      if (!parsed) continue;
-      const latest = this.store.latestConversationActivity(ref);
-      if (!latest) continue;
-      const label = latest.name ? `${parsed.id} (${latest.name})` : parsed.id;
-      entries.push(`${label}: ${this.formatQuiet(now - latest.at)}`);
-    }
-    return entries.length ? `Group chats right now: ${entries.join('; ')}.` : undefined;
-  }
-  /** When each available online activity was last done, so a life wake knows what it can actually do. */
-  private onlineLife() {
-    const available = new Set(this.tools.current().map(tool => tool.name));
-    const activities = this.tools.plugins.activities(onlineActivities, available);
-    if (!activities.length) return;
-    const experienceKind = (tool: string) => this.tools.plugins.experienceKind(tool);
-    const last = this.store.lastExperienced(activities.flatMap(item => item.tools.map(experienceKind)));
-    const status = activities.map(({ activity, tools, memoryKind, currentValue }) => {
-      const at = memoryKind ? this.store.lastMemoryAt(memoryKind) ?? 0 : Math.max(0, ...tools.map(name => last[experienceKind(name)] ?? 0));
-      const setter = currentValue && tools.includes(currentValue.tool) ? currentValue : undefined;
-      const args = setter && this.store.lastSuccessfulAction(setter.tool)?.args;
-      const current = args ? setter!.read(args) : undefined;
-      return { activity, tools, lastDone: at ? new Date(at).toISOString() : `not in the last ${this.config.memory.retentionDays} days`, ...(current !== undefined ? { lastSetTo: current } : {}) };
-    });
-    return `Online activities available for your own life, with when you last did each. Life activities can be actual online activities like these, not only fictional daily life.\n${JSON.stringify(status)}`;
-  }
-  /**
-   * Seed a fresh main working context with a few of her own recent chat actions interleaved with the surrounding chat
-   * events (ADR-0024). Starting with only consecutive user observations and zero assistant turns leaves thinking models
-   * out of distribution and pushes them to invent placeholder tool calls just to close silent turns.
-   */
-  private seedContext() {
-    if (this.config.memory.recentEvents <= 0) return;
-    const declared = new Set(this.tools.declared().map(tool => tool.name));
-    const actions = this.store.actions(40)
-      .filter(action => action.status === 'success'
-        && action.conversation !== undefined
-        && declared.has(action.kind)
-        && !(action.result && typeof action.result === 'object' && (action.result as { redacted?: unknown }).redacted === true))
-      .slice(0, 6)
-      .reverse();
-    if (!actions.length) return;
-    const model = this.agent.state.model;
-    const signatures = new Map<string, { id: string; thoughtSignature?: string }>();
-    for (const archived of this.store.recentAssistantMessages(200)) {
-      if (archived.role !== 'assistant' || archived.provider !== model.provider || archived.api !== model.api || archived.model !== model.id) continue;
-      for (const block of archived.content) {
-        if (block.type !== 'toolCall') continue;
-        const key = `${block.name}:${stableJson(block.arguments)}`;
-        if (!signatures.has(key) || (!signatures.get(key)!.thoughtSignature && block.thoughtSignature)) {
-          signatures.set(key, { id: block.id, ...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}) });
-        }
-      }
-    }
-    const emittedEvents = new Set<string>();
-    const usedCallIds = new Set<string>();
-    const turns: AgentMessage[][] = [];
-    for (const action of actions) {
-      const candidates = new Map<string, EnvironmentEvent>();
-      for (const item of [...this.store.actionTriggers(action.id), ...this.store.recentConversationEvents(action.conversation!, action.createdAt, 3)]) {
-        candidates.set(item.id, item);
-      }
-      const surrounding = [...candidates.values()].sort((a, b) => a.at - b.at);
-      if (!surrounding.length) continue;
-      const freshEvents = surrounding.filter(item => !emittedEvents.has(item.id));
-      for (const item of freshEvents) emittedEvents.add(item.id);
-      const match = signatures.get(`${action.kind}:${stableJson(action.args)}`);
-      const callId = match && !usedCallIds.has(match.id) ? match.id : `seed_${action.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-      usedCallIds.add(callId);
-      const callBlock: ToolCall = { type: 'toolCall', id: callId, name: action.kind, arguments: action.args as ToolCall['arguments'], ...(match?.thoughtSignature ? { thoughtSignature: match.thoughtSignature } : {}) };
-      const resultMsg: ToolResultMessage = { role: 'toolResult', toolCallId: callId, toolName: action.kind, content: [{ type: 'text', text: JSON.stringify(actionSummary(action)) }], isError: false, timestamp: action.createdAt };
-      if (!freshEvents.length && turns.length) {
-        // Same-batch action with no intervening incoming events: append to the previous seeded assistant turn.
-        const previous = turns.at(-1)!;
-        const assistant = previous[1] as AssistantMessage;
-        assistant.content = [...assistant.content, callBlock];
-        assistant.timestamp = action.createdAt;
-        previous.push(resultMsg);
-        continue;
-      }
-      if (!freshEvents.length) continue;
-      const userMsg: Message = {
-        role: 'user',
-        content: [{ type: 'text', text: `Earlier conversation before this working context began (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(this.store, freshEvents, {}, 500, this.tools.plugins.recordFormatters())}` }],
-        timestamp: freshEvents.at(-1)!.at,
-      };
-      const assistantMsg: AssistantMessage = {
-        role: 'assistant',
-        content: [callBlock],
-        api: model.api,
-        provider: model.provider,
-        model: model.id,
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-        stopReason: 'toolUse',
-        timestamp: action.createdAt,
-      };
-      turns.push([userMsg, assistantMsg, resultMsg]);
-    }
-    const seedBudget = Math.min(4000, Math.floor(this.budget(model).budget * 0.15));
-    while (turns.length && estimateTokens(turns.flat()) > seedBudget) turns.shift();
-    if (!turns.length) return;
-    this.agent.state.messages = [...this.agent.state.messages, ...turns.flat()];
-  }
   /** Load the persisted working context unless this process already holds it for the current management state. */
   private prepare(generation: number) {
     if (this.contextGeneration !== generation) {
@@ -718,7 +353,10 @@ export class PiBrain implements Brain {
       const saved = this.store.loadContext(this.identity);
       let restored = false;
       if (saved) { try { this.restore(saved); restored = true; } catch { this.resetContext(); } }
-      if (!restored && this.owner === 'main') this.seedContext();
+      if (!restored && this.owner === 'main') {
+        const seeded = buildSeedTurns({ config: this.config, store: this.store, tools: this.tools, model: this.agent.state.model, budget: this.budget(this.agent.state.model).budget });
+        if (seeded.length) this.agent.state.messages = [...this.agent.state.messages, ...seeded];
+      }
     }
     this.agent.state.tools = this.tools.declared();
     this.contextGeneration = generation;
@@ -727,55 +365,20 @@ export class PiBrain implements Brain {
     if (this.store.settings().generation === generation) this.restore(checkpoint);
     else { this.resetContext(); this.thought.sources.clear(); this.contextGeneration = -1; }
   }
-  /**
-   * Recover once from provider context-window overflow or truncated output before any tool call was dispatched.
-   * Silent overflows only reset the meter; error/length overflows drop the failed reply, aggressively prune and
-   * compact older history, and continue once if the context actually shrank (ADR-0008).
-   */
-  private async recoverOverflow(): Promise<boolean> {
-    const last = this.lastAssistant;
-    if (!last || this.preempted || this.controller.signal.aborted) return false;
+  private recoverOverflow() {
     const model = this.agent.state.model;
-    const { window, budget } = this.budget(model);
-    const desiredMaxOutput = Math.min(modelUse(this.config, this.owner).limits.outputReserveTokens, model.maxTokens);
-    const overflow = isContextOverflow(last, window);
-    const recoverableLength = !overflow && isRecoverableLength(last, desiredMaxOutput);
-    if (!overflow && !recoverableLength) return false;
-    if (overflow && last.stopReason === 'stop') {
-      this.meter.reset();
-      this.store.log('context_overflow_silent', { runId: this.runId, owner: this.owner, provider: model.provider, model: model.id, inputTokens: last.usage.input + last.usage.cacheRead, contextWindow: window });
-      return false;
-    }
-    // Never discard or retry a turn that emitted tool calls whose outcomes may already exist (ADR-0008).
-    if (last.content.some(block => block.type === 'toolCall')) return false;
-    const current = this.agent.state.messages;
-    const base = current.at(-1) === last ? current.slice(0, -1) : current.slice();
-    if (!base.length || base.at(-1)?.role === 'assistant' || base.every(item => item.role === 'system')) return false;
-    const before = estimatedContextTokens(base);
-    this.meter.reset();
-    this.store.archiveContext(base, [...this.thought.sources]);
-    const pruned = pruneToolResults(base, Math.min(2000, Math.floor(this.config.compaction.keepRecentTokens / 2)));
-    let shrunk = pruned.messages;
-    const runtime = this.runtimeContext(false);
-    const snapshot = this.runtimeMessage(runtimeUpdate(runtime)!);
-    const candidate = shrunk.slice();
-    const tail = candidate.at(-1);
-    if (!(tail?.role === 'user' && tail.content === snapshot.content)) candidate.push(snapshot);
-    try {
-      shrunk = await this.compact(candidate, budget, model, this.controller.signal, undefined, 0);
-      this.runtimeSnapshot = runtime;
-    } catch (error) {
-      if (this.controller.signal.aborted) throw error;
-      ensureCurrent(this.store, this.thought, this.controller.signal);
-    }
-    const after = estimatedContextTokens(shrunk);
-    if (after >= before) return false;
-    this.store.log('context_overflow_recovered', { runId: this.runId, owner: this.owner, reason: overflow ? 'overflow' : 'length', errorMessage: last.errorMessage, beforeTokens: before, afterTokens: after });
-    this.agent.state.messages = shrunk;
-    this.lastAssistant = undefined;
-    await this.agent.continue();
-    return true;
+    return this.compactor.recoverOverflow({
+      last: this.lastAssistant,
+      preempted: this.preempted,
+      signal: this.controller.signal,
+      model,
+      budget: this.budget(model),
+      messages: this.agent.state.messages,
+      applyShrunk: shrunk => { this.agent.state.messages = shrunk; this.lastAssistant = undefined; },
+      continueRun: () => this.agent.continue(),
+    });
   }
+
   async run(observation: Observation) {
     const generation = this.store.settings().generation;
     this.prepare(generation);
@@ -800,7 +403,7 @@ export class PiBrain implements Brain {
       ensureCurrent(this.store, this.thought);
       // The next thought decides again, so a preempted one leaves what it was looking at for it to fold.
       this.fold(!this.preempted);
-      if (this.background?.summary) this.agent.state.messages = this.applyBackground(this.agent.state.messages, this.runtimeContext());
+      if (this.compactor.hasReadySummary) this.agent.state.messages = this.compactor.applyBackground(this.agent.state.messages, this.runtimeContext());
       this.store.saveContext(this.checkpoint(), [...this.seen], this.compactions);
       this.seen.clear();
     }
@@ -812,6 +415,7 @@ export class PiBrain implements Brain {
     }
     finally { this.finishRequest(undefined, this.preempted || this.controller.signal.aborted); this.display(monitor => monitor.endRun(this.preempted ? 'interrupted' : outcome)); this.agent.clearAllQueues(); this.phase = 'idle'; this.preempted = false; }
   }
+
   /** A memory review runs apart from the conversations, in a working context of its own that starts from runtime state and ends with it; nothing steers into it (ADR-0012). */
   async review(observation: Observation) {
     const generation = this.store.settings().generation;
@@ -832,11 +436,11 @@ export class PiBrain implements Brain {
     }
     finally {
       this.finishRequest();
-      // Its exchanges were archived turn by turn; only the context itself is let go.
       for (const compacted of this.compactions) this.store.log('context_compacted', compacted);
       this.agent.clearAllQueues(); this.phase = 'idle'; this.resetContext();
     }
   }
+
   /** A message to the digital life in a chat this thought is engaged in: anything in a private chat, or a mention of or reply to it in a group. */
   private addressed(event: EnvironmentEvent): boolean {
     const chat = eventChat(event);
@@ -845,11 +449,9 @@ export class PiBrain implements Brain {
   /** Stop a thought whose model is deciding without a newer addressed message; a call already answered is left to its tools. */
   private preempt(event: EnvironmentEvent, counted = false): boolean {
     if (this.phase !== 'preparing' && this.phase !== 'calling') return false;
-    // A preemption already counted for this arrival, by a send it made stale, is carried through rather than counted or limited again.
     if (!counted) { if (this.preemptions >= this.config.limits.maxPreemptions) return false; this.preemptions++; }
     this.preempted = true;
     this.store.log('thought_preempted', { runId: this.runId, phase: this.phase, eventId: event.id, ...(this.phase === 'calling' ? { callMs: Date.now() - this.callStartedAt } : {}) });
-    // Preparation, such as compaction, finishes first; prepareRequest then ends the thought.
     if (this.phase === 'calling') this.agent.abort();
     return true;
   }
@@ -873,38 +475,16 @@ export class PiBrain implements Brain {
     this.noopCalls.add(callId);
     return { block: true, reason: 'Already called with the same arguments in this thought; end your thought without a tool call if nothing else to do.', terminate: true };
   }
-  /**
-   * What a thought read and said leaves working context when it ends: chat records it read, images it saw, no-op or
-   * repeated calls, and the text and thoughts of its replies (ADR-0024). All sit within this thought, so the cached
-   * prefix before it stays valid. A preempted thought leaves its records and images for the next thought, which
-   * decides again with them in view.
-   */
   private fold(everything = true) {
-    let results = 0; let images = 0; let replies = 0; let noops = 0;
-    // Message by message, so the token meter can apply it to the prefix it measured.
-    const fold = (messages: AgentMessage[]) => {
-      let folded = messages;
-      if (everything) {
-        const records = foldToolResults(folded, 'read_chat_record'); folded = records.messages; results += records.changed;
-        const seen = foldImages(folded, label => this.tools.plugins.imageViewer(label)); folded = seen.messages; images += seen.changed;
-      }
-      const dropped = foldNoopCalls(folded, this.noopCalls); folded = dropped.messages; noops += dropped.changed;
-      const said = foldReplies(folded); replies += said.changed;
-      return said.messages;
-    };
-    const folded = fold(this.agent.state.messages);
-    const counts = { results, images, replies, ...(noops ? { noops } : {}) };
-    if (!results && !images && !replies && !noops) return;
+    const options = { everything, noopCalls: this.noopCalls, imageViewer: (label: string) => this.tools.plugins.imageViewer(label) };
+    const result = foldThoughtMessages(this.agent.state.messages, options);
+    if (!result.changed) return;
     this.store.archiveContext(this.agent.state.messages, [...this.thought.sources]);
-    this.meter.rebase(this.agent.state.messages, fold, this.route(this.agent.state.model));
-    this.agent.state.messages = folded;
-    this.store.log('context_folded', { runId: this.runId, ...counts });
+    this.meter.rebase(this.agent.state.messages, list => foldThoughtMessages(list, options).messages, modelRoute(this.agent.state.model));
+    this.agent.state.messages = result.messages;
+    this.store.log('context_folded', { runId: this.runId, ...result.counts });
   }
-  /**
-   * Save a failed thought as it stood after its last completed turn. Its actions happened and their results are in view,
-   * and the observations it decided on count as perceived; those that entered after return to pending and come again.
-   * False when no turn completed or the state cannot be saved, so the whole thought rolls back as before.
-   */
+  /** Save a failed thought as it stood after its last completed turn (ADR-0024). */
   private keepCompleted(generation: number): boolean {
     const completed = this.completed;
     if (!completed || this.store.settings().generation !== generation) return false;
@@ -918,25 +498,6 @@ export class PiBrain implements Brain {
       return true;
     } catch { return false; }
   }
-  private matchesBackground(job: BackgroundCompaction, messages: AgentMessage[]) {
-    return !job.controller.signal.aborted && job.identity === this.identity && job.thought.generation === this.store.settings().generation
-      && job.prefix.length > 0 && job.prefix.every((id, index) => messages[index] && contextRecordId(messages[index]!) === id);
-  }
-  /** Replace only the snapshotted prefix. The current tail may have grown or had images folded since then. */
-  private applyBackground(messages: AgentMessage[], runtime: RuntimeSnapshot, records = this.compactions): AgentMessage[] {
-    const job = this.background;
-    if (!job?.summary) return messages;
-    this.background = undefined;
-    if (!this.matchesBackground(job, messages)) return messages;
-    ensureCurrent(this.store, job.thought, job.controller.signal);
-    // Retained deltas may have lost their base. End with today's complete state, never the job's old snapshot.
-    const next = [messages[0]!, job.summary, ...messages.slice(job.prefix.length), this.runtimeMessage(runtimeUpdate(runtime)!)];
-    const beforeTokens = estimatedContextTokens(messages); const afterTokens = estimatedContextTokens(next);
-    if (afterTokens >= beforeTokens) return messages;
-    this.meter.reset(); this.runtimeSnapshot = runtime;
-    records.push({ ...job.record, beforeTokens, afterTokens, background: true });
-    return next;
-  }
   /** Persist an idle replacement without acknowledging events or changing an active thought's bookkeeping. */
   private saveIdleContext(messages: AgentMessage[], records: Record<string, unknown>[]) {
     const rollback = this.checkpoint();
@@ -946,42 +507,15 @@ export class PiBrain implements Brain {
     } catch (error) { this.revert(rollback, rollback.generation); throw error; }
   }
   /** Start one summary of an idle snapshot. It keeps running while new thoughts append to the live context. */
-  async consolidate(): Promise<void> {
-    if (this.background) return this.background.promise;
-    if (this.phase !== 'idle' || this.agent.state.isStreaming) return Promise.resolve();
-    const generation = this.store.settings().generation;
-    this.prepare(generation);
-    const model = this.agent.state.model;
-    const { budget } = this.budget(model);
-    const limit = Math.floor(budget * this.config.compaction.idleRatio);
-    if (this.meter.measure(this.agent.state.messages, this.route(model)).tokens <= limit) return Promise.resolve();
-    const original = structuredClone(this.agent.state.messages);
-    const runtime = this.runtimeContext();
-    const job: BackgroundCompaction = {
-      identity: this.identity, thought: { generation, sources: new Set(this.thought.sources), triggers: new Set(), lifeOnly: false },
-      runId: crypto.randomUUID(), controller: new AbortController(), meter: new TokenMeter(structuredClone(this.meter.anchor)),
-      original, prefix: [], promise: Promise.resolve(),
-    };
-    this.background = job;
-    job.promise = (async () => {
-      ensureCurrent(this.store, job.thought, job.controller.signal);
-      this.store.archiveContext(original, [...job.thought.sources]);
-      const pruned = pruneToolResults(original, Math.min(this.config.compaction.keepRecentTokens, budget));
-      if (job.meter.measure(pruned.messages, this.route(model)).tokens <= limit) {
-        this.background = undefined;
-        this.meter.reset();
-        this.saveIdleContext(pruned.messages, []);
-        return;
-      }
-      await this.compact([...pruned.messages, this.runtimeMessage(runtimeUpdate(runtime)!)], budget, model, job.controller.signal, job);
-      // A running request owns its transcript until its next boundary. Idle completion can commit now.
-      if (this.background === job && this.phase === 'idle' && !this.agent.state.isStreaming) {
-        const records: Record<string, unknown>[] = [];
-        const messages = this.applyBackground(this.agent.state.messages, this.runtimeContext(), records);
-        if (records.length) this.saveIdleContext(messages, records);
-      }
-    })().catch(error => { if (this.background === job) this.background = undefined; throw error; });
-    return job.promise;
+  consolidate(): Promise<void> {
+    return this.compactor.consolidate({
+      isBusy: () => this.phase !== 'idle' || this.agent.state.isStreaming,
+      prepare: generation => this.prepare(generation),
+      getModel: () => this.agent.state.model,
+      getMessages: () => this.agent.state.messages,
+      budget: model => this.budget(model),
+      saveIdleContext: (messages, records) => this.saveIdleContext(messages, records),
+    });
   }
   async steer(observation: Observation): Promise<boolean> {
     const runId = this.runId;
@@ -996,7 +530,6 @@ export class PiBrain implements Brain {
     // The run may have ended, or another begun, while images were downloading.
     if (!this.streaming || this.runId !== runId) return false;
     // The tools may also have finished meanwhile and the model begun deciding again without this message, which is not yet in its view.
-    // That call is stopped as an arrival now would stop it (ADR-0002); otherwise sends decided since are stale again until the message enters.
     if (addressed.length && this.preempt(addressed[0]!, this.preemptions > before)) return false;
     stale();
     this.observations.push(...observation.events);
