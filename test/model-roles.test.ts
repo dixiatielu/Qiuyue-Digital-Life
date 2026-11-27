@@ -127,7 +127,8 @@ test('primary, concurrent review, and compaction use independent keys, reasoning
       assert.ok(!summaryRequest(request.messages));
     }
     for (const request of grouped('summary')) {
-      assert.equal(request.options.apiKey, 'summary-secret'); assert.equal(request.options.reasoning, 'medium'); assert.ok(request.options.maxTokens < 512);
+      assert.equal(request.options.apiKey, 'summary-secret'); assert.equal(request.options.reasoning, 'medium');
+      assert.ok(request.options.maxTokens > f.cfg.compaction.summaryMaxTokens && request.options.maxTokens <= f.cfg.limits.outputReserveTokens);
       assert.ok(summaryRequest(request.messages));
     }
     assert.equal(grouped('review')[0]!.options.apiKey, 'review-secret');

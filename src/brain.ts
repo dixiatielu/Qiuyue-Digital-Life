@@ -347,6 +347,15 @@ export class PiBrain implements Brain {
     const includedRecentContext = fits(request);
     if (!includedRecentContext) request = [system, ...pinned, ...removed, directive];
     const sized = includedRecentContext || fits(request);
+    const requestTokens = sized ? meter.measure(request, this.route(model)).tokens : 0;
+    const availableOutput = Math.max(outputLimit, window - requestTokens - this.config.limits.contextSafetyTokens);
+    // Reasoning tokens share maxOutputTokens with visible text while never entering the saved context;
+    // give reasoning models room from the output reserve so thinking does not truncate the summary,
+    // while fitLines still enforces outputLimit on the retained summary text.
+    const requestMaxTokens = Math.min(
+      model.maxTokens,
+      model.reasoning ? Math.max(outputLimit, Math.min(Math.max(use.limits.outputReserveTokens, outputLimit * 2), availableOutput)) : outputLimit,
+    );
     const replacement = (text: string) => {
       const summary: Message = { role: 'user', content: framing + text + references, timestamp: Date.now() };
       const compacted = [system, ...pinned, summary, ...kept];
@@ -371,7 +380,7 @@ export class PiBrain implements Brain {
       let response: AssistantMessage;
       try {
         const portable = this.route(model) === this.route(ownerModel) ? request : portableSummaryMessages(request);
-        const responseWork = (async () => (await stream(model, normalizeContext({ messages: toModelMessages(portable) }), { apiKey: this.credential(use.compaction.apiKeyEnv), reasoning: use.compactionThinkingLevel === 'off' ? undefined : use.compactionThinkingLevel, signal, maxTokens: Math.min(outputLimit, model.maxTokens) })).result())();
+        const responseWork = (async () => (await stream(model, normalizeContext({ messages: toModelMessages(portable) }), { apiKey: this.credential(use.compaction.apiKeyEnv), reasoning: use.compactionThinkingLevel === 'off' ? undefined : use.compactionThinkingLevel, signal, maxTokens: requestMaxTokens })).result())();
         response = await (background && signal ? waitFor(responseWork, signal) : responseWork);
         finish(response);
       } catch (error) { finish(); throw error; }

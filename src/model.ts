@@ -1,5 +1,5 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
-import { createModels, createProvider, type Api, type Model, type ModelThinkingLevel, type OpenAICompletionsCompat, type OpenAIResponsesCompat, type AnthropicMessagesCompat } from '@earendil-works/pi-ai';
+import { createModels, createProvider, type Api, type Model, type ModelThinkingLevel, type ThinkingLevelMap, type OpenAICompletionsCompat, type OpenAIResponsesCompat, type AnthropicMessagesCompat } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
@@ -157,16 +157,34 @@ export function validateModelConfig(config: ModelConfig) {
   if (config.compat !== undefined && (!Check(schema, config.compat) || Object.keys(config.compat).some(key => !Object.hasOwn(schema.properties, key)))) throw new Error('model.compat contains options incompatible with the selected model.api.');
 }
 
+/**
+ * Custom Google Generative AI reasoning models lack catalog metadata, so Pi's `off` fallback
+ * would otherwise send `thinkingBudget: 0` even for Gemini 3+/4+ models that reject budgets.
+ * Reuse the Google catalog's map when known, and default other thinking-level models to `low`.
+ */
+function googleThinkingLevelMap(id: string): ThinkingLevelMap | undefined {
+  const builtin = builtinModels().getModel('google', id);
+  if (builtin?.thinkingLevelMap) return builtin.thinkingLevelMap;
+  const lower = id.toLowerCase();
+  if (/gemma-?4/.test(lower)) return { off: null, minimal: 'minimal', low: null, medium: null, high: 'high' };
+  if (/gemini-3(?:\.\d+)?-(?:pro|flash)/.test(lower) || /gemini-(?:[4-9]|[1-9]\d)/.test(lower) || lower === 'gemini-flash-latest' || lower === 'gemini-flash-lite-latest' || lower === 'gemini-pro-latest') {
+    return { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high' };
+  }
+  return undefined;
+}
+
 export function resolveModel(config: ModelConfig): Model<Api> {
   validateModelConfig(config);
   let model: Model<Api> | undefined;
   if (config.api) {
+    const thinkingLevelMap = config.api === 'google-generative-ai' && config.reasoning ? googleThinkingLevelMap(config.id) : undefined;
     model = {
       provider: config.provider, id: config.id, name: config.id,
       api: config.api, baseUrl: config.baseUrl!, input: config.input!,
       contextWindow: config.contextWindow!, maxTokens: config.maxTokens!, reasoning: config.reasoning ?? false,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       ...(config.compat === undefined ? {} : { compat: config.compat }),
+      ...(thinkingLevelMap === undefined ? {} : { thinkingLevelMap }),
     };
   } else {
     const builtin = builtinModels().getModel(config.provider, config.id);

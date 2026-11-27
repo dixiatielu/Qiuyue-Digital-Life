@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
-import { resolveModel, type ModelConfig } from '../src/model.js';
+import { createModelBackend, resolveModel, type ModelConfig } from '../src/model.js';
 import { PiBrain } from '../src/brain.js';
 import { Store } from '../src/store.js';
 import { remoteModels, type ProviderProfile } from '../src/webui/providers.js';
@@ -162,4 +162,34 @@ test('Gemini listing reports native errors and stops when pagination repeats', a
     return Response.json({ models: [], nextPageToken: 'repeated' });
   }, () => undefined), /repeated a page token/);
   assert.equal(requests, 2);
+});
+
+test('custom Gemini thinking-level models fall back to a supported thinkingLevel instead of thinkingBudget 0 when thinking is off', async () => {
+  const requests: { path: string; body: any }[] = [];
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    requests.push({ path: request.url!, body: JSON.parse(Buffer.concat(chunks).toString()) });
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'Summary.' }] }, finishReason: 'STOP', index: 0 }], usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 5, totalTokenCount: 25 } })}\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  const baseUrl = `http://127.0.0.1:${address.port}/gateway/v1beta`;
+  const credential = (name: string) => name === gemini.apiKeyEnv ? 'native-test-key' : undefined;
+  try {
+    const cases = [
+      { id: 'gemini-4-hydrogen', expected: { thinkingLevel: 'LOW' } },
+      { id: 'gemini-3-flash-preview', expected: { thinkingLevel: 'MINIMAL' } },
+      { id: 'gemini-2.5-flash', expected: { thinkingBudget: 0 } },
+    ];
+    for (const item of cases) {
+      const { model, stream } = createModelBackend({ ...gemini, id: item.id, baseUrl, thinkingLevel: 'off' }, credential);
+      const result = await stream(model, { messages: [{ role: 'user', content: 'Summarize', timestamp: 1 }] }, { reasoning: undefined, maxTokens: 1024 }).result();
+      assert.equal(result.stopReason, 'stop');
+      assert.deepEqual(requests.at(-1)!.body.generationConfig.thinkingConfig, item.expected);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });

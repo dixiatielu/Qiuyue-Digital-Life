@@ -711,3 +711,33 @@ test('a fresh main working context seeds recent successful chat actions as alter
     assert.equal(f.store.event(fresh.id)?.status, 'processed');
   } finally { f.store.close(); }
 });
+
+test('reasoning compaction requests receive output headroom beyond summaryMaxTokens while keeping the saved summary bounded', async () => {
+  const f = fixture();
+  try {
+    smallWindow(f);
+    f.brain.agent.state.model = { ...f.brain.agent.state.model, reasoning: true };
+    event(f.store, 'Previous observation');
+    f.faux.setResponses([longSend('Previous judgment')]);
+    await f.brain.run(f.store.claim(20)!);
+    event(f.store, 'Continue');
+    let compactionMaxTokens = 0;
+    const oversized = Array.from({ length: 40 }, (_, i) => `Line ${i + 1}: retained continuity note about prior discussion.`).join('\n');
+    f.faux.setResponses([
+      (context, options) => {
+        assert.ok(isSummary(context.messages));
+        compactionMaxTokens = options?.maxTokens ?? 0;
+        return answer(oversized);
+      },
+      answer('Continue'),
+    ]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.ok(compactionMaxTokens > f.cfg.compaction.summaryMaxTokens, `expected maxTokens (${compactionMaxTokens}) > summaryMaxTokens (${f.cfg.compaction.summaryMaxTokens})`);
+    assert.ok(compactionMaxTokens <= f.cfg.limits.outputReserveTokens, `expected maxTokens (${compactionMaxTokens}) <= outputReserveTokens (${f.cfg.limits.outputReserveTokens})`);
+    const summaryMsg = f.brain.agent.state.messages.find(message => message.role === 'user' && typeof message.content === 'string' && message.content.startsWith('Earlier exchanges'));
+    assert.ok(summaryMsg && typeof summaryMsg.content === 'string');
+    assert.ok(textTokens(summaryMsg.content) <= f.cfg.compaction.summaryMaxTokens);
+    assert.match(summaryMsg.content, /Line 1:/);
+    assert.doesNotMatch(summaryMsg.content, /Line 40:/);
+  } finally { f.store.close(); }
+});
