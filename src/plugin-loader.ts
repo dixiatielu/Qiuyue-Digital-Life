@@ -8,14 +8,15 @@ import type { Config } from './config.js';
 import type { CredentialReader } from './credentials.js';
 import { errorText } from './domain.js';
 import type { LifePlugin } from './plugins.js';
-import type { PluginContext, PluginDefinition, UserTool } from './plugin-sdk.js';
+import type { AdapterInspector, PluginContext, PluginDefinition, UserChatTarget, UserTool } from './plugin-sdk.js';
 import type { Store } from './store.js';
 import { waitFor } from './async.js';
+import { conversationRef } from './identity.js';
 import { validateManifest, validPluginId } from './plugin-manifest.js';
 import { fetchImage } from './web.js';
 import { nativeAdapterPlugin } from './adapters/native.js';
 import { nativeToolName } from './platform.js';
-import { jsonResult } from './tool-runtime.js';
+import { jsonResult, type ToolRuntime } from './tool-runtime.js';
 export { discoverPlugins, validPluginId } from './plugin-manifest.js';
 
 const skipped = new Set(['node_modules', '.qiuyue-cache', '.git']);
@@ -77,6 +78,10 @@ class PluginScope {
         if (!tool || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(tool.name) || typeof tool.description !== 'string' || !tool.description.trim() || typeof tool.execute !== 'function' || tool.parameters?.type !== 'object') throw new Error('Tools need a valid name, description, object parameters, and execute function.');
         if (tool.review && !tool.readOnly) throw new Error('Only read-only plugin tools may run during memory review.');
         if (tool.experienceKind !== undefined && (typeof tool.experienceKind !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(tool.experienceKind))) throw new Error('A tool experienceKind must be a local event kind.');
+        if (tool.available !== undefined && typeof tool.available !== 'function') throw new Error('A tool available check must be a function.');
+        if (tool.chatTarget !== undefined && typeof tool.chatTarget !== 'function') throw new Error('A tool chatTarget resolver must be a function.');
+        if (tool.stale && !tool.chatTarget) throw new Error('A stale tool must declare chatTarget.');
+        if (tool.readOnly && (tool.chatTarget || tool.stale || tool.endsThought)) throw new Error('Read-only plugin tools cannot declare chat action hooks.');
         // Exercise the schema engine now so malformed schemas fail before activation.
         Check(tool.parameters as TSchema, {});
         this.tools.push({ ...tool, parameters: structuredClone(tool.parameters) });
@@ -131,68 +136,124 @@ class PluginScope {
     })();
   }
   adapter(definition: PluginDefinition, enabled: boolean, dataDirectory: string): LifePlugin {
+    let adapterRuntime: ToolRuntime | undefined;
+    const makeInspector = (runtime = adapterRuntime): AdapterInspector => ({
+      list: () => (runtime?.adapters() ?? []).map(item => ({ ...item })),
+      allowed: (instance, operation) => {
+        try { return Boolean(runtime?.hasAllowed(nativeToolName(instance, operation))); }
+        catch { return false; }
+      },
+    });
+    const resolveTarget = (target: UserChatTarget | undefined, inspector: AdapterInspector): string | undefined => {
+      if (!target || typeof target.instance !== 'string' || typeof target.id !== 'string' || !target.id) return;
+      const account = inspector.list().find(item => item.instance === target.instance);
+      if (!account) return;
+      return conversationRef({ platform: account.platform, accountId: account.accountId }, target.type, target.id);
+    };
+    const toolChatActions = this.tools.filter(tool => tool.chatTarget).map(tool => tool.name);
+    const toolStaleActions = this.tools.filter(tool => tool.chatTarget && tool.stale).map(tool => tool.name);
+    const toolEndsThought = new Set(this.tools.filter(tool => tool.endsThought).map(tool => tool.name));
     const base: LifePlugin = {
       id: this.id, contextVersion: definition.contextVersion ?? '1', enabled: () => enabled,
       reviewTools: this.tools.filter(tool => tool.review).map(tool => tool.name),
       experienceKinds: Object.fromEntries(this.tools.filter(tool => tool.experienceKind).map(tool => [tool.name, `plugin:${this.id}:${tool.experienceKind}`])),
       activities: this.activities,
+      chatActions: toolChatActions,
+      staleActions: toolStaleActions,
+      chatTarget: (name, args) => {
+        const tool = this.tools.find(item => item.name === name && item.chatTarget);
+        if (!tool) return;
+        const inspector = makeInspector();
+        try { return resolveTarget(tool.chatTarget!(args, inspector), inspector); }
+        catch (error) { this.log('error', errorText(error)); return; }
+      },
+      endsThought: name => toolEndsThought.has(name),
       observation: events => this.observations.flatMap(provider => {
         try { const lines = provider(structuredClone(events)); if (!Array.isArray(lines) || lines.some(line => typeof line !== 'string')) throw new Error('observe must return strings.'); return lines; }
         catch (error) { this.log('error', errorText(error)); return []; }
       }),
-      tools: runtime => this.tools.map(tool => runtime.tool(tool.name, tool.description, tool.parameters as TSchema, async (args, signal) => {
-        this.active();
-        if (!Check(tool.parameters as TSchema, args)) throw new Error(`Invalid arguments for ${tool.name}.`);
-        const thought = runtime.context();
-        const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
-        let open = true;
-        const sources = new Set<string>();
-        const images: { type: 'image'; data: string; mimeType: string }[] = [];
-        const labels: string[] = [];
-        let imageSlots = Math.min(runtime.config.limits.maxImages, 20), imageBytes = 0;
-        const check = () => { this.active(); if (!open || runtime.context() !== thought) throw new Error('This plugin tool call has ended.'); runtime.check(combined); };
-        const write = () => { check(); if (thought.reviewing || tool.readOnly) throw new Error('This read-only tool cannot perform actions.'); };
-        try {
-          const result = await tool.execute(args, {
-            signal: combined, reviewing: thought.reviewing ?? false,
-            record: (kind, value) => { check(); const recorded = runtime.record(`plugin:${this.id}:${kind}`, value); sources.add(recorded.sourceId); return recorded; },
-            attachImages: async (sourceId, urls) => {
+      tools: runtime => {
+        adapterRuntime = runtime;
+        const toolInspector = makeInspector(runtime);
+        return this.tools.map(tool => ({
+          ...runtime.tool(tool.name, tool.description, tool.parameters as TSchema, async (args, signal) => {
+            this.active();
+            if (!Check(tool.parameters as TSchema, args)) throw new Error(`Invalid arguments for ${tool.name}.`);
+            const thought = runtime.context();
+            const combined = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
+            let open = true;
+            const sources = new Set<string>();
+            const images: { type: 'image'; data: string; mimeType: string }[] = [];
+            const labels: string[] = [];
+            let imageSlots = Math.min(runtime.config.limits.maxImages, 20), imageBytes = 0;
+            const check = () => { this.active(); if (!open || runtime.context() !== thought) throw new Error('This plugin tool call has ended.'); runtime.check(combined); };
+            const write = () => { check(); if (thought.reviewing || tool.readOnly) throw new Error('This read-only tool cannot perform actions.'); };
+            try {
+              const result = await tool.execute(args, {
+                signal: combined, reviewing: thought.reviewing ?? false,
+                record: (kind, value) => { check(); const recorded = runtime.record(`plugin:${this.id}:${kind}`, value); sources.add(recorded.sourceId); return recorded; },
+                attachImages: async (sourceId, urls) => {
+                  check();
+                  if (!sources.has(sourceId) || !Array.isArray(urls) || urls.some(url => typeof url !== 'string') || urls.length > 100) throw new Error('Images need URLs from a source recorded by this invocation.');
+                  const available = new Set<string>();
+                  const collect = (value: unknown) => { if (typeof value === 'string') available.add(value); else if (value && typeof value === 'object') Object.values(value).forEach(collect); };
+                  collect(this.store.event(sourceId)?.payload);
+                  const unique = [...new Set(urls)];
+                  if (unique.some(url => !available.has(url))) throw new Error('An image URL does not appear in the recorded source.');
+                  const selected = unique.slice(0, imageSlots); imageSlots -= selected.length;
+                  const delivery = { attached: [] as string[], failed: [] as { url: string; error: string }[], omitted: unique.slice(selected.length) };
+                  const results = await Promise.all(selected.map(async url => {
+                    try { return { url, image: await fetchImage(url, combined) }; }
+                    catch { check(); return { url }; }
+                  }));
+                  check();
+                  for (const { url, image } of results) {
+                    if (!image) { delivery.failed.push({ url, error: 'Image unavailable; its appearance has not been perceived.' }); continue; }
+                    if (imageBytes + image.data.length > 12_000_000) { delivery.omitted.push(url); continue; }
+                    imageBytes += image.data.length;
+                    delivery.attached.push(url); labels.push(`Image from ${sourceId}: ${url}`);
+                    images.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.type });
+                  }
+                  return delivery;
+                },
+                action: (kind, parameters, dispatch) => { write(); return runtime.externalAction(`plugin:${this.id}:${kind}`, parameters, () => dispatch(combined), combined); },
+                adapters: {
+                  list: () => { check(); return toolInspector.list(); },
+                  allowed: (instance, operation) => { check(); return toolInspector.allowed(instance, operation); },
+                  query: (instance, operation, parameters) => { check(); const name = nativeToolName(instance, operation); if (!runtime.definition(name).readOnly) throw new Error('Use adapters.action for external writes.'); return runtime.query(name, parameters, combined); },
+                  action: (instance, operation, parameters) => { write(); const name = nativeToolName(instance, operation); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
+                  perform: (kind, parameters, run, options) => {
+                    write();
+                    if (typeof kind !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(kind)) throw new Error('An action kind must be a local identifier.');
+                    const target = options?.target ?? tool.chatTarget?.(args, toolInspector);
+                    const conversation = resolveTarget(target, toolInspector);
+                    let dispatched = false;
+                    return runtime.action(
+                      `plugin:${this.id}:${kind}`,
+                      parameters,
+                      dispatch => run((instance, operation, actionArgs) => {
+                        check();
+                        if (dispatched) throw new Error('adapters.perform may dispatch at most one native action per recorded action.');
+                        dispatched = true;
+                        const name = nativeToolName(instance, operation);
+                        return dispatch(name, runtime.resolveMedia(actionArgs) as Record<string, unknown>);
+                      }, combined),
+                      combined,
+                      undefined,
+                      conversation,
+                    );
+                  },
+                },
+              });
               check();
-              if (!sources.has(sourceId) || !Array.isArray(urls) || urls.some(url => typeof url !== 'string') || urls.length > 100) throw new Error('Images need URLs from a source recorded by this invocation.');
-              const available = new Set<string>();
-              const collect = (value: unknown) => { if (typeof value === 'string') available.add(value); else if (value && typeof value === 'object') Object.values(value).forEach(collect); };
-              collect(this.store.event(sourceId)?.payload);
-              const unique = [...new Set(urls)];
-              if (unique.some(url => !available.has(url))) throw new Error('An image URL does not appear in the recorded source.');
-              const selected = unique.slice(0, imageSlots); imageSlots -= selected.length;
-              const delivery = { attached: [] as string[], failed: [] as { url: string; error: string }[], omitted: unique.slice(selected.length) };
-              const results = await Promise.all(selected.map(async url => {
-                try { return { url, image: await fetchImage(url, combined) }; }
-                catch { check(); return { url }; }
-              }));
-              check();
-              for (const { url, image } of results) {
-                if (!image) { delivery.failed.push({ url, error: 'Image unavailable; its appearance has not been perceived.' }); continue; }
-                if (imageBytes + image.data.length > 12_000_000) { delivery.omitted.push(url); continue; }
-                imageBytes += image.data.length;
-                delivery.attached.push(url); labels.push(`Image from ${sourceId}: ${url}`);
-                images.push({ type: 'image', data: image.data.toString('base64'), mimeType: image.type });
-              }
-              return delivery;
-            },
-            action: (kind, parameters, dispatch) => { write(); return runtime.externalAction(`plugin:${this.id}:${kind}`, parameters, () => dispatch(combined), combined); },
-            adapters: {
-              query: (instance, operation, parameters) => { check(); const name = nativeToolName(instance, operation); if (!runtime.definition(name).readOnly) throw new Error('Use adapters.action for external writes.'); return runtime.query(name, parameters, combined); },
-              action: (instance, operation, parameters) => { write(); const name = nativeToolName(instance, operation); return runtime.action(name, parameters, dispatch => dispatch(name, runtime.resolveMedia(parameters) as Record<string, unknown>), combined); },
-            },
-
-          });
-          check();
-          const response = jsonResult(result);
-          for (const [index, image] of images.entries()) response.content.push({ type: 'text', text: labels[index]! }, image);
-          return response;
-        } finally { open = false; }
-      })),
+              const response = jsonResult(result);
+              for (const [index, image] of images.entries()) response.content.push({ type: 'text', text: labels[index]! }, image);
+              return response;
+            } finally { open = false; }
+          }),
+          ...(tool.available ? { available: () => { try { return Boolean(tool.available!(toolInspector)); } catch (error) { this.log('error', errorText(error)); return false; } } } : {}),
+        }));
+      },
       start: () => { if (this.state !== 'staged') throw new Error('Plugin already started or stopped.'); mkdirSync(dataDirectory, { recursive: true, mode: 0o700 }); this.state = 'active'; this.schedule(); },
       stop: () => this.stop(), idle: () => this.idle(), quiesce: () => this.quiesce(),
     };
@@ -202,10 +263,13 @@ class PluginScope {
       tools: runtime => [...base.tools(runtime), ...adapters.flatMap(adapter => adapter.tools(runtime))],
       reviewTools: [...base.reviewTools ?? [], ...adapters.flatMap(adapter => adapter.reviewTools ?? [])],
       images: event => adapters.flatMap(adapter => adapter.images?.(event) ?? []),
-      chatActions: adapters.flatMap(adapter => adapter.chatActions ?? []),
-      chatTarget: (name, args) => adapters.map(adapter => adapter.chatTarget?.(name, args)).find(Boolean),
+      chatActions: [...base.chatActions ?? [], ...adapters.flatMap(adapter => adapter.chatActions ?? [])],
+      staleActions: [...base.staleActions ?? [], ...adapters.flatMap(adapter => adapter.staleActions ?? [])],
+      chatTarget: (name, args) => base.chatTarget?.(name, args) ?? adapters.map(adapter => adapter.chatTarget?.(name, args)).find(Boolean),
+      endsThought: (name, details) => Boolean(base.endsThought?.(name, details) || adapters.some(adapter => adapter.endsThought?.(name, details))),
       nativeActions: {
         accounts: adapters.flatMap(adapter => adapter.nativeActions?.accounts ?? []),
+        instances: adapters.flatMap(adapter => adapter.nativeActions?.instances ?? []),
         definition: name => adapters.map(adapter => adapter.nativeActions?.definition(name)).find(Boolean),
         allowed: name => adapters.some(adapter => adapter.nativeActions?.definition(name) && adapter.nativeActions.allowed(name)),
         execute: (name, args, signal) => { const adapter = adapters.find(adapter => adapter.nativeActions?.definition(name)); if (!adapter) throw new Error('Unknown native operation.'); return adapter.nativeActions!.execute!(name, args, signal); },

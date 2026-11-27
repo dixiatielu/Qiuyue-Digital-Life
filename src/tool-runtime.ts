@@ -79,7 +79,7 @@ export const jsonResult = (result: unknown): AgentToolResult<any> => ({ content:
 
 /** Shared execution rules for built-in and plugin tools. Plugins never create their own action receipts. */
 export class ToolRuntime {
-  constructor(readonly config: Config, readonly store: Store, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate' | 'nativeDefinition' | 'nativeAllowed' | 'nativeExecute' | 'chatTarget' | 'images'> = new PluginHost([]), private namespace?: string) {}
+  constructor(readonly config: Config, readonly store: Store, readonly context: () => ThoughtContext, private extensions: Pick<PluginHost, 'resolveMedia' | 'decorate' | 'nativeDefinition' | 'nativeAllowed' | 'hasNativeAllowed' | 'nativeExecute' | 'adapters' | 'chatTarget' | 'images'> = new PluginHost([]), private namespace?: string) {}
   scoped(instance: string) { return new ToolRuntime(this.config, this.store, this.context, this.extensions, instance); }
   private name(name: string) { return this.namespace ? nativeToolName(this.namespace, name) : name; }
   private dispatch(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -87,6 +87,7 @@ export class ToolRuntime {
     if (!result) throw new ActionNotDispatchedError(`Unknown native interface: ${name}`);
     return result;
   }
+  adapters() { return this.extensions.adapters(); }
   resolveMedia(value: unknown): unknown { return this.extensions.resolveMedia(value); }
   resolveEventImage(args: { id: string; index?: number; url?: string }): ResolvedEventImage { return resolveEventImage(this.store, this.extensions, args); }
   decorate(tool: AgentTool): AgentTool {
@@ -95,6 +96,7 @@ export class ToolRuntime {
   }
   check(signal?: AbortSignal) { ensureCurrent(this.store, this.context(), signal); }
   allowed(name: string) { return this.extensions.nativeAllowed(this.name(name)); }
+  hasAllowed(name: string) { return this.extensions.hasNativeAllowed(this.name(name)); }
   definition(name: string) {
     const definition = this.extensions.nativeDefinition(this.name(name));
     if (!definition) throw new Error(`Unknown native interface: ${name}`);
@@ -135,9 +137,10 @@ export class ToolRuntime {
     return { outcome: receipt(this.store.actionById(attempt.action.id)!), reused: !attempt.fresh };
   }
   /** Preparation may read through query; only dispatch can perform the recorded external action. */
-  async action(name: string, args: Record<string, unknown>, perform: (dispatch: (name: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>, signal?: AbortSignal, failure = errorResult) {
+  async action(name: string, args: Record<string, unknown>, perform: (dispatch: (name: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<unknown>, signal?: AbortSignal, failure = errorResult, conversation?: string) {
     this.check(signal);
-    const attempt = this.store.beginAction(`${this.name(name)}:${crypto.randomUUID()}`, this.name(name), args, [...this.context().sources], [...this.context().triggers], this.config.limits.actionsPerHour, this.extensions.chatTarget?.(this.name(name), args));
+    const target = () => conversation ?? this.extensions.chatTarget?.(this.name(name), args);
+    const attempt = this.store.beginAction(`${this.name(name)}:${crypto.randomUUID()}`, this.name(name), args, [...this.context().sources], [...this.context().triggers], this.config.limits.actionsPerHour, target());
     if (attempt.fresh) {
       let dispatched: string | undefined;
       try {
@@ -147,7 +150,7 @@ export class ToolRuntime {
           dispatched = this.definition(action).name;
           return this.dispatch(action, parameters, signal);
         });
-        this.store.finishAction(attempt.action.id, 'success', result, this.extensions.chatTarget?.(this.name(name), args));
+        this.store.finishAction(attempt.action.id, 'success', result, target());
       } catch (error) {
         this.store.finishAction(attempt.action.id, dispatched === undefined || definitelyFailed(error, dispatched) ? 'failed' : 'unknown', failure(error));
       }

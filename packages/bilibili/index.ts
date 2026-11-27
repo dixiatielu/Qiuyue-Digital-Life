@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { PluginContext, PluginDefinition, PluginCall } from '../../src/plugin-sdk.js';
+import type { AdapterInspector, PluginContext, PluginDefinition, PluginCall } from '../../src/plugin-sdk.js';
 import metadata from './plugin.json' with { type: 'json' };
 import { registerOnlineReading, PlatformNetwork, ReadingHistory, type PluginStorage, type NetworkSettings, type OnlineReader, type ReadingEntry, type ReadingItem } from '../online-reading/index.js';
 const api = 'https://api.bilibili.com';
@@ -33,6 +33,45 @@ export function bilibiliReference(input: string): { bvid?: string; aid?: string;
   const part = url.searchParams.has('p') ? Number(url.searchParams.get('p')) : undefined;
   if (part !== undefined && (!Number.isSafeInteger(part) || part < 1)) throw new Error('Invalid video part.');
   return { ...(match[1]!.startsWith('BV') ? { bvid: match[1]! } : { aid: match[1]!.slice(2) }), part };
+}
+
+export function extractBilibiliMiniAppCard(response: unknown): string {
+  const value = response && typeof response === 'object' && 'data' in response ? (response as { data: unknown }).data : response;
+  let parsed: unknown;
+  let card: string;
+  if (typeof value === 'string') {
+    card = value;
+    try { parsed = JSON.parse(value); } catch { throw new Error('SnowLuma returned invalid JSON for the Bilibili mini-app card.'); }
+  } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+    parsed = value;
+    card = JSON.stringify(value);
+  } else {
+    throw new Error('SnowLuma returned no Bilibili mini-app card.');
+  }
+  const object = parsed as { config?: { token?: unknown }; meta?: { detail_1?: { qqdocurl?: unknown } } };
+  if (typeof object.config?.token !== 'string' || !object.config.token) throw new Error('Bilibili mini-app card is missing its QQ signature token.');
+  if (typeof object.meta?.detail_1?.qqdocurl !== 'string' || !object.meta.detail_1.qqdocurl) {
+    throw new Error('SnowLuma get_mini_app_ark returned a card without qqdocurl; patch SnowLuma get_mini_app_ark to send verType=3 and webURL (field 17) so the card opens in the release mini-app.');
+  }
+  return card;
+}
+function qqShareAdapters(adapters: AdapterInspector, operation?: 'send_group_msg' | 'send_private_msg') {
+  return adapters.list().filter(item => item.platform === 'qq'
+    && adapters.allowed(item.instance, 'get_mini_app_ark')
+    && (operation ? adapters.allowed(item.instance, operation) : adapters.allowed(item.instance, 'send_group_msg') || adapters.allowed(item.instance, 'send_private_msg')));
+}
+function resolveQqShareAdapter(adapters: AdapterInspector, requested?: string, operation?: 'send_group_msg' | 'send_private_msg') {
+  if (requested !== undefined) {
+    const account = adapters.list().find(item => item.instance === requested && item.platform === 'qq');
+    if (!account) throw new Error(`QQ adapter ${requested} is not available.`);
+    if (!adapters.allowed(account.instance, 'get_mini_app_ark')) throw new Error(`The operator has not enabled get_mini_app_ark on ${account.instance}.`);
+    if (operation && !adapters.allowed(account.instance, operation)) throw new Error(`The operator has not enabled ${operation} on ${account.instance}.`);
+    return account;
+  }
+  const eligible = qqShareAdapters(adapters, operation);
+  if (eligible.length === 1) return eligible[0]!;
+  if (eligible.length > 1) throw new Error(`Multiple QQ adapters can share Bilibili cards (${eligible.map(item => item.instance).join(', ')}); specify instance.`);
+  throw new Error(operation ? `No QQ adapter has get_mini_app_ark and ${operation} enabled.` : 'No QQ adapter with get_mini_app_ark and send permission is available.');
 }
 
 export class BilibiliReader implements OnlineReader {
@@ -72,11 +111,13 @@ export class BilibiliReader implements OnlineReader {
     if (!/^BV[0-9A-Za-z]{10}$/.test(value.bvid)) throw new Error('Bilibili returned an invalid video ID.');
     const category = text(value.tname ?? value.typename, 80) || undefined;
     const durationSeconds = parseDuration(value.duration);
+    const aid = Number(value.aid);
     return {
       id: value.bvid, title: text(value.title, 300), url: `https://www.bilibili.com/video/${value.bvid}`,
       author: text(value.owner?.name ?? value.author, 100), description: text(value.desc ?? value.description, 1500), cover: imageUrl(value.pic),
       ...(category ? { category } : {}),
       ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+      ...(Number.isSafeInteger(aid) && aid > 0 ? { locator: { aid: String(aid) } } : {}),
     };
   }
   async browse(query: string | undefined, page: number, signal?: AbortSignal) {
@@ -146,7 +187,7 @@ export class BilibiliReader implements OnlineReader {
     // As with likes, a reused success receipt may predate a later removal.
     return { confirmed: action.outcome.status === 'success' && !action.reused, saved, collectionId: folder.id, action };
   }
-  async read(input: string, previous: ReadingEntry | undefined, restart: boolean, signal?: AbortSignal) {
+  private async resolveReference(input: string, signal?: AbortSignal) {
     let reference = bilibiliReference(input);
     if (reference.short) {
       const response = await this.network.request(reference.short, { headers: { 'User-Agent': agent } }, signal, true);
@@ -155,6 +196,60 @@ export class BilibiliReader implements OnlineReader {
       reference = bilibiliReference(new URL(location, reference.short).href);
       if (reference.short) throw new Error('Bilibili short link did not resolve to a video.');
     }
+    return reference;
+  }
+  async share(args: { input: string; group_id?: number; user_id?: number; instance?: string }, call: PluginCall) {
+    if ((args.group_id === undefined) === (args.user_id === undefined)) throw new Error('Specify exactly one of group_id or user_id.');
+    const operation = args.group_id !== undefined ? 'send_group_msg' : 'send_private_msg';
+    const target = args.group_id !== undefined ? { group_id: args.group_id } : { user_id: args.user_id! };
+    const account = resolveQqShareAdapter(call.adapters, args.instance, operation);
+    const reference = await this.resolveReference(args.input, call.signal);
+    let prefetched: ReadingItem | undefined;
+    let bvid = reference.bvid;
+    if (!bvid) {
+      const data = await this.signed('/x/web-interface/wbi/view', { aid: reference.aid! }, call.signal);
+      prefetched = this.item(data);
+      bvid = prefetched.id;
+      this.history.discover([prefetched]);
+    }
+    const actionArgs = { instance: account.instance, ...target, id: bvid, ...(reference.part ? { part: reference.part } : {}) };
+    const { outcome, reused } = await call.adapters.perform('share', actionArgs, async (dispatch, signal) => {
+      let video: ReadingItem | undefined = prefetched ?? this.history.get(bvid);
+      let aid = Number(video?.locator?.aid);
+      if (!video || !Number.isSafeInteger(aid) || aid <= 0 || !video.title || !video.cover) {
+        const data = await this.signed('/x/web-interface/wbi/view', { bvid }, signal);
+        const fetched = this.item(data);
+        if (fetched.id !== bvid) throw new Error('Bilibili returned a different video.');
+        aid = Number(fetched.locator?.aid);
+        if (!Number.isSafeInteger(aid) || aid <= 0) throw new Error('Bilibili returned an invalid video aid.');
+        if (!fetched.cover) throw new Error('Bilibili video has no cover image URL for card sharing.');
+        video = fetched;
+        this.history.discover([fetched]);
+      }
+      const webUrl = `https://www.bilibili.com/video/${bvid}${reference.part ? `?p=${reference.part}` : ''}`;
+      const jumpUrl = `pages/video/video?avid=${aid}&bvid=${bvid}`;
+      const desc = text(video.description || video.author || video.title, 200);
+      const ark = await call.adapters.query(account.instance, 'get_mini_app_ark', {
+        type: 'bili', title: video.title, desc, pic_url: video.cover, jump_url: jumpUrl, web_url: webUrl,
+      });
+      const card = extractBilibiliMiniAppCard(ark);
+      const receipt = await dispatch(account.instance, operation, { ...target, message: [{ type: 'json', data: { data: card } }] }) as Record<string, unknown> | null;
+      const messageId = typeof receipt?.message_id === 'number' ? receipt.message_id : undefined;
+      return { ...(messageId === undefined ? {} : { message_id: messageId }), receipt, id: bvid, title: video.title, url: webUrl, instance: account.instance, card };
+    }, { target: { instance: account.instance, type: args.group_id !== undefined ? 'group' : 'private', id: String(args.group_id ?? args.user_id) } });
+    if (outcome.status !== 'success') throw new Error(JSON.stringify({ actionId: outcome.id, outcome: outcome.status, reused, error: outcome.result, instruction: 'Use inspect_actions to check the action record.' }));
+    const saved = (outcome.result ?? {}) as { message_id?: number; receipt?: unknown; id?: string; title?: string; url?: string };
+    const summary = {
+      id: saved.id ?? bvid, title: saved.title ?? '', url: saved.url ?? `https://www.bilibili.com/video/${bvid}`,
+      instance: account.instance, ...target, actionId: outcome.id, reused,
+      ...(saved.message_id === undefined ? {} : { message_id: saved.message_id }),
+      receipt: saved.receipt ?? null,
+    };
+    const recorded = call.record('share', summary);
+    return { sourceId: recorded.sourceId, outcome: 'success', ...summary };
+  }
+  async read(input: string, previous: ReadingEntry | undefined, restart: boolean, signal?: AbortSignal) {
+    const reference = await this.resolveReference(input, signal);
     const data = await this.signed('/x/web-interface/wbi/view', reference.bvid ? { bvid: reference.bvid } : { aid: reference.aid! }, signal);
     const item = this.item(data);
     previous ??= this.history.get(item.id);
@@ -217,6 +312,38 @@ export function setup(ctx: PluginContext) {
     read: 'Read a Bilibili BV/av ID, video URL or b23.tv link: description, one chunk of subtitles and a sample of comments. This does not play or listen to the video. Cover images can be inspected with view_event_image using the returned sourceId and cover URL.',
     activity: 'Browse Bilibili for something that interests you, or continue something kept in bili_history; stop, keep it to yourself, or share a genuine find',
     browseGuidance: 'Searching by your own topics usually fits your interests better than the generic popular chart, which is not personalized.',
+  });
+  ctx.tool({
+    name: 'bili_share',
+    experienceKind: 'share',
+    stale: true,
+    available: adapters => qqShareAdapters(adapters).length > 0,
+    chatTarget: (args, adapters) => {
+      if (!args || (args.group_id === undefined) === (args.user_id === undefined)) return;
+      const operation = args.group_id !== undefined ? 'send_group_msg' : 'send_private_msg';
+      try {
+        const account = resolveQqShareAdapter(adapters, args.instance, operation);
+        return { instance: account.instance, type: args.group_id !== undefined ? 'group' : 'private', id: String(args.group_id ?? args.user_id) };
+      } catch { return; }
+    },
+    description: 'Share a Bilibili video into a QQ group or private chat as a Bilibili mini-app card (signed via SnowLuma get_mini_app_ark and sent as a json card). Pass a BV/av ID, video URL, or b23.tv link, and specify exactly one of group_id or user_id; omit instance when only one QQ adapter is available. Share only videos you actually read or saw, choosing a fitting audience and timing. If you want to add a brief reaction alongside the card, send a separate chat message.',
+    parameters: {
+      type: 'object',
+      properties: {
+        input: { type: 'string', minLength: 1, maxLength: 2000, description: 'Bilibili BV/av ID, video URL, or b23.tv link' },
+        group_id: { type: 'integer', minimum: 1, description: 'Target QQ group ID; specify exactly one of group_id or user_id' },
+        user_id: { type: 'integer', minimum: 1, description: 'Target QQ friend user ID; specify exactly one of group_id or user_id' },
+        instance: { type: 'string', minLength: 1, maxLength: 64, description: 'QQ adapter instance ID (optional when only one QQ adapter supports Bilibili card sharing)' },
+      },
+      required: ['input'],
+      additionalProperties: false,
+    },
+    execute: (args, call) => reader.share(args, call),
+  });
+  ctx.activity({
+    activity: 'Share a Bilibili video in QQ as a mini-app card',
+    tools: ['bili_share'],
+    instructions: 'When sharing a Bilibili video in a QQ group or private chat, prefer bili_share so it arrives as a Bilibili mini-app card rather than only a plain link. Share only videos you actually read or saw, choosing a fitting audience and timing; if you want to add a brief reaction, send it separately with your chat message tool. Keep sharing occasional and natural rather than routine.',
   });
 }
 

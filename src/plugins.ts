@@ -41,7 +41,7 @@ export interface LifePlugin {
   essential?: boolean;
   enabled?(): boolean;
   tools(runtime: ToolRuntime): PluginTool[];
-  nativeActions?: { accounts?: readonly import('./identity.js').PlatformIdentity[]; definition(name: string): NativeActionDefinition | undefined; allowed(name: string): boolean; execute?(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> };
+  nativeActions?: { accounts?: readonly import('./identity.js').PlatformIdentity[]; instances?: readonly import('./plugin-sdk.js').AdapterInfo[]; definition(name: string): NativeActionDefinition | undefined; allowed(name: string): boolean; execute?(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> };
   reviewTools?: string[];
   emojiNames?(events?: EnvironmentEvent[], signal?: AbortSignal): Record<string, string> | Promise<Record<string, string>>;
   knownEmojiNames?(): Record<string, string>;
@@ -99,9 +99,16 @@ export class PluginHost {
     for (const plugin of this.plugins) { const definition = plugin.nativeActions?.definition(name); if (definition) return definition; }
     throw new Error(`Unknown native interface: ${name}`);
   }
+  adapters(): import('./plugin-sdk.js').AdapterInfo[] {
+    return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.nativeActions?.instances ?? []);
+  }
   nativeAllowed(name: string): boolean {
     for (const plugin of this.plugins) if (plugin.nativeActions?.definition(name)) return (!plugin.nativeActions.execute || this.enabled(plugin)) && plugin.nativeActions.allowed(name);
     throw new Error(`Unknown native interface: ${name}`);
+  }
+  hasNativeAllowed(name: string): boolean {
+    for (const plugin of this.plugins) if (plugin.nativeActions?.definition(name)) return (!plugin.nativeActions.execute || this.enabled(plugin)) && plugin.nativeActions.allowed(name);
+    return false;
   }
   nativeExecute(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> | undefined {
     for (const plugin of this.plugins) if (plugin.nativeActions?.definition(name) && plugin.nativeActions.execute) {

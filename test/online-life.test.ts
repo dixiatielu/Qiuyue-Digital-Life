@@ -13,6 +13,8 @@ import { bilibiliReference } from '../packages/bilibili/index.js';
 import { xiaohongshuReference } from '../packages/xiaohongshu/index.js';
 import { PlatformNetwork, ReadingHistory, networkDefaults } from '../packages/online-reading/index.js';
 import { createPlugins } from './helpers.js';
+import { createPlugins as createAllPlugins } from '../src/plugins/index.js';
+import { createTools as createAllTools } from '../src/tools.js';
 import { ToolRuntime, type ThoughtContext } from '../src/tool-runtime.js';
 import { PluginHost } from '../src/plugins.js';
 import { Store } from '../src/store.js';
@@ -570,4 +572,146 @@ test('Xiaohongshu likes require a private locator and validate both note identit
     assert.equal(result.action.outcome.status, 'unknown'); assert.equal(result.localUpdated, false);
     assert.equal((await h.run('xhs_history')).items[0].platformLike, undefined);
   } finally { h.store.close(); }
+});
+
+test('Bilibili card sharing uses cached aid, validates patched get_mini_app_ark output, preserves unknown outcomes, and obeys QQ permissions', async t => {
+  fastClock(t);
+  const transport = biliTransport();
+  const qqCalls: { instance: string; action: string; args: Record<string, unknown> }[] = [];
+  let arkMode: 'patched' | 'unpatched' | 'unsigned' = 'patched';
+  let loseSend = false;
+  const makeCard = (args: Record<string, unknown>) => ({
+    ver: '1.0.0.19',
+    prompt: `[QQ小程序]${args.title}`,
+    config: arkMode === 'unsigned' ? { type: 'normal' } : { type: 'normal', token: 'sig-token-1' },
+    app: 'com.tencent.miniapp_01',
+    view: 'view_8C8E89B49BE609866298ADDFF2DBABA4',
+    meta: {
+      detail_1: {
+        appid: '1109937557',
+        title: '哔哩哔哩',
+        desc: args.title,
+        preview: 'https://qq.ugcimg.cn/preview',
+        url: 'm.q.qq.com/a/s/short',
+        ...(arkMode === 'patched' ? { qqdocurl: args.web_url } : {}),
+      },
+    },
+  });
+  const f = fixture({
+    execute: async (action, args) => {
+      qqCalls.push({ instance: 'qq_main', action, args });
+      if (action === 'get_mini_app_ark') return { data: makeCard(args) };
+      if (action === 'send_group_msg' || action === 'send_private_msg') {
+        if (loseSend) throw new Error('receipt lost');
+        return { message_id: action === 'send_group_msg' ? -101 : -202 };
+      }
+      return {};
+    },
+  });
+  try {
+    const bili = await loadedPlugin(t, 'bilibili', f.cfg, f.store, transport.fetcher);
+    f.plugins.install([...f.plugins.installed(), bili]);
+    f.brain.thought.lifeOnly = false;
+    const tool = (name: string) => f.tools.current().find(item => item.name === name);
+    const run = async (name: string, args: Record<string, unknown> = {}) => {
+      const result = await tool(name)!.execute('test', args);
+      return JSON.parse((result.content[0] as { text: string }).text);
+    };
+
+    assert.ok(tool('bili_share'));
+    assert.ok(!f.reviewTools.current().some(item => item.name === 'bili_share'));
+    assert.equal(f.plugins.chatTarget('bili_share', { input: video, group_id: 100 }), 'qq:900:group:100');
+    assert.equal(f.plugins.chatTarget('bili_share', { input: video, group_id: 100 }, true), 'qq:900:group:100');
+
+    // Read once so aid, title, and cover are cached locally.
+    await run('bili_read', { input: video });
+    const biliRequestsAfterRead = transport.requests.length;
+
+    // Unpatched SnowLuma (missing qqdocurl) and unsigned cards fail before sending (status=failed).
+    arkMode = 'unpatched';
+    await assert.rejects(run('bili_share', { input: video, group_id: 100 }), /without qqdocurl/);
+    assert.equal(qqCalls.filter(call => call.action === 'send_group_msg').length, 0);
+    assert.equal(f.store.actions().at(-1)?.status, 'failed');
+    arkMode = 'unsigned';
+    await assert.rejects(run('bili_share', { input: video, group_id: 100 }), /signature token/);
+    assert.equal(qqCalls.filter(call => call.action === 'send_group_msg').length, 0);
+    assert.equal(f.store.actions().at(-1)?.status, 'failed');
+    assert.equal(transport.requests.length, biliRequestsAfterRead, 'cached aid and cover avoid extra Bilibili HTTP reads');
+
+    // Patched SnowLuma sends the signed json card and records one conversation-scoped action.
+    arkMode = 'patched';
+    const shared = await run('bili_share', { input: video, group_id: 100 });
+    assert.equal(shared.outcome, 'success'); assert.equal(shared.id, video); assert.equal(shared.group_id, 100);
+    assert.equal(shared.message_id, -101); assert.equal(transport.requests.length, biliRequestsAfterRead);
+    const arkCall = qqCalls.filter(call => call.action === 'get_mini_app_ark').at(-1)!;
+    assert.deepEqual(arkCall.args, {
+      type: 'bili', title: 'Clouds', desc: 'Draw clouds', pic_url: 'https://i0.hdslb.com/cover.jpg',
+      jump_url: `pages/video/video?avid=42&bvid=${video}`, web_url: `https://www.bilibili.com/video/${video}`,
+    });
+    const sendCall = qqCalls.filter(call => call.action === 'send_group_msg').at(-1)!;
+    assert.equal(sendCall.args.group_id, 100);
+    const sentSegments = sendCall.args.message as { type: string; data: { data: string } }[];
+    assert.equal(sentSegments[0]!.type, 'json');
+    assert.equal(JSON.parse(sentSegments[0]!.data.data).meta.detail_1.qqdocurl, `https://www.bilibili.com/video/${video}`);
+    const action = f.store.actions().find(item => item.id === shared.actionId)!;
+    assert.equal(action.kind, 'plugin:bilibili:share');
+    assert.equal(action.conversation, 'qq:900:group:100');
+    assert.equal(f.store.sentMessage(-101, { platform: 'qq', accountId: '900' }), true);
+
+    // A short b23.tv link with ?p=2 routes to private chat and keeps the part in web_url.
+    const privateShare = await run('bili_share', { input: 'https://b23.tv/abc123', user_id: 7 });
+    assert.equal(privateShare.user_id, 7); assert.equal(privateShare.url, `https://www.bilibili.com/video/${video}?p=2`);
+    assert.equal(f.store.actions().find(item => item.id === privateShare.actionId)?.conversation, 'qq:900:private:7');
+
+    // A lost send receipt leaves an unknown outcome and prevents repeating get_mini_app_ark or send.
+    loseSend = true;
+    await assert.rejects(run('bili_share', { input: video, group_id: 200 }), /"outcome":"unknown"/);
+    const callsBeforeRetry = qqCalls.length;
+    await assert.rejects(run('bili_share', { input: video, group_id: 200 }), /"reused":true/);
+    assert.equal(qqCalls.length, callsBeforeRetry);
+    loseSend = false;
+
+    // Input validation and operator permission boundaries.
+    await assert.rejects(run('bili_share', { input: video, group_id: 100, user_id: 7 }), /exactly one/);
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['send_private_msg'] };
+    assert.ok(tool('bili_share'));
+    await assert.rejects(run('bili_share', { input: video, user_id: 8 }), /send_private_msg/);
+    f.cfg.adapters[0]!.tools = { allow: '*', deny: ['get_mini_app_ark'] };
+    assert.ok(!tool('bili_share'));
+    assert.ok(!f.plugins.activityPrompts(new Set(f.tools.current().map(item => item.name))).some(item => item.tools.includes('bili_share')));
+  } finally { f.store.close(); }
+});
+
+test('Bilibili card sharing requires explicit instance when multiple QQ adapters are eligible', async t => {
+  fastClock(t);
+  const transport = biliTransport();
+  const sentTo: string[] = [];
+  const cfg = config();
+  cfg.adapters = [
+    { ...cfg.adapters[0]!, id: 'qq_main', accountId: '900' },
+    { ...cfg.adapters[0]!, id: 'qq_alt', accountId: '901' },
+  ];
+  const store = new Store(':memory:');
+  const thought: ThoughtContext = { generation: store.settings().generation, sources: new Set(), triggers: new Set(), lifeOnly: false };
+  const plugins = createAllPlugins(cfg, store, undefined, () => undefined, account => ({
+    execute: async (action, args) => {
+      if (action === 'get_mini_app_ark') {
+        return { data: { config: { token: 'sig' }, meta: { detail_1: { qqdocurl: args.web_url } } } };
+      }
+      if (action === 'send_group_msg') { sentTo.push(account.id); return { message_id: -303 }; }
+      return {};
+    },
+  }));
+  const tools = createAllTools(cfg, store, () => thought, undefined, plugins);
+  try {
+    const bili = await loadedPlugin(t, 'bilibili', cfg, store, transport.fetcher);
+    plugins.install([...plugins.installed(), bili]);
+    const share = (args: Record<string, unknown>) => tools.current().find(item => item.name === 'bili_share')!.execute('test', args);
+    await assert.rejects(share({ input: video, group_id: 100 }), /Multiple QQ adapters/);
+    const response = await share({ input: video, group_id: 100, instance: 'qq_alt' });
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    assert.equal(result.instance, 'qq_alt');
+    assert.deepEqual(sentTo, ['qq_alt']);
+    assert.equal(store.actions().find(item => item.id === result.actionId)?.conversation, 'qq:901:group:100');
+  } finally { store.close(); }
 });

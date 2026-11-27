@@ -7,6 +7,20 @@ export interface PluginActionResult {
   outcome: { id: string; status: 'pending' | 'success' | 'failed' | 'unknown'; result: unknown };
   reused: boolean;
 }
+export interface AdapterInfo {
+  readonly instance: string;
+  readonly platform: string;
+  readonly accountId: string;
+}
+export interface AdapterInspector {
+  list(): readonly AdapterInfo[];
+  allowed(instance: string, operation: string): boolean;
+}
+export interface UserChatTarget {
+  instance: string;
+  type: import('./identity.js').ConversationType;
+  id: string;
+}
 export interface PluginCall {
   readonly signal: AbortSignal;
   readonly reviewing: boolean;
@@ -15,9 +29,16 @@ export interface PluginCall {
   attachImages(sourceId: string, urls: string[]): Promise<{ attached: string[]; failed: { url: string; error: string }[]; omitted: string[] }>;
   /** External writes are recorded before dispatch; errors after dispatch leave an unknown outcome. A callback that gives up before sending anything throws an error whose `dispatched` property is `false`, and the attempt is recorded as failed. */
   action(kind: string, args: Record<string, unknown>, dispatch: (signal: AbortSignal) => Promise<unknown>): Promise<PluginActionResult>;
-  adapters: {
+  adapters: AdapterInspector & {
     query(instance: string, operation: string, args: Record<string, unknown>): Promise<unknown>;
-    action(instance: string, operation: string, args: Record<string, unknown>): Promise<unknown>;
+    action(instance: string, operation: string, args: Record<string, unknown>): Promise<PluginActionResult>;
+    /** Record one plugin action keyed by stable args, prepare via queries, then dispatch at most one native adapter operation. Failures before dispatch are definite (`failed`); errors after dispatch follow ADR-0008. */
+    perform(
+      kind: string,
+      args: Record<string, unknown>,
+      run: (dispatch: (instance: string, operation: string, parameters: Record<string, unknown>) => Promise<unknown>, signal: AbortSignal) => Promise<unknown>,
+      options?: { target?: UserChatTarget },
+    ): Promise<PluginActionResult>;
   };
 }
 export interface UserTool {
@@ -29,6 +50,14 @@ export interface UserTool {
   experienceKind?: string;
   /** Only explicitly read-only tools may be offered during memory review. */
   review?: boolean;
+  /** Dynamically gate tool availability against currently enabled adapters and permissions. */
+  available?(adapters: AdapterInspector): boolean;
+  /** Identify the chat targeted by a call so steering, stale checks, and action records bind to that conversation. */
+  chatTarget?(args: any, adapters: AdapterInspector): UserChatTarget | undefined;
+  /** Skip execution if a newer addressed message arrived in chatTarget before this call started. */
+  stale?: boolean;
+  /** End the thought once a batch made only of ending actions succeeds. */
+  endsThought?: boolean;
   execute(args: any, call: PluginCall): unknown | Promise<unknown>;
 }
 export interface UserActivity {

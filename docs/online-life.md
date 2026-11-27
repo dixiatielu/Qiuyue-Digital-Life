@@ -77,7 +77,7 @@ npm run dev -- plugins reload xiaohongshu --config config.json
 
 ## 工具与连续性
 
-每个平台有五个工具（前缀分别为 `bili`、`xhs`）：
+两个平台共享五个基础工具（前缀分别为 `bili`、`xhs`），B 站另在可用 QQ 适配器放行 `get_mini_app_ark` 及至少一个发消息接口时提供 `bili_share`：
 
 | 工具 | 行为 |
 | --- | --- |
@@ -86,6 +86,7 @@ npm run dev -- plugins reload xiaohongshu --config config.json
 | `*_history` | 查看本地阅读缓存或 `savedOnly: true` 的收藏缓存，包含原阅读来源及进度；不是平台完整收藏列表 |
 | `*_keep` | 用 ID 在已登录的平台账号上收藏（`saved: true`）或取消收藏（`saved: false`）；备注只保存在本地 |
 | `*_like` | 用已发现或阅读的 ID 在平台账号上点赞（`liked: true`）或取消点赞（`liked: false`）；先查询远端状态，状态已符合时不重复提交 |
+| `bili_share` | 将 B 站视频（BV/av 号、视频链接或 `b23.tv` 短链）通过 QQ 适配器的 `get_mini_app_ark` 签发为 B 站小程序卡片，再以 `json` 段发到指定 QQ 群或好友；整体记录为单条带对话归属的动作 |
 
 发现与阅读使用现有经历记录。阅读位置、上次确认的点赞／收藏状态和意图通过 `ctx.storage` 保存在同一 SQLite 的插件专属命名空间中，跨重载、重启保留。历史缓存最多 200 条普通记录和 100 条收藏记录；超出时淘汰较旧缓存，不会取消平台点赞或收藏。`platformFavorite` 和 `platformLike` 分别表示上次确认的收藏、点赞状态与时间；在手机等其他客户端的改动不会自动同步到本地列表。收藏筛选只使用 `platformFavorite.saved`，点赞不会自动收藏，也不表示已阅读。停机迁移会移除旧的本地书签字段 `saved`，保留阅读位置、备注和已确认的平台状态，不会上传或取消任何平台收藏。`*_history` 是导航数据，个人备注不是新的外部证据；记录中的原始 `sourceId` 仍遵循系统的经历保留策略。
 
@@ -93,7 +94,7 @@ npm run dev -- plugins reload xiaohongshu --config config.json
 
 有意义的内容由秋月通过 `remember` 记住，并引用真实阅读来源；跨天想继续做的事使用已有 `update_pursuit`。插件不自动生成偏好，也不把每次浏览都变成长期追求。生活唤醒会看到平台活动及最近实际浏览时间。记忆复盘只能查看平台历史，不能自行刷平台。
 
-QQ 分享继续使用原有消息工具，遵循对象与社交情境。浏览成功不会自动发消息。原生点赞和收藏按秋月自己的兴趣选择，会向平台反馈账号行为；具体推荐权重及后续推流由平台决定。当前没有评论、回复或发布工具，也不模拟视频播放时长。
+QQ 分享继续遵循对象与社交情境，浏览成功不会自动发消息。B 站在启用 QQ 适配器且权限放行 `get_mini_app_ark` 与发消息接口时，会优先提供 `bili_share` 以 B 站小程序卡片形式转发视频；该能力要求 SnowLuma 的 `get_mini_app_ark` 在 `LightAppSvc.mini_app_share.AdaptShareInfo` 中传入正式版 `verType=3`（字段 13）与 `webURL`（字段 17，对应入参 `web_url`），返回包含签名 `config.token` 与 `meta.detail_1.qqdocurl` 的卡片（若 SnowLuma 未打该补丁，`bili_share` 会在发送前拒绝并记录为确定失败，避免发出无法打开的内测版卡片）。小红书官方无 QQ 小程序，且移动 App 分享卡片（`com.tencent.tuwen.lua`）依赖移动端 QQ 互联 OpenSDK 签名，PC/NTQQ 协议端无法签发，因此小红书分享继续使用原有消息工具发原链接或图片。原生点赞和收藏按秋月自己的兴趣选择，会向平台反馈账号行为；具体推荐权重及后续推流由平台决定。当前没有评论、回复或发布工具，也不模拟视频播放时长。
 
 ## 人设与系统提示词
 

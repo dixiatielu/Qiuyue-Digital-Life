@@ -61,7 +61,7 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
   const stop = () => stopped ??= (async () => { active = false; controller.abort(); await adapter.stop?.(); })();
   return {
     id: `adapter-${adapter.instance.replaceAll('_', '-')}`, contextVersion: adapter.version,
-    nativeActions: { accounts: [identity], definition: name => actions.get(name), allowed, execute },
+    nativeActions: { accounts: [identity], instances: [{ instance: adapter.instance, ...identity }], definition: name => actions.get(name), allowed, execute },
     reviewTools: [...actions].filter(([, action]) => action.readOnly).map(([name]) => name),
     chatActions: [...actions].filter(([, action]) => !action.readOnly).map(([name]) => name),
     chatTarget,

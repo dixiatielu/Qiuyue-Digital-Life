@@ -18,9 +18,9 @@ import { DrawingLibrary } from '../src/plugins/gallery-store.js';
 import { installPackagedPlugin } from './packaged-plugins.js';
 import { deferred, event, fixture } from './helpers.js';
 
-function harness(readCredentials?: () => CredentialReader) {
+function harness(readCredentials?: () => CredentialReader, adapter?: import('../src/platform.js').SocialAdapter) {
   const dir = mkdtempSync(join(tmpdir(), 'qiuyue-reload-'));
-  const f = fixture();
+  const f = fixture(adapter);
   f.cfg.extensions = { directory: join(dir, 'plugins'), dataDirectory: join(dir, 'data'), settings: {}, reloadTimeoutMs: 5000 };
   let saved = structuredClone(f.cfg);
   const runtime = new LifeRuntime(f.cfg, f.store, f.brain, f.reviewer);
@@ -542,4 +542,84 @@ test('a plugin.json that omits a field leaves what the module declares for it', 
     f.cfg.extensions.settings.room = { city: 42, bogus: true };
     await assert.rejects(load(), /Invalid settings/);
   } finally { f.store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('SDK v2 exposes adapter inspection, dynamic availability, chat targets, and atomic perform actions', async () => {
+  const calls: { action: string; args: Record<string, unknown> }[] = [];
+  let failSend = false;
+  const h = harness(undefined, {
+    execute: async (action, args) => {
+      calls.push({ action, args });
+      if (action === 'get_login_info') return { user_id: 900, nickname: 'Qiuyue' };
+      if (action === 'send_group_msg' && failSend) throw new Error('receipt lost');
+      return { message_id: -88 };
+    },
+  });
+  try {
+    h.write('bad-stale', `export default { id: 'bad-stale', apiVersion: 2, setup(ctx) {
+      ctx.tool({ name: 'bad_stale_tool', description: 'Invalid', parameters: { type: 'object' }, stale: true, execute: () => ({}) });
+    } };`);
+    h.write('bad-ro', `export default { id: 'bad-ro', apiVersion: 2, setup(ctx) {
+      ctx.tool({ name: 'bad_ro_tool', description: 'Invalid', parameters: { type: 'object' }, readOnly: true, endsThought: true, execute: () => ({}) });
+    } };`);
+    h.write('sharer', `export default { id: 'sharer', apiVersion: 2, setup(ctx) {
+      ctx.tool({
+        name: 'share_note',
+        description: 'Share a note through QQ',
+        parameters: { type: 'object', properties: { group_id: { type: 'integer' }, id: { type: 'string' }, mode: { type: 'string' } }, required: ['group_id', 'id'], additionalProperties: false },
+        available: adapters => adapters.list().some(item => item.platform === 'qq' && adapters.allowed(item.instance, 'send_group_msg')),
+        chatTarget: (args, adapters) => {
+          const qq = adapters.list().find(item => item.platform === 'qq');
+          return qq && args?.group_id ? { instance: qq.instance, type: 'group', id: String(args.group_id) } : undefined;
+        },
+        stale: true,
+        endsThought: true,
+        async execute(args, call) {
+          const qq = call.adapters.list().find(item => item.platform === 'qq');
+          if (!qq) throw new Error('no qq');
+          return call.adapters.perform('share_note', { instance: qq.instance, group_id: args.group_id, id: args.id }, async dispatch => {
+            const info = await call.adapters.query(qq.instance, 'get_login_info', {});
+            if (args.mode === 'prep_fail') throw new Error('card preparation failed');
+            const receipt = await dispatch(qq.instance, 'send_group_msg', { group_id: args.group_id, message: args.id });
+            if (args.mode === 'double') await dispatch(qq.instance, 'send_group_msg', { group_id: args.group_id, message: 'second' });
+            return { message_id: receipt.message_id, who: info.user_id };
+          });
+        },
+      });
+    } };`);
+    await h.manager.start();
+    assert.match(h.manager.status().plugins.find(plugin => plugin.id === 'bad-stale')?.error ?? '', /stale tool must declare chatTarget/);
+    assert.match(h.manager.status().plugins.find(plugin => plugin.id === 'bad-ro')?.error ?? '', /Read-only plugin tools/);
+    assert.ok(h.tools.current().some(tool => tool.name === 'share_note'));
+    assert.equal(h.plugins.chatTarget('share_note', { group_id: 100, id: 'n1' }), 'qq:900:group:100');
+    assert.equal(h.plugins.chatTarget('share_note', { group_id: 100, id: 'n1' }, true), 'qq:900:group:100');
+    assert.equal(h.plugins.endsThought('share_note', {}), true);
+
+    const prepFail = await h.execute('share_note', { group_id: 100, id: 'n1', mode: 'prep_fail' });
+    assert.equal(prepFail.outcome.status, 'failed');
+    assert.equal(calls.filter(item => item.action === 'send_group_msg').length, 0);
+
+    const ok = await h.execute('share_note', { group_id: 100, id: 'n1' });
+    assert.equal(ok.outcome.status, 'success'); assert.equal(ok.reused, false);
+    const saved = h.store.actions().find(action => action.id === ok.outcome.id)!;
+    assert.equal(saved.kind, 'plugin:sharer:share_note');
+    assert.equal(saved.conversation, 'qq:900:group:100');
+    assert.equal(h.store.sentMessage(-88, { platform: 'qq', accountId: '900' }), true);
+
+    failSend = true;
+    const lost = await h.execute('share_note', { group_id: 100, id: 'n2' });
+    assert.equal(lost.outcome.status, 'unknown'); assert.equal(lost.reused, false);
+    const beforeRetry = calls.length;
+    const retry = await h.execute('share_note', { group_id: 100, id: 'n2' });
+    assert.equal(retry.outcome.status, 'unknown'); assert.equal(retry.reused, true);
+    assert.equal(calls.length, beforeRetry);
+
+    failSend = false;
+    const doubled = await h.execute('share_note', { group_id: 100, id: 'n3', mode: 'double' });
+    assert.equal(doubled.outcome.status, 'unknown');
+    assert.match(JSON.stringify(doubled.outcome.result), /at most one native action/);
+
+    h.cfg.adapters[0]!.tools = { allow: '*', deny: ['send_group_msg'] };
+    assert.ok(!h.tools.current().some(tool => tool.name === 'share_note'));
+  } finally { await h.close(); }
 });

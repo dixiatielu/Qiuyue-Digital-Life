@@ -23,6 +23,7 @@ export function scopePlugin(plugin: LifePlugin, instance: string, actions: reado
     tools: runtime => { const tools = plugin.tools(runtime.scoped(instance)); tools.forEach(tool => qualify(tool.name)); return tools.map(tool => ({ ...tool, name: qualify(tool.name), label: qualify(tool.name), description: instructions(tool.description), ...(tool.insertBefore ? { insertBefore: qualify(tool.insertBefore) } : {}) })); },
     ...(plugin.nativeActions ? { nativeActions: {
       accounts: plugin.nativeActions.accounts,
+      instances: (plugin.nativeActions.accounts ?? []).map(account => ({ instance, ...account })),
       definition: (name: string) => { const raw = local(name); return raw ? plugin.nativeActions!.definition(raw) : undefined; },
       allowed: (name: string) => { const raw = local(name); return !!raw && plugin.nativeActions!.allowed(raw); },
       execute: (name: string, args: Record<string, unknown>, signal?: AbortSignal) => adapter.execute(local(name)!, args, signal),
