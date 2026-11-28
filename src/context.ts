@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { describeMedia, isMedia, mediaIn, mediaTokens } from './media.js';
 import { getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type ImageContent, type Message, type TextContent, type ToolCall, type ToolResultMessage, type UserMessage } from '@earendil-works/pi-ai';
 
 export const SUMMARY_PREFIX = 'Earlier exchanges have been consolidated into a continuity summary';
@@ -54,7 +55,7 @@ export function toModelMessages(messages: AgentMessage[], options?: { mergeUsers
 function contentTokens(content: unknown): number {
   if (typeof content === 'string') return textTokens(content);
   if (!Array.isArray(content)) return estimateTokens(content);
-  return content.reduce((sum, block) => sum + (block.type === 'image' ? IMAGE_TOKENS : block.type === 'text' ? textTokens(block.text) : block.type === 'thinking' ? textTokens(block.thinking) : estimateTokens(block)) + 4, 0);
+  return content.reduce((sum, block) => sum + (block.type === 'image' ? IMAGE_TOKENS : isMedia(block) ? mediaTokens(block) : block.type === 'text' ? textTokens(block.text) : block.type === 'thinking' ? textTokens(block.thinking) : estimateTokens(block)) + 4, 0);
 }
 export function messageTokens(message: AgentMessage): number {
   if (message.role === 'system') return estimateTokens(message);
@@ -126,9 +127,11 @@ function compactSnippet(text: string, limit: number): string {
 function summarizeFlattenedResult(result: ToolResultMessage): string {
   const text = result.content.filter((block): block is TextContent => block.type === 'text').map(block => block.text).join('\n').trim();
   const images = result.content.filter(block => block.type === 'image').length;
+  const media = mediaIn(result.content).map(describeMedia);
   const parts = [
     ...(text ? [compactSnippet(text, 1200)] : []),
     ...(images ? [`[${images} image${images > 1 ? 's' : ''} omitted across model handoff]`] : []),
+    ...(media.length ? [`[${media.join(', ')} omitted across model handoff]`] : []),
   ];
   return parts.join(' ') || '[empty result]';
 }
@@ -261,18 +264,22 @@ export function foldNoopCalls(messages: AgentMessage[], noopCallIds: ReadonlySet
   });
   return { messages: folded, changed };
 }
-/** Replace every image in observations and tool results with a note; the label before each names its event and index, or the face it shows. */
-export function foldImages(messages: AgentMessage[], imageViewer: (label: string) => string | undefined = () => undefined): { messages: AgentMessage[]; changed: number } {
-  let changed = 0;
+/**
+ * Replace every image in observations and tool results with a note; the label before each names its event and index, or the face it shows.
+ * Audio, video and documents go the same way (ADR-0029): their note says what they were, as the label before it says where they came from.
+ */
+export function foldImages(messages: AgentMessage[], imageViewer: (label: string) => string | undefined = () => undefined): { messages: AgentMessage[]; changed: number; media: number } {
+  let changed = 0; let media = 0;
   const folded = messages.map(message => {
-    if ((message.role !== 'observation' && message.role !== 'toolResult') || !message.content.some(block => block.type === 'image')) return message;
+    if ((message.role !== 'observation' && message.role !== 'toolResult') || !message.content.some(block => block.type === 'image' || isMedia(block))) return message;
     return { ...message, content: message.content.map((block, index, blocks) => {
+      if (isMedia(block)) { media++; return { type: 'text' as const, text: `${FOLDED} it was ${describeMedia(block)}]` }; }
       if (block.type !== 'image') return block;
       changed++; const label = blocks[index - 1];
       return { type: 'text' as const, text: `${FOLDED} view it again with ${label?.type === 'text' && imageViewer(label.text) || 'view_event_image'}]` };
     }) };
   });
-  return { messages: folded as AgentMessage[], changed };
+  return { messages: folded as AgentMessage[], changed, media };
 }
 export interface ContextCheckpoint {
   identity: string;

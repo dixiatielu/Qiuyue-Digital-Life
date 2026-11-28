@@ -2,6 +2,7 @@ import { calculateCost, clampThinkingLevel, createAssistantMessageEventStream, g
 import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages';
 import { retryProviderRequest } from '@earendil-works/pi-ai/utils/provider-retry';
 import { sanitizeSurrogates as wellFormed } from '@earendil-works/pi-ai/utils/sanitize-unicode';
+import { isMedia, mediaModality, type ContentBlock, type MediaContent } from './media.js';
 
 /**
  * Gemini's Interactions API, for which Pi has no transport. Unlike `generateContent`, it can take a tool partway
@@ -24,6 +25,10 @@ export interface InteractionsOptions extends StreamOptions {
 }
 
 const image = (block: ImageContent) => ({ type: 'image', data: block.data, mime_type: block.mimeType });
+/** Media reaches this transport as it stands, and only what the model takes (ADR-0029). */
+const mediaTypes = { audio: 'audio', video: 'video', pdf: 'document' } as const;
+const media = (block: MediaContent) => ({ type: mediaTypes[mediaModality(block.mimeType)!], data: block.data, mime_type: block.mimeType });
+const seen = (block: ImageContent | MediaContent) => isMedia(block) ? media(block) : image(block);
 const callId = (id: string) => id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
 const declaration = (tool: Tool) => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters });
 
@@ -63,7 +68,7 @@ function inputSteps(messages: Message[], model: Model<Api>, loader: string | und
       result.result = [...said, ...message.toolsAdded.map(declaration)];
     } else if (message.role === 'user') {
       const content = typeof message.content === 'string' ? [{ type: 'text', text: wellFormed(message.content) }]
-        : message.content.map(block => block.type === 'text' ? { type: 'text', text: wellFormed(block.text) } : image(block));
+        : (message.content as ContentBlock[]).map(block => block.type === 'text' ? { type: 'text', text: wellFormed(block.text) } : seen(block));
       if (content.length) steps.push({ type: 'user_input', content });
     } else if (message.role === 'assistant') {
       for (const block of message.content) {
@@ -73,8 +78,8 @@ function inputSteps(messages: Message[], model: Model<Api>, loader: string | und
       }
     } else if (message.role === 'toolResult') {
       const text = wellFormed(message.content.filter((block): block is TextContent => block.type === 'text').map(block => block.text).join('\n'));
-      const images = model.input.includes('image') ? message.content.filter((block): block is ImageContent => block.type === 'image') : [];
-      steps.push({ type: 'function_result', name: message.toolName, call_id: message.toolCallId, result: images.length ? [...(text ? [{ type: 'text', text }] : []), ...images.map(image)] : text, ...(message.isError ? { is_error: true } : {}) });
+      const images = (message.content as ContentBlock[]).filter((block): block is ImageContent | MediaContent => isMedia(block) || block.type === 'image' && model.input.includes('image'));
+      steps.push({ type: 'function_result', name: message.toolName, call_id: message.toolCallId, result: images.length ? [...(text ? [{ type: 'text', text }] : []), ...images.map(seen)] : text, ...(message.isError ? { is_error: true } : {}) });
     }
   }
   return { steps, unplaced };

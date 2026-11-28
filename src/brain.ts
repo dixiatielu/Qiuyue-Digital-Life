@@ -1,6 +1,6 @@
 import { environmentCredential, type CredentialReader } from './credentials.js';
 import { Agent, type AgentMessage, type BeforeToolCallResult, type StreamFn } from '@earendil-works/pi-agent-core';
-import { createModelBackend, initialThinkingLevel, modelBudget, modelRoute, modelUse, requiresThoughtSignatures, shouldMergeConsecutiveUsers, withToolLoader, type ModelOwner } from './model.js';
+import { createModelBackend, initialThinkingLevel, modelBudget, modelRoute, modelUse, requiresThoughtSignatures, shouldMergeConsecutiveUsers, withMedia, withToolLoader, type ModelOwner } from './model.js';
 import { createInitialSystemMessage, getCurrentTools, toToolDeclaration, type AssistantMessage, type Model } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
 import { systemInstructions } from './prompts.js';
@@ -106,7 +106,8 @@ export class PiBrain implements Brain {
     const use = modelUse(config, owner);
     const { model, stream: transport } = backend ?? createModelBackend(use.thinking, credential);
     // Transports that load tools dynamically are told which tool loads the others (ADR-0023).
-    const loading = (send: StreamFn): StreamFn => tools.loading.enabled ? withToolLoader(send, FIND_TOOLS) : send;
+    // Audio, video and documents in the context leave as each model's transport takes them (ADR-0029).
+    const loading = (send: StreamFn): StreamFn => withMedia(tools.loading.enabled ? withToolLoader(send, FIND_TOOLS) : send);
     const stream = loading(transport);
     this.stream = stream;
     const summary = compactionBackend ?? (config.compaction.model ? createModelBackend(use.compaction, credential, { requireVision: false }) : undefined);

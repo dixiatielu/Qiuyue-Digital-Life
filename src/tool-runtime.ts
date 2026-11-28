@@ -6,6 +6,7 @@ import { Store, type RevisionReach } from './store.js';
 import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName, type NativeActionDefinition } from './platform.js';
 import type { AdapterInfo } from './plugin-sdk.js';
 import { fetchImage } from './web.js';
+import type { ContentBlock } from './media.js';
 
 export interface ToolImage {
   label: string;
@@ -106,6 +107,8 @@ export function ensureCurrent(store: Store, context: ThoughtContext, signal?: Ab
 export const errorResult = nativeErrorResult;
 /** What a tool learns of its action: the receipt, not the ledger row, whose source list alone can run to tens of kilobytes. */
 const receipt = ({ id, status, result }: Action) => ({ id, status, result });
+/** What a tool answers with. Pi's result type knows text and images; audio, video and documents pass through its loop as they are (ADR-0029). */
+export type ToolResult = Omit<AgentToolResult<any>, 'content'> & { content: ContentBlock[] };
 export const jsonResult = (result: unknown): AgentToolResult<any> => ({ content: [{ type: 'text', text: JSON.stringify(result) }], details: {} });
 
 /** Shared execution rules for built-in and plugin tools. Plugins never create their own action receipts. */
@@ -133,10 +136,10 @@ export class ToolRuntime {
     if (!definition) throw new Error(`Unknown native interface: ${name}`);
     return definition;
   }
-  tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<AgentToolResult<any>> | AgentToolResult<any>): AgentTool {
+  tool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<ToolResult> | ToolResult): AgentTool {
     return { name, label: name, description, parameters, executionMode: 'sequential', replay: 'never', execute: async (_callId, args, signal) => {
       this.check(signal);
-      return execute(args, signal);
+      return await execute(args, signal) as AgentToolResult<any>;
     } };
   }
   jsonTool(name: string, description: string, parameters: TSchema, execute: (args: any, signal?: AbortSignal) => Promise<unknown> | unknown): AgentTool {

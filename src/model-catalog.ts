@@ -10,6 +10,7 @@ import {
   modelBudget,
   modelUse,
   supportedThinkingLevels,
+  validateMediaInput,
   validateModelConfig,
   type ModelConfig,
   type ModelOwner,
@@ -156,7 +157,7 @@ export function resolveModelWithInfo(config: ModelConfig, options: { requireVisi
       : undefined;
     model = {
       provider: config.provider, id: config.id, name: config.id,
-      api: config.api, baseUrl: config.baseUrl!, input: config.input!,
+      api: config.api, baseUrl: config.baseUrl!, input: config.input as Model<Api>['input'],
       contextWindow: config.contextWindow!, maxTokens: config.maxTokens!, reasoning: config.reasoning ?? false,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       ...(mergedCompat ? { compat: mergedCompat as Model<Api>['compat'] } : {}),
@@ -170,13 +171,15 @@ export function resolveModelWithInfo(config: ModelConfig, options: { requireVisi
   } else {
     const builtin = builtinModels().getModel(config.provider, config.id);
     if (builtin) {
-      const hasOverride = Boolean(config.baseUrl || config.compat || config.headers || config.thinkingLevelMap || config.samplingParams);
+      const hasOverride = Boolean(config.baseUrl || config.compat || config.headers || config.thinkingLevelMap || config.samplingParams || config.input);
       if (!hasOverride) {
         model = builtin;
       } else {
         model = {
           ...builtin,
           ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+          // Pi's catalog lists text and image alone, so what else a model takes is the operator's to say (ADR-0029).
+          ...(config.input ? { input: config.input as Model<Api>['input'] } : {}),
           ...(config.compat ? { compat: { ...(builtin.compat as Record<string, unknown> | undefined), ...(config.compat as Record<string, unknown>) } as Model<Api>['compat'] } : {}),
           ...(config.headers ? { headers: { ...(builtin.headers ?? {}), ...config.headers } } : {}),
           ...(config.thinkingLevelMap ? { thinkingLevelMap: { ...(builtin.thinkingLevelMap ?? {}), ...config.thinkingLevelMap } } : {}),
@@ -188,6 +191,7 @@ export function resolveModelWithInfo(config: ModelConfig, options: { requireVisi
 
   if (!model) throw new Error('The specified model is not in the Pi model catalog; use the models command to check, or configure model.api, baseUrl, input, contextWindow, and maxTokens for a custom model.');
   if (requireVision && !model.input.includes('image')) throw new Error('Image understanding is required; select a model that supports image input.');
+  validateMediaInput(model);
   if ((config.thinkingLevel ?? 'off') !== 'off' && !model.reasoning) throw new Error('model.thinkingLevel requires a reasoning model; for a custom model, set model.reasoning to true.');
 
   return {

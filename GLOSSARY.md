@@ -32,6 +32,10 @@ _Avoid_: one event necessarily requiring one independent thought
 What the model reads in a thought: the instructions, the observations since the last compaction with the actions taken and their results, and a summary of what came before. What the model said to no one is not part of it. It is saved between thoughts and continued after a restart—including across model changes, where provider-specific signatures are stripped and the token meter resets—and begins afresh when the instructions, accounts, or tools change.
 _Avoid_: long-term memory, chat history, model session
 
+**Media**:
+Audio, video, or a document the digital life hears, watches, or reads for itself, as it sees an image, rather than through a transcript or description. It is in view for the thought that perceives it, and afterwards a note of what it was remains.
+_Avoid_: attachment, file message, voice transcript
+
 **Ambient Event**:
 An environment event that carries little information on its own, such as a notice that someone is typing or an emoji reaction to a message. It is still perceived and read together with the next observation that other events bring about, but it does not start or steer thinking by itself; if nothing else arrives, it is eventually observed on its own.
 _Avoid_: discarded noise, a connection heartbeat, an event that demands attention

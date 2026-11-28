@@ -55,6 +55,10 @@
 
 `google-interactions` 使用同样的配置，只需把 `api` 改为 `"google-interactions"`；接口地址同样写到 API 版本为止，请求发往 `<baseUrl>/interactions`。更换 `model` 或修改 `api` 后，重启时会平滑交接现有工作上下文——自动清理跨模型签名（切入要求 `thoughtSignature` 的 Gemini 3+/4+ 模型时还会将历史未签名工具调用展平为便携记录），重置 token 锚点，并在新模型窗口更小时自动压缩。
 
+### 音频、视频与文档
+
+模型能直接听音频、看视频或读 PDF 时，在 `input` 中声明：在 `"text"`、`"image"` 之外加上 `"audio"`、`"video"` 或 `"pdf"`（[ADR-0029](adr/0029-let-a-model-hear-and-watch-what-it-can-and-fold-it-like-an-image.md)）。这些媒体只通过 `google-generative-ai`、`google-vertex` 和 `google-interactions` 发送，其他 API 上这样配置会被拒绝。Pi 的内置目录给所有模型都只标了 text 和 image，因此内置 Gemini 模型也可以填写 `input`，它会替换目录中的列表。只声明在自己的线路上验证过的能力，因为网关可能丢掉模型本身支持的内容。不具备该能力的模型（包括独立的复盘或压缩模型）会在媒体的位置读到一行文字，例如 `(12s audio omitted: model does not support audio)`。目前这只覆盖工具或插件返回的媒体；聊天平台上的语音和视频消息仍显示为 `[voice]` 和 `[video]`。
+
 ### 按需加载工具
 
 所有可解析的模型默认按需加载低频原生工具（`model.deferredTools: "auto"`）：低频工具仅在指令中按名称与简介列出，模型通过 `find_tools` 请求后再声明（[ADR-0023](adr/0023-load-seldom-used-tools-on-demand.md)）。所有已启用工具始终可用，操作员的允许和拒绝规则不变。在 `compat` 声明支持对话中增量工具的路由（`supportsMidConvoSystemMessages` 配合对应 API 开关）或 `google-interactions` 上，Pi 会在对话中原地追加工具定义而不破坏前缀缓存；在其他路由上则按需刷新顶层工具列表。可将 `model.deferredTools` 设为 `"in-place-only"` 或 `"never"` 来调整策略。所有声明的工具 Schema 都会自动做跨供应商清洗；瞬时 429/5xx 错误会自动重试（`maxRetries`，默认 `2`），同时启用持久会话缓存亲和（`cacheRetention`，默认 `"short"`）、确定性图片缩放，以及上下文溢出的有界自动压缩恢复。

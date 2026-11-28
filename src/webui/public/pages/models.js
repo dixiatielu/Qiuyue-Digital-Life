@@ -248,7 +248,7 @@ function ModelEditor({ form, profiles, path = 'model', title = t('Primary thinki
       ${custom ? html`
         <${ConfigField} form=${form} path=${`${path}.baseModel`} label=${t('Catalog template (optional)', '内置目录模板（可选）')} placeholder="anthropic/claude-fable-5" help=${t('Override automatic catalog template matching (inherits thinking levels, image limits, and model-intrinsic compat).', '覆盖自动匹配的内置目录模板（继承思考档位映射、图片缩放限制和模型固有 compat）。')} />
         <div class="field"><div class="field-label"><label>${t('Input', '输入能力')}</label></div><div class="row">
-          ${['text', 'image'].map(kind => html`<label class="check"><input type="checkbox" checked=${input.includes(kind)} onChange=${event => setModel({ ...model, input: event.currentTarget.checked ? [...new Set([...input, kind])] : input.filter(item => item !== kind) })} />${kind}</label>`)}</div></div>
+          ${['text', 'image', 'audio', 'video', 'pdf'].map(kind => html`<label class="check"><input type="checkbox" checked=${input.includes(kind)} onChange=${event => setModel({ ...model, input: event.currentTarget.checked ? [...new Set([...input, kind])] : input.filter(item => item !== kind) })} />${kind}</label>`)}</div></div>
         <${ConfigField} form=${form} path=${`${path}.contextWindow`} type="int" label=${t('Context window (tokens)', '上下文窗口（tokens）')} />
         <${ConfigField} form=${form} path=${`${path}.maxTokens`} type="int" label=${t('Largest output (tokens)', '最大输出（tokens）')} />
         <${ConfigField} form=${form} path=${`${path}.reasoning`} type="bool" label=${t('Reasoning model', '推理模型')} />` : null}

@@ -1,6 +1,7 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
+import type { ContentBlock } from './media.js';
 import type { EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
 import { parseConversationRef } from './identity.js';
 import type { Store } from './store.js';
@@ -16,7 +17,7 @@ import { requiresThoughtSignatures, type ModelOwner } from './model-config.js';
 export interface ObservationMessage {
   role: 'observation';
   batchId: string;
-  content: (TextContent | ImageContent)[];
+  content: ContentBlock[];
   eventIds: string[];
   lifeOnly: boolean;
   timestamp: number;

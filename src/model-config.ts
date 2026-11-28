@@ -22,6 +22,7 @@ import {
 import { Type, type TObject } from 'typebox';
 import { Check } from 'typebox/value';
 import { GEMINI_INTERACTIONS } from './gemini-interactions.js';
+import { INPUT_MODALITIES, MEDIA_MODALITIES, type InputModality, type MediaCarriage, type MediaModality } from './media.js';
 
 export interface ModelSystemConfig {
   model: ModelConfig;
@@ -55,7 +56,8 @@ export interface ModelConfig {
   api?: CustomApi;
   /** Optional built-in catalog model ID (or `provider/id`) whose intrinsic metadata is inherited on a custom endpoint. */
   baseModel?: string;
-  input?: ('text' | 'image')[];
+  /** What the model takes in. Audio, video and PDF are declared for a route where they have been checked (ADR-0029); on a catalog model this replaces the catalog's list. */
+  input?: InputModality[];
   contextWindow?: number;
   maxTokens?: number;
   reasoning?: boolean;
@@ -205,6 +207,26 @@ export function addsToolsInPlace(model: Model<Api>): boolean {
     : model.api === 'openai-completions' && compat.supportsMidConvoToolAdditions === true;
 }
 
+/** How each API's transport is handed audio, video and documents (ADR-0029). An API not listed takes none. */
+const mediaCarriages: Partial<Record<string, MediaCarriage>> = {
+  // Pi's Google transport sends every block that is not text as inline data under the block's own type.
+  'google-generative-ai': 'inline',
+  'google-vertex': 'inline',
+  [GEMINI_INTERACTIONS]: 'native',
+};
+/** How this model is handed one kind of media, or undefined when it reads a line of text in its place. */
+export function mediaCarriage(model: Pick<Model<Api>, 'api' | 'input'>, modality: MediaModality): MediaCarriage | undefined {
+  return (model.input as readonly string[]).includes(modality) ? mediaCarriages[model.api] : undefined;
+}
+/** A capability declared where no transport can deliver it would leave the model reading placeholders unannounced. */
+export function validateMediaInput(model: Pick<Model<Api>, 'api' | 'input'>) {
+  const declared = MEDIA_MODALITIES.filter(modality => (model.input as readonly string[]).includes(modality));
+  if (declared.length && !mediaCarriages[model.api]) throw new Error(`model.input ${declared.join(', ')} can be sent only through ${Object.keys(mediaCarriages).join(', ')}.`);
+}
+function validateInput(input: unknown) {
+  if (!Array.isArray(input) || !input.includes('text') || input.some(value => !(INPUT_MODALITIES as readonly unknown[]).includes(value))) throw new Error(`model.input must be an array of input capabilities containing text and optionally ${INPUT_MODALITIES.filter(value => value !== 'text').join(', ')}.`);
+}
+
 export function modelRoute(model: Model<Api>) { return JSON.stringify([model.provider, model.id, model.api, model.baseUrl]); }
 
 /** Preserve field paths when the same model validator serves several independent configurations. */
@@ -268,9 +290,10 @@ export function validateModelConfig(config: ModelConfig) {
   }
 
   if (config.api === undefined) {
-    if (['input', 'contextWindow', 'maxTokens', 'reasoning'].some(key => config[key as keyof ModelConfig] !== undefined)) {
+    if (['contextWindow', 'maxTokens', 'reasoning'].some(key => config[key as keyof ModelConfig] !== undefined)) {
       throw new Error('Custom model capabilities require model.api.');
     }
+    if (config.input !== undefined) validateInput(config.input);
     if (config.compat !== undefined) {
       const builtin = builtinModels().getModel(config.provider, config.id);
       if (!builtin) throw new Error('Custom model capabilities require model.api.');
@@ -280,7 +303,7 @@ export function validateModelConfig(config: ModelConfig) {
   }
   if (typeof config.api !== 'string' || !Object.hasOwn(customApiCompatSchemas, config.api)) throw new Error(`model.api must be one of ${Object.keys(customApiCompatSchemas).join(', ')}.`);
   if (!config.baseUrl) throw new Error('A custom model requires model.baseUrl.');
-  if (!Array.isArray(config.input) || !config.input.includes('text') || config.input.some(value => !['text', 'image'].includes(value))) throw new Error('model.input must be an array of input capabilities containing text and optionally image.');
+  validateInput(config.input);
   for (const key of ['contextWindow', 'maxTokens'] as const) if (!Number.isSafeInteger(config[key]) || config[key]! <= 0) throw new Error(`The custom model field model.${key} must be a positive integer.`);
   if (config.maxTokens! > config.contextWindow!) throw new Error('model.maxTokens cannot exceed model.contextWindow.');
   if (config.reasoning !== undefined && typeof config.reasoning !== 'boolean') throw new Error('model.reasoning must be a boolean.');

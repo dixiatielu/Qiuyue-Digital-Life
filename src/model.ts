@@ -14,6 +14,8 @@ import { googleGenerativeAIApi } from '@earendil-works/pi-ai/api/google-generati
 import { GEMINI_INTERACTIONS, geminiInteractionsApi } from './gemini-interactions.js';
 import type { CustomApi, ModelConfig } from './model-config.js';
 import { resolveModel } from './model-catalog.js';
+import { mediaCarriage } from './model-config.js';
+import { outboundMessages } from './media.js';
 
 export {
   addsToolsInPlace,
@@ -23,6 +25,7 @@ export {
   filterCompatForApi,
   independentModelUses,
   initialThinkingLevel,
+  mediaCarriage,
   modelBudget,
   modelRoute,
   modelUse,
@@ -62,6 +65,18 @@ export function withToolLoader<S extends (target: Model<any>, context: any, opti
   return ((target, context, options) => target.api === GEMINI_INTERACTIONS
     ? send(target, context, { ...options, toolLoader })
     : send(target, context, options)) as S;
+}
+
+/**
+ * Hand each model the media it takes in the way its transport carries it, and a line of text for the rest (ADR-0029).
+ * Every model call of a thinking process goes through this, so a working context that holds media can be sent to the
+ * thinking model and to one that only summarizes it.
+ */
+export function withMedia<S extends (target: Model<any>, context: any, options?: any) => any>(send: S): S {
+  return ((target, context, options) => {
+    const messages = outboundMessages(context.messages, modality => mediaCarriage(target, modality));
+    return send(target, messages === context.messages ? context : { ...context, messages }, options);
+  }) as S;
 }
 
 export function createModelBackend(config: ModelConfig, credential: CredentialReader = environmentCredential, resolveOptions?: { requireVision?: boolean }) {

@@ -7,6 +7,7 @@ import type { Config } from './config.js';
 import { ambientEvent, type Action, type EnvironmentEvent, type Observation } from './domain.js';
 import { Store, type StoreNotice } from './store.js';
 import { parseConversationRef } from './identity.js';
+import { describeMedia, isMedia } from './media.js';
 import { projectActionDisplay, projectEventDisplay, type DisplayMessage, type DisplayProjector, type MediaPreviewResolver } from './display-message.js';
 import { builtinDisplayProjectors } from './adapters/display.js';
 
@@ -111,6 +112,7 @@ export class Monitor {
     if (Array.isArray(value)) return value.slice(0, 100).map(item => this.safe(item, depth + 1));
     if (value && typeof value === 'object') {
       if ('type' in value && value.type === 'image') return { type: 'image', text: ui('[Image bytes omitted from display]', '[图片字节不进入展示]') };
+      if (isMedia(value)) return { type: 'media', text: ui(`[${describeMedia(value)}: bytes omitted from display]`, `[${describeMedia(value)}：字节不进入展示]`) };
       if ('type' in value && value.type === 'thinking') return { type: 'thinking', text: ui('[Internal reasoning omitted from display]', '[内部思考不进入展示]') };
       return Object.fromEntries(Object.entries(value).slice(0, 100).filter(([key]) => !['thinking', 'thinkingSignature', 'signature', 'chunk_data', 'base64'].includes(key)).map(([key, item]) => [plainText(key), sensitive.test(key) ? '<REDACTED>' : this.safe(item, depth + 1)]));
     }

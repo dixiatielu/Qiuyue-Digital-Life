@@ -76,19 +76,19 @@ export function setAsideSummary(removed: AgentMessage[], ids: string[], limit: n
 export function foldThoughtMessages(
   messages: AgentMessage[],
   options: { everything: boolean; noopCalls: ReadonlySet<string>; imageViewer: (label: string) => string | undefined },
-): { messages: AgentMessage[]; counts: { results: number; images: number; replies: number; noops?: number }; changed: boolean } {
-  let results = 0; let images = 0; let replies = 0; let noops = 0;
+): { messages: AgentMessage[]; counts: { results: number; images: number; replies: number; noops?: number; media?: number }; changed: boolean } {
+  let results = 0; let images = 0; let replies = 0; let noops = 0; let media = 0;
   let folded = messages;
   if (options.everything) {
     const records = foldToolResults(folded, 'read_chat_record'); folded = records.messages; results += records.changed;
-    const seen = foldImages(folded, options.imageViewer); folded = seen.messages; images += seen.changed;
+    const seen = foldImages(folded, options.imageViewer); folded = seen.messages; images += seen.changed; media += seen.media;
   }
   const dropped = foldNoopCalls(folded, options.noopCalls); folded = dropped.messages; noops += dropped.changed;
   const said = foldReplies(folded); replies += said.changed;
   return {
     messages: said.messages,
-    counts: { results, images, replies, ...(noops ? { noops } : {}) },
-    changed: Boolean(results || images || replies || noops),
+    counts: { results, images, replies, ...(noops ? { noops } : {}), ...(media ? { media } : {}) },
+    changed: Boolean(results || images || replies || noops || media),
   };
 }
 
