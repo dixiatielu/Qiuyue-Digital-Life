@@ -189,46 +189,49 @@ test('images seen in a thought are folded when it ends, so later thoughts and re
   } finally { f.store.close(); }
 });
 
-test('a thought keeps only the actions of its replies: their text and thoughts leave when it ends, and a reply that did nothing leaves no turn', async () => {
+test('a reply that acted keeps only its calls, and a reply that called no tool stays as her note', async () => {
   const f = fixture();
   try {
     event(f.store, 'Anyone around?');
     f.faux.setResponses([
       answer([fauxText('Let me note what I am doing.'), fauxThinking('private reasoning'), call('set_activity', { activity: 'Reading the group' })]),
       // Within its thought a reply stays as it was said.
-      context => { assert.match(JSON.stringify(context.messages), /Let me note what I am doing/); return answer('No tool calls, ending thought.'); },
+      context => { assert.match(JSON.stringify(context.messages), /Let me note what I am doing/); return answer([fauxThinking('nothing here for me'), fauxText('Just reading along.')]); },
     ]);
     await f.brain.run(f.store.claim(20)!);
     const kept = JSON.stringify(f.brain.agent.state.messages);
-    assert.doesNotMatch(kept, /Let me note what I am doing|private reasoning|ending thought/);
-    assert.match(kept, /Reading the group/);
-    const replies = f.brain.agent.state.messages.filter(message => message.role === 'assistant');
-    assert.deepEqual(replies.map(reply => reply.role === 'assistant' && reply.content.map(block => block.type)), [['toolCall']]);
+    assert.doesNotMatch(kept, /Let me note what I am doing|private reasoning|nothing here for me/);
+    assert.match(kept, /Reading the group.*Just reading along\./);
+    const replies = () => f.brain.agent.state.messages.flatMap(message => message.role === 'assistant' ? [message.content.map(block => block.type)] : []);
+    assert.deepEqual(replies(), [['toolCall'], ['text']]);
     assert.equal((f.store.logs().find(log => log.kind === 'context_folded')?.data as { replies?: number }).replies, 2);
     event(f.store, 'Quiet now'); f.faux.setResponses([answer('Nothing to add')]);
     await f.brain.run(f.store.claim(20)!);
-    assert.equal(f.brain.agent.state.messages.filter(message => message.role === 'assistant').length, 1);
-    assert.match(JSON.stringify(f.brain.agent.state.messages), /Quiet now/);
+    assert.deepEqual(replies(), [['toolCall'], ['text'], ['text']]);
+    // A reply that said nothing leaves no turn.
+    event(f.store, 'Quieter still'); f.faux.setResponses([answer('')]);
+    await f.brain.run(f.store.claim(20)!);
+    assert.deepEqual(replies(), [['toolCall'], ['text'], ['text']]);
     f.restart(); event(f.store, 'After restart');
     f.faux.setResponses([context => {
       const seen = JSON.stringify(context.messages);
-      assert.doesNotMatch(seen, /Nothing to add|ending thought|Let me note/);
-      assert.match(seen, /Anyone around\?.*Reading the group.*Quiet now.*After restart/);
+      assert.doesNotMatch(seen, /Let me note|private reasoning/);
+      assert.match(seen, /Anyone around\?.*Reading the group.*Just reading along\..*Quiet now.*Nothing to add.*Quieter still.*After restart/);
       return answer('Continue');
     }]);
     await f.brain.run(f.store.claim(20)!);
   } finally { f.store.close(); }
 });
 
-test('within a thought, a reply that took no action is gone from the request after the next observation', async () => {
+test('within a thought, a reply that called no tool stays as her note after the next observation', async () => {
   const f = fixture(); const calling = deferred(); const release = deferred();
   try {
     event(f.store, 'First line');
     f.faux.setResponses([
-      async () => { calling.resolve(); await release.promise; return answer('No tool calls, ending thought.'); },
+      async () => { calling.resolve(); await release.promise; return answer([fauxThinking('not for me'), fauxText('Letting that one pass.')]); },
       context => {
         const seen = JSON.stringify(context.messages);
-        assert.doesNotMatch(seen, /ending thought/); assert.match(seen, /First line.*Second line/);
+        assert.doesNotMatch(seen, /not for me/); assert.match(seen, /First line.*Letting that one pass\..*Second line/);
         return answer(call('set_activity', { activity: 'Reading along' }));
       },
       answer('Quiet again'),
@@ -237,8 +240,57 @@ test('within a thought, a reply that took no action is gone from the request aft
     event(f.store, 'Second line'); assert.equal(await f.brain.steer(f.store.claim(10)!), true);
     release.resolve(); await work;
     assert.equal(f.faux.state.callCount, 3);
-    assert.deepEqual(f.brain.agent.state.messages.flatMap(message => message.role === 'assistant' ? [message.content.map(block => block.type)] : []), [['toolCall']]);
+    assert.deepEqual(f.brain.agent.state.messages.flatMap(message => message.role === 'assistant' ? [message.content.map(block => block.type)] : []), [['text'], ['toolCall'], ['text']]);
   } finally { release.resolve(); f.store.close(); }
+});
+
+test('a thought that only looked things up leaves her note and none of the lookups; one that also acted keeps them', async () => {
+  const f = fixture();
+  try {
+    const turns = () => f.brain.agent.state.messages.flatMap(message => message.role === 'assistant' ? [message.content.map(block => block.type === 'toolCall' ? block.name : block.type)] : message.role === 'toolResult' ? [[`result:${message.toolName}`]] : []);
+    event(f.store, 'Unrelated chatter');
+    f.faux.setResponses([
+      answer([fauxText('Let me check first.'), call('inspect_actions', { offset: 0 })]),
+      // The lookup's result is in view for the rest of its thought.
+      context => { assert.equal(context.messages.at(-1)!.role, 'toolResult'); return answer(call('recall', { query: 'chatter' })); },
+      answer('Nothing here for me.'),
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.deepEqual(turns(), [['text']]);
+    assert.match(JSON.stringify(f.brain.agent.state.messages), /Nothing here for me\./);
+    assert.doesNotMatch(JSON.stringify(f.brain.agent.state.messages), /Let me check first/);
+    assert.equal((f.store.logs(10).find(log => log.kind === 'context_folded')?.data as { lookups?: number }).lookups, 4);
+    // A no-op beside the lookups is still nothing done.
+    f.store.setActivity('听歌中', []);
+    event(f.store, 'More chatter');
+    f.faux.setResponses([answer([call('inspect_actions', { offset: 0 }), call('set_activity', { activity: '听歌中' })]), answer('Still nothing.')]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.deepEqual(turns(), [['text'], ['text']]);
+    // Once the thought does something, what it looked up stays beside it.
+    event(f.store, 'Something for her');
+    f.faux.setResponses([answer(call('inspect_actions', { offset: 0 })), answer(call('set_activity', { activity: 'Answering' })), answer('Done.')]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.deepEqual(turns(), [['text'], ['text'], ['inspect_actions'], ['result:inspect_actions'], ['set_activity'], ['result:set_activity'], ['text']]);
+    f.restart(); event(f.store, 'After restart');
+    f.faux.setResponses([context => { assert.match(JSON.stringify(context.messages), /Nothing here for me\..*Answering.*Done\./); return answer('Continue'); }]);
+    await f.brain.run(f.store.claim(10)!);
+  } finally { f.store.close(); }
+});
+
+test('asking find_tools about a tool that is already callable leaves with its thought', async () => {
+  const f = fixture();
+  try {
+    // The kind of harmless call that gets copied as a way to end a thought; one that loads a tool stays where it declared it
+    // (model-interactions: a deferred tool is asked for ... and still loaded after a restart).
+    event(f.store, 'Unrelated chatter');
+    f.faux.setResponses([
+      answer(call('find_tools', { names: ['qq_main__get_group_member_info'] })),
+      context => { assert.match(JSON.stringify(context.messages.at(-1)), /"status\\":\\"available/); return answer('Staying quiet.'); },
+    ]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.equal(f.brain.agent.state.messages.some(message => message.role === 'toolResult'), false);
+    assert.match(JSON.stringify(f.brain.agent.state.messages.at(-1)), /Staying quiet\./);
+  } finally { f.store.close(); }
 });
 
 test('a delta repeats neither a memory already shown nor an action result already in context, and removes a memory only when it no longer holds', async () => {
@@ -323,7 +375,8 @@ test('identical repeated calls within one thought are blocked, end the thought, 
   try {
     event(f.store, 'Check recent actions');
     f.faux.setResponses([
-      answer(call('inspect_actions', { offset: 0 })),
+      // The thought does something, so what it looked up stays beside it (ADR-0024).
+      answer([call('schedule_activity', { title: 'Check again', kind: 'life', at: new Date(Date.now() + 7_200_000).toISOString() }), call('inspect_actions', { offset: 0 })]),
       answer(call('inspect_actions', { offset: 0 })),
       answer('Must not be called after blocked repeat'),
     ]);
@@ -338,7 +391,7 @@ test('identical repeated calls within one thought are blocked, end the thought, 
     event(f.store, 'Another line');
     f.store.setActivity('听歌中', []);
     f.faux.setResponses([
-      answer([call('inspect_actions', { offset: 0 }), call('set_activity', { activity: '听歌中' })]),
+      answer([call('inspect_actions', { offset: 0 }), call('set_activity', { activity: '听歌中' }), call('schedule_activity', { title: 'Tea', kind: 'life', at: new Date(Date.now() + 3_600_000).toISOString() })]),
       answer('Done'),
     ]);
     await f.brain.run(f.store.claim(10)!);

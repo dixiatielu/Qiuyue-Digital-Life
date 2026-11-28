@@ -35,6 +35,12 @@ export interface ToolSet {
 }
 /** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
 const reviewTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity', FIND_TOOLS]);
+/**
+ * Calls that only look something up: they change nothing and reach no one. A thought that called nothing else leaves
+ * none of them behind when it ends (ADR-0024). Read-only native operations count, and the plugin tools a review may use.
+ */
+const lookupTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', FIND_TOOLS]);
+export function isLookup(tools: ToolSet, name: string): boolean { return lookupTools.has(name) || tools.plugins.reviewAllowed(name) || tools.plugins.readOnlyNative(name); }
 export function forReview(tools: ToolSet): ToolSet {
   return tools.only(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name), 'review');
 }
@@ -188,7 +194,7 @@ export function createTools(config: Config, store: Store, context: () => Thought
       return new Set(tools.filter(tool => (tool as PluginTool).defer && !named.has(tool.name)).map(tool => tool.name));
     };
     const add = (name: string) => enabled && !loaded.has(name) && deferrable(all()).has(name) && !!loaded.add(name);
-    const finder = tool(FIND_TOOLS, enabled
+    const finder = runtime.tool(FIND_TOOLS, enabled
       ? 'Make tools listed in your instructions as loaded on demand callable, and read any tool\'s detailed documentation: results, examples, and constraints. Pass every name you need at once. A tool loaded here is callable from your next step and stays available.'
       : 'Read a tool\'s detailed documentation by name: results, examples, and constraints. Every tool is already callable.',
     Type.Object({ names: Type.Array(string('Tool name', 100), { minItems: 1, maxItems: 8 }) }), args => {
@@ -206,11 +212,14 @@ export function createTools(config: Config, store: Store, context: () => Thought
         const documentation = (match as PluginTool).documentation?.();
         found.push({ name: match.name, status: add(match.name) ? 'loaded' : 'available', description: match.description, ...(documentation === undefined ? {} : { documentation }) });
       }
-      return {
+      const loadedNow = found.some(item => item.status === 'loaded');
+      const result = {
         tools: found,
         ...(unknown.length ? { unknown, hint: 'An unknown tool does not exist or the operator has not enabled it.' } : {}),
-        ...(found.some(item => item.status === 'loaded') ? { note: 'Loaded tools are callable from your next step and stay available.' } : {}),
+        ...(loadedNow ? { note: 'Loaded tools are callable from your next step and stay available.' } : {}),
       };
+      // A load is declared where it happened, so that call is not a lookup that can leave its thought (ADR-0024).
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: loadedNow ? { loaded: true } : {} };
     });
     return {
       plugins, current: all,

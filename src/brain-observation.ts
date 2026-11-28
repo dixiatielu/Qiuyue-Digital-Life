@@ -7,7 +7,7 @@ import { parseConversationRef } from './identity.js';
 import type { Store } from './store.js';
 import { prepareModelImage } from './image.js';
 import type { ThoughtContext, ToolSet } from './tools.js';
-import { estimateTokens, IMAGE_TOKENS } from './context.js';
+import { estimateTokens, IMAGE_TOKENS, OBSERVATION_PREFIX } from './context.js';
 import { actionSummary, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { memoriesInView, type SemanticRecall } from './recall.js';
@@ -216,7 +216,7 @@ export async function buildObservationMessage(params: {
   const rests = observation.events.filter(event => event.kind === 'rest_backlog');
   const faces = await tools.plugins.emojiNames(observation.events, signal);
   // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
-  const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `New environment observations (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(store, observation.events, faces, preview, tools.plugins.recordFormatters())}` }];
+  const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `${OBSERVATION_PREFIX} (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(store, observation.events, faces, preview, tools.plugins.recordFormatters())}` }];
   if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) {
     content.push({ type: 'text', text: buildLifeContext({ config, store, tools, thought }) });
   }

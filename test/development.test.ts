@@ -365,11 +365,13 @@ test('development reaches each thought by scope and people present, and chat rec
         assert.deepEqual(snapshot.recalled, []);
         return answer(call('read_chat_record', { conversation: "qq:900:group:100" }));
       },
-      context => { assert.match(JSON.stringify(context.messages.at(-1)), /P7: Hello/); return answer('Noted'); },
+      // She goes on to do something, so the record she read stays, folded (a thought of lookups alone leaves none, ADR-0024).
+      context => { assert.match(JSON.stringify(context.messages.at(-1)), /P7: Hello/); return answer(call('set_activity', { activity: 'Reading the record' })); },
+      answer('Noted'),
     ]);
     event(f.store, 'Hello', 100);
     await f.brain.run(f.store.claim(20)!);
-    const results = f.brain.agent.state.messages.filter(message => message.role === 'toolResult');
+    const results = f.brain.agent.state.messages.filter(message => message.role === 'toolResult' && message.toolName === 'read_chat_record');
     assert.equal(results.length, 1);
     const folded = JSON.stringify(results[0]);
     assert.match(folded, /Folded when the thought ended; read it again with read_chat_record, or read_context ctx:\w+.*Chat record of group 100/);

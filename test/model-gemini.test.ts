@@ -74,8 +74,8 @@ test('Gemini native runs a Pi tool cycle and replays thought signatures after a 
       assert.equal(call.functionCall.name, 'set_activity');
       assert.ok(parts.some((part: any) => part.functionResponse?.name === 'set_activity'));
     }
-    // The reply that took no action left with its thought (ADR-0024); the call's signature above is what replays.
-    assert.ok(!requests[2]!.body.contents.flatMap((content: any) => content.parts).some((part: any) => part.text === 'Received' || part.thoughtSignature === textSignature));
+    // The reply that called no tool stays as her note (ADR-0024) and replays with its own signature, as the call does with its.
+    assert.ok(requests[2]!.body.contents.some((content: any) => content.role === 'model' && content.parts.some((part: any) => part.text === 'Received' && part.thoughtSignature === textSignature)));
   } finally {
     store.close(); server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

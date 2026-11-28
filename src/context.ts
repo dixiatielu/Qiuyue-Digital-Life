@@ -225,25 +225,49 @@ export function foldToolResults(messages: AgentMessage[], toolName: string): { m
   });
   return { messages: folded, changed };
 }
+/** What opens every observation. A reply holding it has gone on to write an observation of its own. */
+export const OBSERVATION_PREFIX = 'New environment observations';
+/** How much of a reply that called no tool stays as a note to herself. */
+export const REPLY_NOTE_CHARS = 400;
+const programText = new RegExp(`${OBSERVATION_PREFIX} \\(|</?runtime_data>`);
 /**
- * Keep of the model's replies only the actions they took (ADR-0024). Its text and thoughts reached no one, and a context
- * that keeps them teaches the model to answer each observation with the same words, until it writes the next observation itself.
- * A reply that took no action leaves nothing; one that acted keeps its calls, whose results follow it.
+ * What stays of a reply that called no tool: her words, as a note to herself (ADR-0024). Nothing stays of a reply that
+ * said nothing, ran to the output limit, or wrote what only the program writes; those are how a reply runs away.
+ */
+function replyNote(message: AssistantMessage): TextContent | undefined {
+  if (message.stopReason === 'length') return;
+  const blocks = message.content.filter((block): block is TextContent => block.type === 'text');
+  const text = blocks.map(block => block.text).join('').trim();
+  if (!text || programText.test(text)) return;
+  const note = [...text].slice(0, REPLY_NOTE_CHARS).join('');
+  return blocks.length === 1 && blocks[0]!.text === note ? blocks[0]! : { type: 'text', text: note };
+}
+/**
+ * Keep of a reply what it did, or what she noted when it did nothing (ADR-0024). A reply that called tools keeps only
+ * its calls, whose results follow it; its text and thoughts leave. A reply that called none keeps its text: a context
+ * that shows only calls teaches the model that every turn must call something, and it copies whichever call is at hand.
  */
 export function foldReplies(messages: AgentMessage[]): { messages: AgentMessage[]; changed: number } {
   let changed = 0;
   const folded = messages.flatMap((message): AgentMessage[] => {
     if (message.role !== 'assistant') return [message];
     const calls = message.content.filter(block => block.type === 'toolCall');
-    if (calls.length === message.content.length) return [message];
+    if (calls.length) {
+      if (calls.length === message.content.length) return [message];
+      changed++;
+      return [{ ...message, content: calls }];
+    }
+    const note = replyNote(message);
+    if (note && message.content.length === 1 && message.content[0] === note) return [message];
     changed++;
-    return calls.length ? [{ ...message, content: calls }] : [];
+    return note ? [{ ...message, content: [note] }] : [];
   });
   return { messages: folded, changed };
 }
 /**
- * Drop no-op or repeated calls from a finished thought before they can teach the model to repeat them (ADR-0024).
- * Removes both each flagged tool call and its paired tool result so assistant/toolResult pairing stays intact.
+ * Drop calls that did nothing from a finished thought before they can teach the model to repeat them (ADR-0024): no-op
+ * and repeated calls, and the lookups of a thought that did nothing else. Removes each flagged call with its paired
+ * result so assistant/toolResult pairing stays intact; what a reply said beside a dropped call leaves with it.
  */
 export function foldNoopCalls(messages: AgentMessage[], noopCallIds: ReadonlySet<string>): { messages: AgentMessage[]; changed: number } {
   if (!noopCallIds.size) return { messages, changed: 0 };
@@ -255,8 +279,8 @@ export function foldNoopCalls(messages: AgentMessage[], noopCallIds: ReadonlySet
       return [];
     }
     if (message.role === 'assistant') {
-      const kept = message.content.filter(block => block.type !== 'toolCall' || !noopCallIds.has(block.id));
-      if (kept.length === message.content.length) return [message];
+      if (!message.content.some(block => block.type === 'toolCall' && noopCallIds.has(block.id))) return [message];
+      const kept = message.content.filter(block => block.type === 'toolCall' && !noopCallIds.has(block.id));
       changed++;
       return kept.length ? [{ ...message, content: kept }] : [];
     }

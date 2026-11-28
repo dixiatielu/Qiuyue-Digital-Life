@@ -72,23 +72,27 @@ export function setAsideSummary(removed: AgentMessage[], ids: string[], limit: n
   return previous ? `${previous}\n${note}` : note;
 }
 
-/** Fold chat records, viewed images, no-op/repeated calls, and replies out of a completed thought (ADR-0024). */
+/**
+ * Fold chat records, viewed images, calls that did nothing, and replies out of a completed thought (ADR-0024).
+ * `lookupCalls` are the lookups of a thought that did nothing else and then ended: they leave with their results.
+ */
 export function foldThoughtMessages(
   messages: AgentMessage[],
-  options: { everything: boolean; noopCalls: ReadonlySet<string>; imageViewer: (label: string) => string | undefined },
-): { messages: AgentMessage[]; counts: { results: number; images: number; replies: number; noops?: number; media?: number }; changed: boolean } {
-  let results = 0; let images = 0; let replies = 0; let noops = 0; let media = 0;
+  options: { everything: boolean; noopCalls: ReadonlySet<string>; lookupCalls?: ReadonlySet<string>; imageViewer: (label: string) => string | undefined },
+): { messages: AgentMessage[]; counts: { results: number; images: number; replies: number; noops?: number; lookups?: number; media?: number }; changed: boolean } {
+  let results = 0; let images = 0; let replies = 0; let noops = 0; let lookups = 0; let media = 0;
   let folded = messages;
   if (options.everything) {
     const records = foldToolResults(folded, 'read_chat_record'); folded = records.messages; results += records.changed;
     const seen = foldImages(folded, options.imageViewer); folded = seen.messages; images += seen.changed; media += seen.media;
   }
   const dropped = foldNoopCalls(folded, options.noopCalls); folded = dropped.messages; noops += dropped.changed;
+  if (options.lookupCalls?.size) { const looked = foldNoopCalls(folded, options.lookupCalls); folded = looked.messages; lookups += looked.changed; }
   const said = foldReplies(folded); replies += said.changed;
   return {
     messages: said.messages,
-    counts: { results, images, replies, ...(noops ? { noops } : {}), ...(media ? { media } : {}) },
-    changed: Boolean(results || images || replies || noops || media),
+    counts: { results, images, replies, ...(noops ? { noops } : {}), ...(lookups ? { lookups } : {}), ...(media ? { media } : {}) },
+    changed: Boolean(results || images || replies || noops || lookups || media),
   };
 }
 

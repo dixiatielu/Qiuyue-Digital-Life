@@ -9,7 +9,7 @@ import type { EnvironmentEvent, Observation } from './domain.js';
 import { eventChat, ambientEvent, ownEvent } from './domain.js';
 import { Store, digest } from './store.js';
 import { normalizeImageBlocks } from './image.js';
-import { ensureCurrent, FIND_TOOLS, type ThoughtContext, type ToolSet } from './tools.js';
+import { ensureCurrent, FIND_TOOLS, isLookup, type ThoughtContext, type ToolSet } from './tools.js';
 import { foldNoopCalls, foldReplies, portableMessages, TokenMeter, toModelMessages, type ContextCheckpoint } from './context.js';
 import { applyRuntimeUpdate, carry, runtimeUpdate, type RuntimeSnapshot } from './runtime-context.js';
 import type { SemanticRecall } from './recall.js';
@@ -59,6 +59,9 @@ export class PiBrain implements Brain {
   private repeatedCalls = new Set<string>();
   /** Tool call IDs in this thought that were no-ops or blocked repeats, folded out when the thought ends (ADR-0024). */
   private noopCalls = new Set<string>();
+  /** Tool call IDs in this thought that only looked something up, and those of every other call; a thought of lookups alone leaves none of them (ADR-0024). */
+  private lookupCalls = new Set<string>();
+  private otherCalls = new Set<string>();
   /** Memories this thought has already been counted as calling to mind. */
   private broughtToMind = new Set<string>();
   private turns = 0;
@@ -145,12 +148,17 @@ export class PiBrain implements Brain {
       convertToLlm: messages => toModelMessages(messages, { mergeUsers }),
       // What a thought has loaded is declared from its next turn on; Pi writes the change into the transcript.
       prepareNextTurnWithContext: ({ context }) => ({ context: { ...context, tools: tools.declared() } }),
-      beforeToolCall: async ({ toolCall, args }) => (await this.skipStale(toolCall.name, args)) ?? this.skipRepeated(toolCall.id, toolCall.name, args),
+      beforeToolCall: async ({ toolCall, args }) => {
+        (isLookup(this.tools, toolCall.name) ? this.lookupCalls : this.otherCalls).add(toolCall.id);
+        return (await this.skipStale(toolCall.name, args)) ?? this.skipRepeated(toolCall.id, toolCall.name, args);
+      },
       // A batch ends the thought when every call in it does. Something remembered beside a message sent is part of that reply, not a reason to decide again (ADR-0028).
       afterToolCall: async ({ toolCall, args, isError, result }) => {
         if (isError) return;
         const normalized = await normalizeImageBlocks(result.content, this.agent.state.model);
         const contentPatch = normalized.changed ? { content: normalized.content } : undefined;
+        // A find_tools that loaded a tool changed what is declared, and its result is where the declaration stands.
+        if (toolCall.name === FIND_TOOLS && (result.details as { loaded?: unknown } | undefined)?.loaded === true) { this.lookupCalls.delete(toolCall.id); this.otherCalls.add(toolCall.id); }
         if ((result.details as { noop?: unknown } | undefined)?.noop === true) {
           this.noopCalls.add(toolCall.id);
           return { ...contentPatch, terminate: true };
@@ -171,7 +179,7 @@ export class PiBrain implements Brain {
         ensureCurrent(store, this.thought, signal);
         const runtime = this.runtimeContext(true);
         let messages = [...context.messages];
-        // Replies before the newest observation belong to turns already answered; only their actions stay (ADR-0024).
+        // Replies before the newest observation belong to turns already answered; their actions stay, or what she noted when there were none (ADR-0024).
         const latest = messages.findLastIndex(message => message.role === 'observation');
         const foldEarlier = (list: AgentMessage[]) => {
           const dropped = foldNoopCalls(list, this.noopCalls);
@@ -391,7 +399,7 @@ export class PiBrain implements Brain {
     const generation = this.store.settings().generation;
     this.prepare(generation);
     const rollback = this.checkpoint(); this.compactions = []; this.completed = undefined; this.lastAssistant = undefined;
-    this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.lookupCalls.clear(); this.otherCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(observation.events.filter(event => !ownEvent(event) && !ambientEvent(event)).map(eventChat).filter((chat): chat is string => chat !== undefined));
     this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
@@ -410,7 +418,7 @@ export class PiBrain implements Brain {
       this.controller.signal.throwIfAborted();
       ensureCurrent(this.store, this.thought);
       // The next thought decides again, so a preempted one leaves what it was looking at for it to fold.
-      this.fold(!this.preempted);
+      this.fold(!this.preempted, !this.preempted);
       if (this.compactor.hasReadySummary) this.agent.state.messages = this.compactor.applyBackground(this.agent.state.messages, this.runtimeContext());
       this.store.saveContext(this.checkpoint(), [...this.seen], this.compactions);
       this.seen.clear();
@@ -428,7 +436,7 @@ export class PiBrain implements Brain {
   async review(observation: Observation) {
     const generation = this.store.settings().generation;
     this.resetContext(); this.compactions = []; this.lastAssistant = undefined;
-    this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
+    this.seen.clear(); this.broughtToMind.clear(); this.repeatedCalls.clear(); this.noopCalls.clear(); this.lookupCalls.clear(); this.otherCalls.clear(); this.turns = 0; this.runId = crypto.randomUUID(); this.observations = [...observation.events];
     this.engaged = new Set(); this.stale.clear(); this.preempted = false;
     this.controller = new AbortController();
     this.thought = { generation, sources: new Set(), triggers: new Set(), lifeOnly: false, reviewing: true, ...(observation.events.some(event => Array.isArray(event.payload.revisit)) ? { revisiting: true } : {}) };
@@ -483,8 +491,10 @@ export class PiBrain implements Brain {
     this.noopCalls.add(callId);
     return { block: true, reason: 'Already called with the same arguments in this thought; end your thought without a tool call if nothing else to do.', terminate: true };
   }
-  private fold(everything = true) {
-    const options = { everything, noopCalls: this.noopCalls, imageViewer: (label: string) => this.tools.plugins.imageViewer(label) };
+  /** `ended`: the thought came to its own end, so lookups that led to nothing else leave with it. */
+  private fold(everything = true, ended = false) {
+    const acted = [...this.otherCalls].some(id => !this.noopCalls.has(id));
+    const options = { everything, noopCalls: this.noopCalls, ...(ended && !acted ? { lookupCalls: this.lookupCalls } : {}), imageViewer: (label: string) => this.tools.plugins.imageViewer(label) };
     const result = foldThoughtMessages(this.agent.state.messages, options);
     if (!result.changed) return;
     this.store.archiveContext(this.agent.state.messages, [...this.thought.sources]);

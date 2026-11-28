@@ -2,7 +2,7 @@ import { beginAction } from './helpers.js';
 import { qqEvent } from './helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fauxAssistantMessage as answer, fauxToolCall as call } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage as answer, fauxText, fauxThinking, fauxToolCall as call } from '@earendil-works/pi-ai';
 import { deferred, event, fixture } from './helpers.js';
 import { LifeRuntime } from '../src/runtime.js';
 import { ActionNotDispatchedError } from '../src/platform.js';
@@ -505,6 +505,20 @@ test('a cancelled thought leaves its images in view for the next thought, which 
   } finally { f.store.close(); }
 });
 
+test('a cancelled thought keeps what it looked up for the thought that decides again', async () => {
+  const f = fixture(); const calling = deferred();
+  try {
+    say(f.store, 'What was that song?');
+    f.faux.setResponses([answer(call('recall', { query: 'that song' })), deciding(calling, 'unused')]);
+    const work = f.brain.run(f.store.claim(10)!); await calling.promise;
+    say(f.store, 'Never mind'); const preempting = f.store.claim(10)!;
+    assert.equal(await f.brain.steer(preempting), false); f.store.releaseBatch(preempting.batchId); await work;
+    // Only a thought that came to its own end drops lookups that led to nothing (ADR-0024).
+    assert.ok(f.brain.agent.state.messages.some(message => message.role === 'toolResult' && message.toolName === 'recall'));
+    assert.ok(!f.store.logs().some(log => log.kind === 'context_folded' && (log.data as { lookups?: number }).lookups));
+  } finally { f.store.close(); }
+});
+
 test('an observation shows its events as chat-record lines, with the QQ numbers, message IDs, and image URLs a thought acts on', async () => {
   const f = fixture();
   f.store.setSetting('faces', { 424: { name: '续标识' } });
@@ -689,8 +703,8 @@ test('a thought cites what it had in view, not what earlier thoughts in the same
 test('pausing, resuming, and the life switch keep the working context; a change to what it holds still starts a fresh one', async () => {
   const f = fixture(); const runtime = new LifeRuntime(f.cfg, f.store, f.brain);
   try {
-    // What stays of a thought is what it did (ADR-0024), so a call marks this working context.
-    event(f.store, 'Do you know this tune?'); f.faux.setResponses([answer(call('recall', { query: 'Humming it quietly to herself' })), answer('')]);
+    // What stays of a thought that did nothing is what she noted (ADR-0024), so a note marks this working context.
+    event(f.store, 'Do you know this tune?'); f.faux.setResponses([answer('Humming it quietly to herself')]);
     await f.brain.run(f.store.claim(10)!);
     runtime.control('pause'); runtime.control('resume'); runtime.control('life', true); runtime.control('life', false);
     event(f.store, 'Still there?');
@@ -717,13 +731,40 @@ test('extracted brain observation and compaction helpers preserve deterministic 
   assert.equal(formatQuiet(125 * 60_000), 'quiet 2h5m');
   assert.equal(formatQuiet(72 * 3_600_000), 'quiet 3d');
 
+  const options = { everything: true, noopCalls: new Set<string>(), imageViewer: () => undefined };
+  // A reply that called no tool stays as her note, less its thoughts; one that said nothing leaves no turn.
+  const noted = foldThoughtMessages([{ role: 'user', content: 'hi', timestamp: 1 }, answer('staying out of this one')], options);
+  assert.equal(noted.changed, false);
+  assert.equal(noted.messages.length, 2);
   const folded = foldThoughtMessages([
     { role: 'user', content: 'hi', timestamp: 1 },
-    answer('internal draft only'),
-  ], { everything: true, noopCalls: new Set(), imageViewer: () => undefined });
-  assert.equal(folded.changed, true);
-  assert.equal(folded.counts.replies, 1);
-  assert.equal(folded.messages.length, 1);
+    answer([fauxThinking('private reasoning'), fauxText('  staying out of this one \n')]),
+    answer('   '),
+  ], options);
+  assert.equal(folded.counts.replies, 2);
+  assert.deepEqual(folded.messages.at(-1), { ...folded.messages.at(-1)!, content: [{ type: 'text', text: 'staying out of this one' }] });
+  assert.equal(folded.messages.length, 2);
+  assert.equal(foldThoughtMessages(folded.messages, options).changed, false);
+  // What only the program writes, a reply cut off at the output limit, and anything past the note's length do not stay.
+  const runaway = foldThoughtMessages([
+    { role: 'user', content: 'hi', timestamp: 1 },
+    answer('ending thought.\nuser\nNew environment observations (times +08:00; a #xxxxxxxx ref is an event ID):\n12:00 #deadbeef someone: hello'),
+    answer('quiet <runtime_data>{}</runtime_data>'),
+    answer('again and again and again', { stopReason: 'length' }),
+    answer('长'.repeat(900)),
+  ], options);
+  assert.deepEqual(runaway.messages.flatMap(message => message.role === 'assistant' ? [message.content.map(block => block.type === 'text' ? block.text.length : block.type)] : []), [[400]]);
+  // The lookups of a thought that did nothing else leave with their results, and what was said beside them too.
+  const looked = foldThoughtMessages([
+    { role: 'user', content: 'hi', timestamp: 1 },
+    answer([fauxText('let me check'), call('recall', { query: 'tune' }, { id: 'lookup-1' })]),
+    { role: 'toolResult', toolCallId: 'lookup-1', toolName: 'recall', content: [{ type: 'text', text: '[]' }], isError: false, timestamp: 2 },
+    answer('nothing to add'),
+  ], { ...options, lookupCalls: new Set(['lookup-1']) });
+  assert.equal(looked.counts.lookups, 2);
+  assert.deepEqual(looked.messages.map(message => message.role), ['user', 'assistant']);
+  assert.match(JSON.stringify(looked.messages), /nothing to add/);
+  assert.doesNotMatch(JSON.stringify(looked.messages), /let me check|recall/);
 
   const note = setAsideSummary([{ role: 'user', content: 'old', timestamp: 1_700_000_000_000 }], ['ctx:1'], 500, 'budget');
   assert.match(note, /No summary was written for 1 older messages/);

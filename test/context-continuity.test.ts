@@ -298,7 +298,8 @@ test('pressure can be resolved by pruning old tool output without a summary call
   const f = fixture({ execute: async () => ({ content: 'raw original '.repeat(1000) }) });
   try {
     smallWindow(f); f.cfg.limits.contextTokens += 4000; event(f.store, 'Read a large result');
-    f.faux.setResponses([answer(call("qq_main__get_msg", { message_id: 1 })), answer('Finished reading')]);
+    // She does something beside reading, so what she read stays (a thought of lookups alone leaves none, ADR-0024).
+    f.faux.setResponses([answer([call("qq_main__get_msg", { message_id: 1 }), call('set_activity', { activity: 'Reading' })]), answer('Finished reading')]);
     await f.brain.run(f.store.claim(20)!);
     const originalResult = f.brain.agent.state.messages.find(message => message.role === 'toolResult')!;
     const originalId = (await import('../src/context.js')).contextRecordId(originalResult);

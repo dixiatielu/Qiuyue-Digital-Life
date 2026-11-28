@@ -114,6 +114,11 @@ export class PluginHost {
     for (const plugin of this.plugins) { const definition = plugin.nativeActions?.definition(name); if (definition) return definition; }
     throw new Error(`Unknown native interface: ${name}`);
   }
+  /** Whether a tool is a native operation that only reads; false for any other tool. */
+  readOnlyNative(name: string): boolean {
+    for (const plugin of this.plugins) { const definition = plugin.nativeActions?.definition(name); if (definition) return definition.readOnly; }
+    return false;
+  }
   adapters(): import('./plugin-sdk.js').AdapterInfo[] {
     return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.nativeActions?.instances ?? []);
   }

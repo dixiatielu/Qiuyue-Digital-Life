@@ -58,6 +58,8 @@ test('observations name faces and reactions and show each face once a thought, a
     let observed = '';
     f.faux.setResponses([
       context => { observed = JSON.stringify(context.messages.findLast(message => message.role === 'user' && JSON.stringify(message).includes('New environment observations'))); return answer(call("qq_main__view_face", { id: '277' })); },
+      // She goes on to do something, so what she looked up stays, folded (a thought of lookups alone leaves none, ADR-0024).
+      answer(call('set_activity', { activity: 'Looking at faces' })),
       answer('Seen'),
     ]);
     await f.brain.run(f.store.claim(10)!);
