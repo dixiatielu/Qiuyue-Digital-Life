@@ -35,7 +35,7 @@ test('a media block is known by its type, described in a few words, and costed b
   assert.equal(describeMedia({ ...voice, seconds: undefined }), 'audio');
   assert.equal(mediaTokens(voice), 12 * 32 + 8);
   assert.equal(mediaTokens(clip), 20 * 100 + 8);
-  assert.equal(mediaTokens(paper), 3 * 560 + 8);
+  assert.equal(mediaTokens(paper), 3 * 1100 + 8);
   // Megabytes of base64 cost what the seconds say, where an unknown block would be counted character by character.
   const large = { ...clip, data: 'A'.repeat(8_000_000) };
   assert.equal(mediaTokens(large), mediaTokens(clip));

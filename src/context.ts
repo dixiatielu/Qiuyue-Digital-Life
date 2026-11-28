@@ -220,7 +220,7 @@ const FOLDED = '[Folded when the thought ended;';
 /** The note left where media was: what it was and, when it came from an event, how to perceive it again. */
 function foldedMedia(block: MediaContent, label: unknown): TextContent {
   const again = typeof label === 'object' && label !== null && (label as TextContent).type === 'text' && labelsEventMedia((label as TextContent).text);
-  return { type: 'text', text: `${FOLDED} it was ${describeMedia(block)}${again ? `; ${EVENT_MEDIA_VIEWER} plays it again` : ''}]` };
+  return { type: 'text', text: `${FOLDED} it was ${describeMedia(block)}${again ? `; ${EVENT_MEDIA_VIEWER} brings it back` : ''}]` };
 }
 function withoutMediaBytes<T>(content: T[]): T[] {
   return content.some(isMedia) ? content.map((block, index, blocks) => isMedia(block) ? foldedMedia(block, blocks[index - 1]) as T : block) : content;

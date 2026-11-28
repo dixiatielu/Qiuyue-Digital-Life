@@ -6,7 +6,7 @@ import { Store, type RevisionReach } from './store.js';
 import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName, type NativeActionDefinition } from './platform.js';
 import type { AdapterInfo } from './plugin-sdk.js';
 import { fetchImage } from './web.js';
-import { mediaModality, mediaSeconds, type ContentBlock, type MediaContent } from './media.js';
+import { mediaModality, mediaSeconds, mediaTokens, pdfPages, type ContentBlock, type MediaContent } from './media.js';
 
 export interface ToolImage {
   label: string;
@@ -22,9 +22,9 @@ export interface ToolImage {
   load(signal?: AbortSignal): { data: Buffer; mimeType: string } | undefined | Promise<{ data: Buffer; mimeType: string } | undefined>;
   onShown?(): void;
 }
-/** A voice message, an audio file, or a video in an event, described before any of it is fetched (ADR-0029). */
+/** A voice message, an audio file, a video, or a PDF in an event, described before any of it is fetched (ADR-0029). */
 export interface ToolMedia {
-  kind: 'voice' | 'audio' | 'video';
+  kind: 'voice' | 'audio' | 'video' | 'document';
   /** Where the platform says so; otherwise the bytes are asked once they are loaded. */
   seconds?: number;
   bytes?: number;
@@ -36,7 +36,7 @@ export interface ToolMedia {
 export const mediaLabel = (source: Pick<ToolMedia, 'kind'>, index: number, from: string) => `${source.kind} ${index} from ${from}`;
 const megabytes = (bytes: number) => `${(bytes / 1_000_000).toFixed(1)} MB`;
 /** Fetch one piece of media within the operator's limits, as the block a model perceives. */
-export async function loadEventMedia(limits: { maxMediaBytes: number; maxMediaSeconds: number }, source: ToolMedia, signal?: AbortSignal): Promise<MediaContent> {
+export async function loadEventMedia(limits: { maxMediaBytes: number; maxMediaSeconds: number; contextTokens?: number }, source: ToolMedia, signal?: AbortSignal): Promise<MediaContent> {
   if (source.missingReason) throw new Error(source.missingReason);
   const tooLarge = (bytes: number) => new Error(`This ${source.kind} is ${megabytes(bytes)}; at most ${megabytes(limits.maxMediaBytes)} can be perceived.`);
   const tooLong = (seconds: number) => new Error(`This ${source.kind} runs ${Math.round(seconds)}s; at most ${limits.maxMediaSeconds}s can be perceived.`);
@@ -45,10 +45,14 @@ export async function loadEventMedia(limits: { maxMediaBytes: number; maxMediaSe
   const loaded = await source.load(limits.maxMediaBytes, signal);
   if (loaded.data.byteLength > limits.maxMediaBytes) throw tooLarge(loaded.data.byteLength);
   const modality = mediaModality(loaded.mimeType);
-  if (modality !== 'audio' && modality !== 'video') throw new Error(`Unsupported media format: ${loaded.mimeType || 'unknown'}.`);
-  const seconds = loaded.seconds ?? source.seconds ?? mediaSeconds(loaded.data, loaded.mimeType);
+  if (!modality || (modality === 'pdf') !== (source.kind === 'document')) throw new Error(`Unsupported media format: ${loaded.mimeType || 'unknown'}.`);
+  const seconds = modality === 'pdf' ? undefined : loaded.seconds ?? source.seconds ?? mediaSeconds(loaded.data, loaded.mimeType);
   if (seconds !== undefined && seconds > limits.maxMediaSeconds) throw tooLong(seconds);
-  return { type: 'media', mimeType: loaded.mimeType, data: loaded.data.toString('base64'), ...(seconds === undefined ? {} : { seconds: Math.round(seconds * 10) / 10 }) };
+  const pages = modality === 'pdf' ? pdfPages(loaded.data) : undefined;
+  const media: MediaContent = { type: 'media', mimeType: loaded.mimeType, data: loaded.data.toString('base64'), ...(seconds === undefined ? {} : { seconds: Math.round(seconds * 10) / 10 }), ...(pages === undefined ? {} : { pages }) };
+  // A long document costs by the page whatever its size, and one tool result must not crowd out the rest of the context.
+  if (limits.contextTokens !== undefined && mediaTokens(media) > limits.contextTokens / 4) throw new Error(`This ${source.kind} would take about ${mediaTokens(media)} tokens, more than a quarter of the context; it cannot be perceived whole.`);
+  return media;
 }
 export interface ToolExtensions {
   resolveMedia(value: unknown, actionName?: string): unknown;
@@ -133,7 +137,7 @@ export function resolveEventMedia(store: Store, plugins: Pick<ToolExtensions, 'm
   const event = store.event(store.resolve(args.id));
   if (!event) throw new Error('The experience does not exist or has been deleted.');
   const source = plugins.media(event)[index];
-  if (!source) throw new Error('That event has no voice message, audio, or video at this index.');
+  if (!source) throw new Error('That event has no voice message, audio, video, or document at this index.');
   return { event, index, source };
 }
 

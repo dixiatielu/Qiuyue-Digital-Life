@@ -1,7 +1,7 @@
 import type { AdapterConfig, Config } from '../config.js';
 import type { LifePlugin, OnlineActivity, PluginMedia, PluginTool } from '../plugins.js';
 import { nativeToolName, type SocialAdapter } from '../platform.js';
-import { conversationRef } from '../identity.js';
+import { conversationRef, parseConversationRef } from '../identity.js';
 import { errorResult } from '../tool-runtime.js';
 import { eventRef } from '../store.js';
 import { fetchImage, preferJpeg, publicFetch } from '../web.js';
@@ -9,6 +9,8 @@ import { sanitizeToolSchema } from '../schema.js';
 import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
 import { snowlumaDisplayProjector } from '../adapters/snowluma/display.js';
 import { snowlumaChatRecordFormatter } from '../adapters/snowluma/record.js';
+import { qqFileKind, qqFileName } from '../adapters/snowluma/files.js';
+import type { EnvironmentEvent } from '../domain.js';
 
 const oneBotSegment = {
   type: 'object',
@@ -117,6 +119,26 @@ const activities: OnlineActivity[] = [
 ];
 
 export function snowlumaToolsPlugin(config: Config, account: AdapterConfig, adapter?: SocialAdapter, fetchUrl: typeof publicFetch = publicFetch): LifePlugin {
+  type Segment = { type: string; data?: Record<string, unknown> };
+  const segmentsOf = (event: EnvironmentEvent): Segment[] => Array.isArray(event.payload.message) ? event.payload.message.filter((segment): segment is Segment => Boolean(segment && typeof segment === 'object')) : [];
+  /** The bytes of a file message. The address the message came with expires, so a current one is asked for first. */
+  const fileBytes = async (event: EnvironmentEvent, data: Record<string, unknown>, maxBytes: number, signal?: AbortSignal): Promise<Buffer> => {
+    let url = typeof data.url === 'string' && data.url ? data.url : undefined;
+    const fileId = data.file_id ?? data.id;
+    if (adapter && typeof fileId === 'string' && fileId) {
+      // The chat the message is in says which lookup applies and with whom; in a private chat that is the other person, whoever sent the file.
+      const chat = event.source?.conversation ? parseConversationRef(event.source.conversation) : undefined;
+      try {
+        const current = await (chat?.type === 'group' ? adapter.execute('get_group_file_url', { group_id: Number(chat.id), file_id: fileId }, signal)
+          : chat?.type === 'private' ? adapter.execute('get_private_file_url', { user_id: Number(chat.id), file_id: fileId, file_hash: String(data.file_hash ?? '') }, signal)
+          : undefined) as { url?: unknown } | undefined;
+        if (typeof current?.url === 'string' && current.url) url = current.url;
+      // The operator may not allow the lookup, or QQ may refuse it; the message's own address is still worth trying.
+      } catch { signal?.throwIfAborted(); }
+    }
+    if (!url) throw new Error('The file has no readable address.');
+    return (await fetchUrl(url, { timeoutMs: 60_000, maxBytes, signal })).data;
+  };
   const snowlumaCatalog = getSnowLumaCatalog().actions;
   for (const name of [...(account.tools.allow === '*' ? [] : account.tools.allow), ...account.tools.deny]) findSnowLumaAction(name);
   return {
@@ -209,41 +231,55 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig, adap
     display: snowlumaDisplayProjector,
     recordFormatter: snowlumaChatRecordFormatter,
     endsThought: tool => socialActions.has(tool),
-    // A voice message is AMR or SILK, which no model takes, so SnowLuma converts it; a video is fetched from QQ as it is (ADR-0029).
-    media: event => {
-      if (!Array.isArray(event.payload.message)) return [];
-      return event.payload.message
-        .filter((segment): segment is { type: string; data?: Record<string, unknown> } => Boolean(segment && typeof segment === 'object' && (segment.type === 'record' || segment.type === 'video')))
-        .map((segment): PluginMedia => {
-          const { file, url } = segment.data ?? {};
-          if (segment.type === 'record') return {
-            kind: 'voice',
-            ...(typeof file === 'string' && file && adapter ? {} : { missingReason: 'The voice message has no readable file.' }),
-            load: async (maxBytes, signal) => {
-              const record = await adapter!.execute('get_record', { file, out_format: 'mp3' }, signal) as { base64?: unknown } | undefined;
-              if (typeof record?.base64 !== 'string' || !record.base64) throw new Error('SnowLuma returned no converted audio; its server may have no audio converter.');
-              if (record.base64.length * 0.75 > maxBytes) throw new Error('The voice message exceeds the size limit.');
-              return { data: Buffer.from(record.base64, 'base64'), mimeType: 'audio/mpeg' };
-            },
-          };
-          return {
-            kind: 'video',
-            ...(typeof url === 'string' && url ? {} : { missingReason: 'The video has no readable address.' }),
-            load: async (maxBytes, signal) => {
-              const video = await fetchUrl(String(url), { timeoutMs: 60_000, maxBytes, signal });
-              // QQ's media host does not always name the type; the message's own file name does.
-              const mimeType = video.type.startsWith('video/') ? video.type : /\.mp4$/i.test(String(file ?? '')) ? 'video/mp4' : video.type;
-              return { data: video.data, mimeType };
-            },
-          };
-        });
-    },
+    // A voice message is AMR or SILK, which no model takes, so SnowLuma converts it; a video is fetched from QQ as it is.
+    // Audio, video, and a PDF sent as a file are known by the file's name (ADR-0029).
+    media: event => segmentsOf(event).flatMap((segment): PluginMedia[] => {
+      const data = segment.data ?? {}; const { file, url } = data;
+      if (segment.type === 'record') return [{
+        kind: 'voice',
+        ...(typeof file === 'string' && file && adapter ? {} : { missingReason: 'The voice message has no readable file.' }),
+        load: async (maxBytes, signal) => {
+          const record = await adapter!.execute('get_record', { file, out_format: 'mp3' }, signal) as { base64?: unknown } | undefined;
+          if (typeof record?.base64 !== 'string' || !record.base64) throw new Error('SnowLuma returned no converted audio; its server may have no audio converter.');
+          if (record.base64.length * 0.75 > maxBytes) throw new Error('The voice message exceeds the size limit.');
+          return { data: Buffer.from(record.base64, 'base64'), mimeType: 'audio/mpeg' };
+        },
+      }];
+      if (segment.type === 'video') return [{
+        kind: 'video',
+        ...(typeof url === 'string' && url ? {} : { missingReason: 'The video has no readable address.' }),
+        load: async (maxBytes, signal) => {
+          const video = await fetchUrl(String(url), { timeoutMs: 60_000, maxBytes, signal });
+          // QQ's media host does not always name the type; the message's own file name does.
+          const mimeType = video.type.startsWith('video/') ? video.type : /\.mp4$/i.test(String(file ?? '')) ? 'video/mp4' : video.type;
+          return { data: video.data, mimeType };
+        },
+      }];
+      const sent = segment.type === 'file' ? qqFileKind(qqFileName(data)) : undefined;
+      if (!sent || sent.kind === 'image') return [];
+      const size = Number(data.file_size ?? data.size);
+      return [{ kind: sent.kind, ...(Number.isFinite(size) && size > 0 ? { bytes: size } : {}), load: async (maxBytes, signal) => ({ data: await fileBytes(event, data, maxBytes, signal), mimeType: sent.mimeType }) }];
+    }),
     images: (event, helpers) => {
-      if (!Array.isArray(event.payload.message)) return [];
       const ref = eventRef(event.id);
-      return event.payload.message
-        .filter((segment): segment is { type: string; data?: Record<string, unknown> } => Boolean(segment && typeof segment === 'object' && segment.type === 'image'))
+      return segmentsOf(event)
+        // An image sent as a file is numbered with the images, in the order the record numbers them.
+        .filter(segment => segment.type === 'image' || segment.type === 'file' && qqFileKind(qqFileName(segment.data))?.kind === 'image')
         .map((segment, index) => {
+          if (segment.type === 'file') {
+            const data = segment.data ?? {}; const name = qqFileName(data); const size = Number(data.file_size ?? data.size);
+            const as = `, sent as the file ${name}`;
+            return {
+              priority: 'message' as const,
+              label: `The following is image ${index} from ${ref}${as}`,
+              viewLabel: `Image ${index} from event ${event.id}`,
+              deferred: `Image ${index} from ${ref}${as}, was not loaded due to the context limit; use view_event_image to view it`,
+              unavailable: `Image ${index} in ${ref}${as}, could not be read`,
+              // A file is often sent to keep an image at full size; a large one waits to be asked for.
+              autoView: !(size > 5_000_000),
+              load: async signal => ({ data: await fileBytes(event, data, config.limits.maxMediaBytes, signal), mimeType: qqFileKind(name)!.mimeType }),
+            };
+          }
           const saved = helpers?.imageCaption(segment.data ?? {}) ?? '';
           const url = segment.data?.url;
           // A line leaves the URL out, so saving the image as a sticker or sending it on takes it from its label.

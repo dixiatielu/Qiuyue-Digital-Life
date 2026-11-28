@@ -8,7 +8,8 @@ import { config, createTools, fixture, qqEvent } from './helpers.js';
 import { PiBrain } from '../src/brain.js';
 import { loadConfig } from '../src/config.js';
 import { contextRecordId, persistableMessage, TokenMeter } from '../src/context.js';
-import { mediaSeconds, mp3Seconds, mp4Seconds, type MediaContent } from '../src/media.js';
+import { deflateSync } from 'node:zlib';
+import { mediaSeconds, mediaTokens, mp3Seconds, mp4Seconds, pdfPages, type MediaContent } from '../src/media.js';
 import { nativeAdapterPlugin } from '../src/adapters/native.js';
 import { telegramAdapter } from '../src/adapters/telegram/index.js';
 import type { AdapterConfig } from '../src/config.js';
@@ -114,6 +115,8 @@ test('Telegram voice, audio, and video come in the formats Telegram holds them, 
     { update_id: 2, message: { message_id: 2, chat: { id: 7, type: 'private' }, from: { id: 7 }, date: 2, video_note: { file_id: 'note_file', duration: 12, length: 240 } } },
     { update_id: 3, message: { message_id: 3, chat: { id: 7, type: 'private' }, from: { id: 7 }, date: 3, audio: { file_id: 'song_file', duration: 200, mime_type: 'audio/mp4', title: 'Song' } } },
     { update_id: 4, message: { message_id: 4, chat: { id: 7, type: 'private' }, from: { id: 7 }, date: 4, text: 'no media' } },
+    { update_id: 5, message: { message_id: 5, chat: { id: 7, type: 'private' }, from: { id: 7 }, date: 5, document: { file_id: 'paper_file', file_name: 'paper.pdf', mime_type: 'application/pdf', file_size: 3 } } },
+    { update_id: 6, message: { message_id: 6, chat: { id: 7, type: 'private' }, from: { id: 7 }, date: 6, document: { file_id: 'zip_file', file_name: 'a.zip', mime_type: 'application/zip' } } },
   ];
   const downloads: string[] = [];
   const store = new Store(':memory:');
@@ -128,11 +131,14 @@ test('Telegram voice, audio, and video come in the formats Telegram holds them, 
     const tools = host.bind(new ToolRuntime({ ...config(), adapters: [] }, store, () => thought, host))([]);
     await host.start(); await tools.find(tool => tool.name === 'tg_main__getUpdates')!.execute('test', {});
     const events = store.claim(10)!.events.filter(event => event.kind === 'message');
-    const [voice, note, song, plain] = events.map(event => host.media(event));
+    const [voice, note, song, plain, paper, archive] = events.map(event => host.media(event));
     assert.deepEqual(voice!.map(({ kind, seconds, bytes }) => ({ kind, seconds, bytes })), [{ kind: 'voice', seconds: 7, bytes: 3 }]);
     assert.deepEqual(note!.map(({ kind, seconds }) => ({ kind, seconds })), [{ kind: 'video', seconds: 12 }]);
     assert.deepEqual(song!.map(({ kind, seconds }) => ({ kind, seconds })), [{ kind: 'audio', seconds: 200 }]);
     assert.deepEqual(plain, []);
+    // A PDF sent as a document is read as one; a file of any other kind stays a name.
+    assert.deepEqual(paper!.map(({ kind, bytes }) => ({ kind, bytes })), [{ kind: 'document', bytes: 3 }]);
+    assert.deepEqual(archive, []);
     // The download names no type, so the message's own does; a video note is an MP4.
     assert.deepEqual(await loadEventMedia(limits, voice![0]!), { type: 'media', mimeType: 'audio/ogg', data: Buffer.from([1, 2, 3]).toString('base64'), seconds: 7 });
     assert.equal((await loadEventMedia(limits, note![0]!)).mimeType, 'video/mp4');
@@ -161,7 +167,7 @@ const converting = () => {
   return { social, converted };
 };
 
-test('a model that takes audio hears a voice message with the line that brought it, and plays it again when asked', async () => {
+test('a model that takes audio hears a voice message with the line that brought it, and hears it again when asked', async () => {
   const { social, converted } = converting(); const f = listening(hearing, social);
   try {
     const voice = f.said('spoken.amr');
@@ -176,10 +182,10 @@ test('a model that takes audio hears a voice message with the line that brought 
     assert.deepEqual(read[at], { type: 'image', data: VOICE.toString('base64'), mimeType: 'audio/mpeg' });
     const kept = JSON.stringify(f.brain.agent.state.messages);
     assert.ok(!kept.includes(VOICE.toString('base64')));
-    assert.match(kept, /\[Folded when the thought ended; it was 3s audio; view_event_media plays it again\]/);
+    assert.match(kept, /\[Folded when the thought ended; it was 3s audio; view_event_media brings it back\]/);
     const played = await f.tools.current().find(tool => tool.name === 'view_event_media')!.execute('again', { id: voice.id });
     assert.deepEqual(played.content, [{ type: 'text', text: `Voice 0 from event ${voice.id}` }, { type: 'media', mimeType: 'audio/mpeg', data: VOICE.toString('base64'), seconds: 2.6 }]);
-    await assert.rejects(f.tools.current().find(tool => tool.name === 'view_event_media')!.execute('none', { id: voice.id, index: 1 }), /no voice message, audio, or video at this index/);
+    await assert.rejects(f.tools.current().find(tool => tool.name === 'view_event_media')!.execute('none', { id: voice.id, index: 1 }), /no voice message, audio, video, or document at this index/);
   } finally { f.store.close(); }
 });
 
@@ -214,7 +220,7 @@ test('the bytes of media are never archived, and a measured context holding medi
   const result = { role: 'toolResult', toolCallId: 'c', toolName: 'hear', content: [{ type: 'text', text: 'A recording' }, media], details: { secret: 1 }, isError: false, timestamp: 2 } as never;
   const saved = JSON.stringify([persistableMessage(observation), persistableMessage(result)]);
   assert.ok(!saved.includes(media.data));
-  assert.match(saved, /it was 3s audio; view_event_media plays it again\]/);
+  assert.match(saved, /it was 3s audio; view_event_media brings it back\]/);
   assert.match(saved, /\[Folded when the thought ended; it was 3s audio\]/);
   assert.ok(!saved.includes('secret'));
   // A record is known by what is saved of it, so the message in memory and the one restored share an ID.
@@ -243,4 +249,87 @@ test('media limits are set by the operator, and no voice messages unasked is a v
     assert.throws(() => withLimits({ maxMediaBytes: 0 }), /maxMediaBytes must be a positive integer/);
     assert.throws(() => withLimits({ maxMediaSeconds: 1.5 }), /maxMediaSeconds must be a positive integer/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** A PDF with a page tree of `pages` pages, written in the clear or inside a compressed object stream as newer writers do. */
+function pdf(pages: number, compressed = false): Buffer {
+  const tree = `<< /Type /Pages /Kids [${Array.from({ length: pages }, (_, index) => `${index + 3} 0 R`).join(' ')}] /Count ${pages} >>`;
+  if (!compressed) return Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n${tree}\nendobj\n%%EOF\n`, 'latin1');
+  const stream = deflateSync(Buffer.from(`2 0 ${tree}`, 'latin1'));
+  return Buffer.concat([Buffer.from(`%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length ${stream.length} >>\nstream\n`, 'latin1'), stream, Buffer.from('\nendstream\nendobj\n%%EOF\n', 'latin1')]);
+}
+
+test('the pages of a PDF are counted from its page tree, in the clear or in a compressed object stream', () => {
+  assert.equal(pdfPages(pdf(1)), 1);
+  // The list of a node's kids stands between its type and its count, however long it is.
+  assert.equal(pdfPages(pdf(400)), 400);
+  assert.equal(pdfPages(pdf(95, true)), 95);
+  assert.equal(pdfPages(Buffer.from('%PDF-1.7 with nothing readable in it')), undefined);
+  // An outline's count belongs to another dictionary and is not taken for pages.
+  assert.equal(pdfPages(Buffer.from('<< /Type /Outlines /Count 900 >>\n<< /Type /Pages /Count 3 /Kids [] >>', 'latin1')), 3);
+});
+
+test('a PDF is read by the page, and one that would crowd the context is refused', async () => {
+  const document = (pages: number, overrides: Partial<ToolMedia> = {}): ToolMedia => ({ kind: 'document', load: async () => ({ data: pdf(pages), mimeType: 'application/pdf' }), ...overrides });
+  const read = await loadEventMedia(limits, document(12));
+  assert.deepEqual({ ...read, data: '' }, { type: 'media', mimeType: 'application/pdf', data: '', pages: 12 });
+  assert.equal(mediaTokens(read), 12 * 1100 + 8);
+  // What is fetched must be what the message said it was.
+  await assert.rejects(loadEventMedia(limits, document(1, { kind: 'video' })), /Unsupported media format: application\/pdf/);
+  await assert.rejects(loadEventMedia(limits, document(1, { load: async () => ({ data: VOICE, mimeType: 'audio/mpeg' }) })), /Unsupported media format: audio\/mpeg/);
+  await assert.rejects(loadEventMedia({ ...limits, contextTokens: 200_000 }, document(100)), /This document would take about 110008 tokens, more than a quarter of the context/);
+  assert.equal((await loadEventMedia({ ...limits, contextTokens: 500_000 }, document(100))).pages, 100);
+});
+
+test('a QQ file is seen as an image or perceived as media by its name, fetched from a current address', async () => {
+  const cfg = config(); const account = cfg.adapters[0]!;
+  const asked: { action: string; args: Record<string, unknown> }[] = []; let refuse = false;
+  const adapter: SocialAdapter = { execute: async (action, args) => { asked.push({ action, args }); if (refuse) throw new Error('not allowed'); return { url: `https://current.example/${args.file_id}` }; } };
+  const fetched: string[] = [];
+  const plugin = snowlumaToolsPlugin(cfg, account, adapter, async (url, options) => { fetched.push(`${url} ${options.maxBytes}`); return { data: url.includes('paper') ? pdf(7) : Buffer.from('bytes'), type: 'application/octet-stream', url }; });
+  const store = new Store(':memory:');
+  const file = (name: string, id: string, size = 1000, extra: Record<string, unknown> = {}) => ({ type: 'file', data: { file: name, name, file_id: id, id, file_size: size, size, url: `https://stale.example/${id}`, file_hash: '', ...extra } });
+  try {
+    const message = [
+      { type: 'image', data: { url: 'https://multimedia.nt.qq.com.cn/picture', summary: '' } },
+      file('photo.PNG', 'photo'), file('paper.pdf', 'paper', 2_000_000), file('archive.zip', 'archive'), file('song.flac', 'song'), file('huge.jpg', 'huge', 9_000_000),
+    ];
+    const group = store.receive(qqEvent({ key: 'qq:files', kind: 'message', at: Date.now(), text: 'files', groupId: 100, actorId: 7, payload: { message } }, store))!;
+    const images = plugin.images!(group);
+    assert.deepEqual(images.map(image => [image.label.replace(/#[0-9a-f]+/, '#ref').replace(/; url.*/, ''), image.autoView]), [
+      ['The following is image 0 from #ref', true],
+      ['The following is image 1 from #ref, sent as the file photo.PNG', true],
+      // A file keeps an image at full size, and a large one waits to be asked for.
+      ['The following is image 2 from #ref, sent as the file huge.jpg', false],
+    ]);
+    assert.deepEqual(await images[1]!.load(), { data: Buffer.from('bytes'), mimeType: 'image/png' });
+    assert.deepEqual(asked, [{ action: 'get_group_file_url', args: { group_id: 100, file_id: 'photo' } }]);
+    assert.deepEqual(fetched, [`https://current.example/photo ${cfg.limits.maxMediaBytes}`]);
+    const media = plugin.media!(group);
+    assert.deepEqual(media.map(item => [item.kind, item.bytes]), [['document', 2_000_000], ['audio', 1000]]);
+    const paper = await loadEventMedia({ ...cfg.limits, maxMediaBytes: 3_000_000 }, media[0]!);
+    assert.equal(paper.mimeType, 'application/pdf'); assert.equal(paper.pages, 7);
+    assert.equal(fetched.at(-1), 'https://current.example/paper 3000000');
+    await assert.rejects(loadEventMedia({ ...cfg.limits, maxMediaBytes: 1_000_000 }, media[0]!), /This document is 2\.0 MB; at most 1\.0 MB/);
+    // When the current address cannot be had, the one the message came with is tried.
+    refuse = true;
+    assert.equal((await media[1]!.load(1_000_000)).mimeType, 'audio/flac');
+    assert.equal(fetched.at(-1), 'https://stale.example/song 1000000');
+    refuse = false; asked.length = 0;
+    const direct = store.receive(qqEvent({ key: 'qq:private-file', kind: 'message', at: Date.now(), text: 'file', actorId: 7, payload: { message: [file('notes.pdf', 'notes', 500, { file_hash: 'HASH' })] } }, store))!;
+    await plugin.media!(direct)[0]!.load(1_000_000);
+    assert.deepEqual(asked, [{ action: 'get_private_file_url', args: { user_id: 7, file_id: 'notes', file_hash: 'HASH' } }]);
+  } finally { store.close(); }
+});
+
+test('an observation numbers what a file can be asked for as, and leaves other files as names', async () => {
+  const { social } = converting(); const f = listening(hearing, social);
+  try {
+    const file = (name: string, size: number) => ({ type: 'file', data: { file: name, name, file_id: name, id: name, file_size: size, size, url: '', file_hash: '' } });
+    f.store.receive(qqEvent({ key: 'qq:file-lines', kind: 'message', at: Date.now(), text: 'files', groupId: 100, actorId: 7, payload: { message: [file('huge.jpg', 9_000_000), file('paper.pdf', 1000), file('archive.zip', 1000), file('clip.mp4', 1000)] } }, f.store));
+    let text = '';
+    f.faux.setResponses([context => { text = JSON.stringify(context.messages); return answer('Quiet'); }]);
+    await f.brain.run(f.store.claim(10)!);
+    assert.match(text, /\[file huge\.jpg, image 0\]\[file paper\.pdf, document 0\]\[file archive\.zip\]\[file clip\.mp4, video 1\]/);
+  } finally { f.store.close(); }
 });

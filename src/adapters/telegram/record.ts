@@ -1,4 +1,5 @@
 import type { Action, EnvironmentEvent } from '../../domain.js';
+import { documentKind } from './index.js';
 import { parsePersonRef, personRef, requireConversationRef } from '../../identity.js';
 import { eventRef } from '../../store.js';
 import {
@@ -195,7 +196,7 @@ class TelegramChatRecordSession implements ChatRecordSession {
     else if (message.video_note) parts.push(this.ctx.observed ? '[video 0, a video note]' : '[video note]');
     else if (message.voice) parts.push(this.ctx.observed ? '[voice 0]' : '[voice]');
     else if (message.audio) parts.push(`[audio${this.ctx.observed ? ' 0' : ''}${message.audio.title ? ` ${message.audio.title}` : ''}]`);
-    else if (message.document) parts.push(`[file${message.document.file_name ? ` ${message.document.file_name}` : ''}]`);
+    else if (message.document) parts.push(`[file${message.document.file_name ? ` ${message.document.file_name}` : ''}${this.ctx.observed && String(message.document.mime_type ?? '').startsWith('image/') ? ', image 0' : this.ctx.observed && documentKind(message.document) ? `, ${documentKind(message.document)} 0` : ''}]`);
     else if (message.location) parts.push('[location]');
     else if (message.poll) parts.push(`[poll${message.poll.question ? ` ${message.poll.question}` : ''}]`);
     const text = typeof message.text === 'string' ? message.text : typeof message.caption === 'string' ? message.caption : '';

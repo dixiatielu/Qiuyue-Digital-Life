@@ -1,4 +1,5 @@
 import type { Action, EnvironmentEvent } from '../../domain.js';
+import { qqFileKind, qqFileName } from './files.js';
 import { parsePersonRef, personRef, requireConversationRef } from '../../identity.js';
 import { eventRef } from '../../store.js';
 import {
@@ -175,7 +176,8 @@ class SnowLumaChatRecordSession implements ChatRecordSession {
         case 'mface': return `[sticker ${data.summary ?? ''}]`;
         case 'record': return this.ctx.observed ? `[voice ${media++}]` : '[voice]';
         case 'video': return this.ctx.observed ? `[video ${media++}]` : '[video]';
-        case 'file': return `[file ${data.name ?? ''}]`;
+        // What a file's name shows to be an image, audio, video, or a PDF is numbered with those, so it can be asked for (ADR-0029).
+        case 'file': { const kind = this.ctx.observed ? qqFileKind(qqFileName(data))?.kind : undefined; return `[file ${data.name ?? ''}${kind === 'image' ? `, image ${images++}` : kind ? `, ${kind} ${media++}` : ''}]`; }
         case 'forward': return this.ctx.observed && data.id ? `[forwarded chat ${data.id}]` : '[forwarded chat]';
         case 'json': { try { return `[card ${JSON.parse(String(data.data)).prompt ?? ''}]`; } catch { return '[card]'; } }
         default: return `[${segment.type}]`;

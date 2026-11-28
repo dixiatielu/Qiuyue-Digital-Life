@@ -77,6 +77,12 @@ export class TelegramClient {
   }
 }
 
+/** What a file sent as a document is perceived as, by the type Telegram gives it; an image document is seen as an image. */
+export function documentKind(document: { mime_type?: unknown } | undefined): 'document' | 'audio' | 'video' | undefined {
+  const type = typeof document?.mime_type === 'string' ? document.mime_type : '';
+  return type === 'application/pdf' ? 'document' : type.startsWith('audio/') ? 'audio' : type.startsWith('video/') ? 'video' : undefined;
+}
+
 const telegramSocialActions = [
   'sendMessage', 'sendPhoto', 'sendAnimation', 'sendSticker', 'sendDocument', 'sendVideo', 'sendVideoNote', 'sendVoice', 'sendAudio',
   'sendMediaGroup', 'sendLocation', 'sendVenue', 'sendContact', 'sendPoll', 'sendDice', 'sendLivePhoto', 'sendRichMessage',
@@ -178,7 +184,8 @@ export function telegramAdapter(config: AdapterConfig, credential: CredentialRea
       const data = payload.message ?? payload.edited_message ?? payload.channel_post ?? payload.edited_channel_post ?? payload.business_message ?? payload.edited_business_message;
       const found = data?.voice ? { kind: 'voice' as const, file: data.voice, type: 'audio/ogg' }
         : data?.audio ? { kind: 'audio' as const, file: data.audio, type: 'audio/mpeg' }
-        : data?.video ?? data?.video_note ? { kind: 'video' as const, file: data.video ?? data.video_note, type: 'video/mp4' } : undefined;
+        : data?.video ?? data?.video_note ? { kind: 'video' as const, file: data.video ?? data.video_note, type: 'video/mp4' }
+        : documentKind(data?.document) ? { kind: documentKind(data.document)!, file: data.document, type: String(data.document.mime_type) } : undefined;
       if (!found?.file?.file_id || !permits(config.tools, 'getFile')) return [];
       const { kind, file, type } = found;
       return [{

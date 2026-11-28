@@ -66,7 +66,7 @@ export function createTools(config: Config, store: Store, context: () => Thought
       },
     },
     // Declared whatever the model takes: the tools a working context declares are part of its identity, and a model that takes none reads a line saying so (ADR-0029).
-    runtime.tool('view_event_media', 'Listen to a voice message or an audio file, or watch a video, in an original event. index counts the voice, audio, and video in that event from 0, as an observation numbers them ([voice 0], [video 0]). You hear and see it yourself; what you cannot take comes back as a line saying so.',
+    runtime.tool('view_event_media', 'Listen to a voice message or an audio file, watch a video, or read a PDF document, in an original event. index counts the voice, audio, video, and documents in that event from 0, as an observation numbers them ([voice 0], [video 0], [file paper.pdf, document 0]). You hear, see, and read it yourself; what you cannot take comes back as a line saying so.',
       Type.Object({ id: string('Event ID', 100), index: Type.Optional(Type.Integer({ minimum: 0, description: 'Which one in the event; 0 if omitted' })) }), async (args, signal) => {
         const { event, index, source } = runtime.resolveEventMedia(args);
         const media = await loadEventMedia(config.limits, source, signal);

@@ -1,3 +1,4 @@
+import { constants, inflateSync } from 'node:zlib';
 import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
 
 /** What a model may take in beyond text and images, in the names a model's `input` declares them by. */
@@ -50,7 +51,8 @@ export function describeMedia(block: MediaContent): string {
 const AUDIO_TOKENS_PER_SECOND = 32;
 /** A frame a second at the default resolution, with the audio track. */
 const VIDEO_TOKENS_PER_SECOND = 100;
-const DOCUMENT_TOKENS_PER_PAGE = 560;
+/** A page of text: the page as an image and the words on it. A nearly blank page costs about half. */
+const DOCUMENT_TOKENS_PER_PAGE = 1100;
 
 /**
  * What a media block costs the context. Gemini bills audio and video by the second and a document by the page, never
@@ -97,7 +99,7 @@ export function outboundMessages<T extends { role: string; content?: unknown }>(
 
 /** Whether a line of text is the label of media attached from an event, which `view_event_media` can bring back. */
 export const EVENT_MEDIA_VIEWER = 'view_event_media';
-const eventMediaLabel = /^(?:The following is )?(?:voice|audio|video) \d+ from /i;
+const eventMediaLabel = /^(?:The following is )?(?:voice|audio|video|document) \d+ from /i;
 export const labelsEventMedia = (text: string) => eventMediaLabel.test(text);
 
 const MP3_KBPS = {
@@ -146,6 +148,26 @@ export function mp4Seconds(data: Buffer): number | undefined {
   const timescale = data.readUInt32BE(at + (wide ? 20 : 12));
   const duration = wide ? Number(data.readBigUInt64BE(at + 24)) : data.readUInt32BE(at + 16);
   return timescale ? duration / timescale : undefined;
+}
+// A page-tree node names its type and its count in one dictionary, in either order, with the list of its kids often between them.
+const pageCount = /\/Type\s*\/Pages\b(?:(?!>>)[^]){0,100000}?\/Count\s+(\d+)|\/Count\s+(\d+)(?:(?!>>)[^]){0,100000}?\/Type\s*\/Pages\b/g;
+/**
+ * Pages of a PDF: the largest count any node of its page tree gives. Newer files keep the tree in compressed object
+ * streams, which are inflated to look; a file that hides it some other way gives no count.
+ */
+export function pdfPages(data: Buffer): number | undefined {
+  let pages: number | undefined;
+  const look = (text: string) => { for (const match of text.matchAll(pageCount)) { const count = Number(match[1] ?? match[2]); if (count > (pages ?? 0)) pages = count; } };
+  const text = data.toString('latin1');
+  look(text);
+  for (const match of text.matchAll(/\/Type\s*\/ObjStm\b/g)) {
+    const from = text.indexOf('stream', match.index); const to = from < 0 ? -1 : text.indexOf('endstream', from);
+    if (to < 0) continue;
+    // The keyword is followed by a line end, and the data may be followed by one.
+    const start = from + 6 + (text[from + 6] === '\r' ? 2 : 1);
+    try { look(inflateSync(data.subarray(start, to), { finishFlush: constants.Z_SYNC_FLUSH }).toString('latin1')); } catch { /* another filter, or not a stream after all */ }
+  }
+  return pages;
 }
 /** How long media plays, where its own bytes say; a platform that says so itself is believed first. */
 export function mediaSeconds(data: Buffer, mimeType: string): number | undefined {
