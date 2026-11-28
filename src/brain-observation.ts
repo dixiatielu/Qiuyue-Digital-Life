@@ -14,7 +14,7 @@ import { actionSummary, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { memoriesInView, type SemanticRecall } from './recall.js';
 import type { OnlineActivity } from './plugins.js';
-import { mediaCarriage, requiresThoughtSignatures, type ModelOwner } from './model-config.js';
+import { mediaCarriage, type ModelOwner } from './model-config.js';
 
 export interface ObservationMessage {
   role: 'observation';
@@ -283,15 +283,17 @@ export async function buildObservationMessage(params: {
   };
 }
 
-const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
-function isValidThoughtSignature(signature: string | undefined): boolean {
-  return Boolean(signature && signature.length % 4 === 0 && base64SignaturePattern.test(signature));
-}
-
 /**
  * Build seeded turns for a fresh main working context from recent successful chat actions interleaved with surrounding chat
  * events (ADR-0024). Starting with only consecutive user observations and zero assistant turns leaves thinking models
- * out of distribution and pushes them to invent placeholder tool calls just to close silent turns.
+ * out of distribution and pushes them to invent placeholder tool calls just to close silent turns. They are also the only
+ * lines of her own a fresh context has: without them, and without habits that say how she writes, her messages grow longer
+ * and more composed.
+ *
+ * A seeded call carries its thought signature when the archive still has one, and goes without otherwise. Seeded turns are
+ * always followed by the observation that starts the thought, so they are history, never the turn being continued, and
+ * Gemini 3+ on generateContent takes unsigned calls there: fresh contexts ran with them from 2026-11-25 to 2026-11-27, and
+ * leaving them out on 2026-11-28 left a context with at most one of her own sends.
  */
 export function buildSeedTurns(params: { config: Config; store: Store; tools: ToolSet; model: Model<any>; budget: number }): AgentMessage[] {
   const { config, store, tools, model, budget } = params;
@@ -305,7 +307,6 @@ export function buildSeedTurns(params: { config: Config; store: Store; tools: To
     .slice(0, 6)
     .reverse();
   if (!actions.length) return [];
-  const requireSignatures = requiresThoughtSignatures(model);
   const signatures = new Map<string, { id: string; thoughtSignature?: string }>();
   for (const archived of store.recentAssistantMessages(200)) {
     if (archived.role !== 'assistant' || archived.provider !== model.provider || archived.api !== model.api || archived.model !== model.id) continue;
@@ -322,8 +323,6 @@ export function buildSeedTurns(params: { config: Config; store: Store; tools: To
   const turns: AgentMessage[][] = [];
   for (const action of actions) {
     const match = signatures.get(`${action.kind}:${stableJson(action.args)}`);
-    // Gemini 3+/4+ thinking models on generateContent reject historical functionCall parts without valid signatures.
-    if (requireSignatures && !isValidThoughtSignature(match?.thoughtSignature)) continue;
     const candidates = new Map<string, EnvironmentEvent>();
     for (const item of [...store.actionTriggers(action.id), ...store.recentConversationEvents(action.conversation!, action.createdAt, 3)]) {
       candidates.set(item.id, item);

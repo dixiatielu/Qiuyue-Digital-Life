@@ -659,7 +659,7 @@ test('probeModel detects when a gateway supports mid-conversation tool additions
   }
 });
 
-test('requiresThoughtSignatures and Claude-to-Gemini-3 handoff/fresh-seed avoid unsigned functionCall HTTP 400s', async () => {
+test('requiresThoughtSignatures: a Claude-to-Gemini-3 handoff flattens unsigned tool turns, and a fresh context still seeds her earlier sends', async () => {
   assert.equal(requiresThoughtSignatures({ api: 'google-generative-ai', id: 'gemini-3-flash-preview', reasoning: true }), true);
   assert.equal(requiresThoughtSignatures({ api: 'google-generative-ai', id: 'gemini-4-hydrogen', reasoning: true }), true);
   assert.equal(requiresThoughtSignatures({ api: 'google-vertex', id: 'gemini-3.1-pro-preview', reasoning: true }), true);
@@ -692,14 +692,17 @@ test('requiresThoughtSignatures and Claude-to-Gemini-3 handoff/fresh-seed avoid 
   assert.match(flattenedText, /Lunar note/);
   assert.match(flattenedText, /"message_id":42/);
 
-  // End-to-end check: strict Gemini 3 server rejects ANY functionCall missing a valid thoughtSignature with HTTP 400.
+  // End-to-end check: a Gemini 3 server rejects a functionCall without a thoughtSignature in the turn being continued, that is,
+  // after the last user text. Calls in earlier turns are history and pass unsigned.
   const requests: any[] = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     requests.push(body);
-    const unsignedCall = (body.contents ?? []).flatMap((c: any) => c.parts ?? []).find((part: any) => part.functionCall && !part.thoughtSignature);
+    const contents: any[] = body.contents ?? [];
+    const lastUserText = contents.findLastIndex((c: any) => c.role === 'user' && (c.parts ?? []).some((part: any) => typeof part.text === 'string'));
+    const unsignedCall = contents.slice(lastUserText + 1).flatMap((c: any) => c.parts ?? []).find((part: any) => part.functionCall && !part.thoughtSignature);
     if (unsignedCall) {
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { code: 400, message: 'Function call is missing a thought_signature in functionCall parts.' } }));
@@ -749,14 +752,18 @@ test('requiresThoughtSignatures and Claude-to-Gemini-3 handoff/fresh-seed avoid 
     assert.ok(!requests[0].contents.flatMap((c: any) => c.parts ?? []).some((p: any) => p.functionCall));
     assert.ok(store.logs(50).some(log => log.kind === 'context_model_handoff' && (log.data as any).flattenedToolCalls === true));
 
-    // Turn 3 changes persona to force a fresh context on Gemini 3: buildSeedTurns skips Claude's unsigned action instead of 400ing.
+    // Turn 3 changes persona to force a fresh context on Gemini 3: her earlier send is seeded as history, unsigned, ahead of the
+    // observation that starts the thought, so the context has a line of her own and the request is accepted.
     cfg.persona = 'Qiuyue refreshed for Gemini 3 fresh seed test.';
     brain = new PiBrain(cfg, store, geminiTools, undefined, undefined, undefined, name => name === 'GEMINI_TEST_KEY' ? 'key' : undefined);
     event(store, 'Fresh context after persona edit');
     await brain.run(store.claim(10)!);
 
     assert.equal(requests.length, 2);
-    assert.ok(!requests[1].contents.flatMap((c: any) => c.parts ?? []).some((p: any) => p.functionCall));
+    const seeded = requests[1].contents.findIndex((c: any) => (c.parts ?? []).some((p: any) => p.functionCall?.name === 'qq_main__send_group_msg' && p.functionCall.args?.message === 'Tycho has bright rays!' && !p.thoughtSignature));
+    assert.ok(seeded >= 0);
+    assert.ok(requests[1].contents.slice(seeded + 1).some((c: any) => c.role === 'user' && (c.parts ?? []).some((p: any) => typeof p.text === 'string' && p.text.includes('Fresh context after persona edit'))));
+    assert.ok(!store.logs(50).some(log => log.kind === 'thought_error'));
   } finally {
     store.close();
     server.closeAllConnections();
