@@ -57,7 +57,9 @@
 
 ### 音频、视频与文档
 
-模型能直接听音频、看视频或读 PDF 时，在 `input` 中声明：在 `"text"`、`"image"` 之外加上 `"audio"`、`"video"` 或 `"pdf"`（[ADR-0029](adr/0029-let-a-model-hear-and-watch-what-it-can-and-fold-it-like-an-image.md)）。这些媒体只通过 `google-generative-ai`、`google-vertex` 和 `google-interactions` 发送，其他 API 上这样配置会被拒绝。Pi 的内置目录给所有模型都只标了 text 和 image，因此内置 Gemini 模型也可以填写 `input`，它会替换目录中的列表。只声明在自己的线路上验证过的能力，因为网关可能丢掉模型本身支持的内容。不具备该能力的模型（包括独立的复盘或压缩模型）会在媒体的位置读到一行文字，例如 `(12s audio omitted: model does not support audio)`。目前这只覆盖工具或插件返回的媒体；聊天平台上的语音和视频消息仍显示为 `[voice]` 和 `[video]`。
+模型能直接听音频、看视频或读 PDF 时，在 `input` 中声明：在 `"text"`、`"image"` 之外加上 `"audio"`、`"video"` 或 `"pdf"`（[ADR-0029](adr/0029-let-a-model-hear-and-watch-what-it-can-and-fold-it-like-an-image.md)）。这些媒体只通过 `google-generative-ai`、`google-vertex` 和 `google-interactions` 发送，其他 API 上这样配置会被拒绝。Pi 的内置目录给所有模型都只标了 text 和 image，因此内置 Gemini 模型也可以填写 `input`，它会替换目录中的列表。只声明在自己的线路上验证过的能力，因为网关可能丢掉模型本身支持的内容。不具备该能力的模型（包括独立的复盘或压缩模型）会在媒体的位置读到一行文字，例如 `(12s audio omitted: model does not support audio)`。
+
+QQ 和 Telegram 的语音消息会随观察一起送给支持音频的模型直接听。视频和音频文件在消息行里带编号（如 `[video 0]`），由数字生命通过 `view_event_media` 按需观看或收听。QQ 语音由 SnowLuma 服务端通过 `get_record` 转成 MP3，因此该操作需要保持启用，且服务端要装有音频转换工具；转换失败时，该行会注明语音无法读取。Telegram 需要启用 `getFile`。`limits.maxMedia`（默认 4）是一次观察自动附带的语音条数，设为 0 则全部改为按需播放；超过 `limits.maxMediaBytes`（默认 12000000）或长于 `limits.maxMediaSeconds`（默认 300）的媒体不会取给模型。媒体字节不会写入数据库。
 
 ### 按需加载工具
 

@@ -143,6 +143,12 @@ export interface NativeAdapterDefinition {
   };
   /** Images come from the event's actual native media, and are loaded only when shown. */
   images?(event: PluginEvent): { label: string; autoView?: boolean; load(signal: AbortSignal): Promise<{ data: Uint8Array; mimeType: string }> }[];
+  /**
+   * The voice messages, audio, and video in an event, in the order the event's record numbers them. A voice message is heard with
+   * its observation by a model that takes audio; the rest is perceived on request. `load` returns a format models take
+   * (such as MP3, Ogg, or MP4) and refuses anything over `maxBytes`.
+   */
+  media?(event: PluginEvent): { kind: 'voice' | 'audio' | 'video'; seconds?: number; bytes?: number; load(maxBytes: number, signal: AbortSignal): Promise<{ data: Uint8Array; mimeType: string; seconds?: number }> }[];
   start?(context: AdapterContext): void | Promise<void>;
   stop?(): void | Promise<void>;
 }

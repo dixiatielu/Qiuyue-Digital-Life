@@ -263,6 +263,7 @@ class PluginScope {
       tools: runtime => [...base.tools(runtime), ...adapters.flatMap(adapter => adapter.tools(runtime))],
       reviewTools: [...base.reviewTools ?? [], ...adapters.flatMap(adapter => adapter.reviewTools ?? [])],
       images: (event, helpers) => adapters.flatMap(adapter => adapter.images?.(event, helpers) ?? []),
+      media: event => adapters.flatMap(adapter => adapter.media?.(event) ?? []),
       chatActions: [...base.chatActions ?? [], ...adapters.flatMap(adapter => adapter.chatActions ?? [])],
       staleActions: [...base.staleActions ?? [], ...adapters.flatMap(adapter => adapter.staleActions ?? [])],
       chatTarget: (name, args) => base.chatTarget?.(name, args) ?? adapters.map(adapter => adapter.chatTarget?.(name, args)).find(Boolean),

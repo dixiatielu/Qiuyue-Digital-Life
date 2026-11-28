@@ -162,6 +162,8 @@ class SnowLumaChatRecordSession implements ChatRecordSession {
     if (!Array.isArray(message)) return '';
     // An observation numbers images as the pictures that follow it are labeled.
     let images = 0;
+    // Voice and video are numbered together, as view_event_media counts them (ADR-0029).
+    let media = 0;
     return message.map((segment: { type?: string; data?: Record<string, any> }) => {
       const data = segment.data ?? {};
       switch (segment.type) {
@@ -171,8 +173,8 @@ class SnowLumaChatRecordSession implements ChatRecordSession {
         case 'image': { const image = this.ctx.observed ? `image ${images++}` : 'image'; return data.summary && data.summary !== '[图片]' ? `[${image} ${data.summary}]` : `[${image}]`; }
         case 'face': return `[face ${emojiLabel(data.id, this.ctx.faces)}]`;
         case 'mface': return `[sticker ${data.summary ?? ''}]`;
-        case 'record': return '[voice]';
-        case 'video': return '[video]';
+        case 'record': return this.ctx.observed ? `[voice ${media++}]` : '[voice]';
+        case 'video': return this.ctx.observed ? `[video ${media++}]` : '[video]';
         case 'file': return `[file ${data.name ?? ''}]`;
         case 'forward': return this.ctx.observed && data.id ? `[forwarded chat ${data.id}]` : '[forwarded chat]';
         case 'json': { try { return `[card ${JSON.parse(String(data.data)).prompt ?? ''}]`; } catch { return '[card]'; } }

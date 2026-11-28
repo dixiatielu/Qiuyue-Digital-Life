@@ -1,7 +1,7 @@
 import type { NativeActionDefinition } from './platform.js';
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { Action, EnvironmentEvent, MemoryKind } from './domain.js';
-import type { ThoughtContext, ToolImage, ToolRuntime } from './tool-runtime.js';
+import type { ThoughtContext, ToolImage, ToolMedia, ToolRuntime } from './tool-runtime.js';
 import type { Store } from './store.js';
 import type { DisplayProjector } from './display-message.js';
 import type { ChatRecordFormatter } from './record-format.js';
@@ -27,6 +27,7 @@ export interface PluginTool extends AgentTool {
   documentation?(): unknown;
 }
 export type PluginImage = ToolImage;
+export type PluginMedia = ToolMedia;
 export interface ImageHelpers {
   imageCaption(image: Record<string, unknown>): string;
 }
@@ -68,6 +69,8 @@ export interface LifePlugin {
   /** Group or channel conversations tracked for life-wake quietness awareness (ADR-0014). */
   trackedConversations?(store: Store): string[];
   images?(event: EnvironmentEvent, helpers?: ImageHelpers): PluginImage[];
+  /** The voice messages, audio, and video an event holds, in the order its record numbers them (ADR-0029). */
+  media?(event: EnvironmentEvent): PluginMedia[];
   resolveMedia?(value: string): string | ResolvedMedia | undefined;
   /** Map a plugin-owned media reference (e.g. drawing:<uuid>) to a browser-safe relative preview URL. */
   mediaPreviewUrl?(value: string): string | undefined;
@@ -264,6 +267,9 @@ export class PluginHost {
   images(event: EnvironmentEvent): PluginImage[] {
     const helpers: ImageHelpers = { imageCaption: image => this.imageCaption(image) };
     return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.images?.(event, helpers) ?? []);
+  }
+  media(event: EnvironmentEvent): PluginMedia[] {
+    return this.plugins.filter(plugin => this.enabled(plugin)).flatMap(plugin => plugin.media?.(event) ?? []);
   }
   private mediaEncoder(actionName?: string): MediaEncoder {
     if (actionName) {

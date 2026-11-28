@@ -1,10 +1,10 @@
 import type { AdapterConfig, Config } from '../config.js';
-import type { LifePlugin, OnlineActivity, PluginTool } from '../plugins.js';
-import { nativeToolName } from '../platform.js';
+import type { LifePlugin, OnlineActivity, PluginMedia, PluginTool } from '../plugins.js';
+import { nativeToolName, type SocialAdapter } from '../platform.js';
 import { conversationRef } from '../identity.js';
 import { errorResult } from '../tool-runtime.js';
 import { eventRef } from '../store.js';
-import { fetchImage, preferJpeg } from '../web.js';
+import { fetchImage, preferJpeg, publicFetch } from '../web.js';
 import { sanitizeToolSchema } from '../schema.js';
 import { allowedSnowLumaAction, findSnowLumaAction, nativeToolDescription, getSnowLumaCatalog, snowlumaChat, type SnowLumaActionDefinition } from '../adapters/snowluma/catalog.js';
 import { snowlumaDisplayProjector } from '../adapters/snowluma/display.js';
@@ -116,7 +116,7 @@ const activities: OnlineActivity[] = [
   { activity: 'Collect or organize saved stickers', tools: ['add_custom_face', 'modify_custom_face', 'delete_custom_face'], instructions: 'You can keep pictures you like for later expression, or organize your collection. Base descriptions on images you actually saw, including their subject, expression, text, and possible conversational use.' },
 ];
 
-export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): LifePlugin {
+export function snowlumaToolsPlugin(config: Config, account: AdapterConfig, adapter?: SocialAdapter, fetchUrl: typeof publicFetch = publicFetch): LifePlugin {
   const snowlumaCatalog = getSnowLumaCatalog().actions;
   for (const name of [...(account.tools.allow === '*' ? [] : account.tools.allow), ...account.tools.deny]) findSnowLumaAction(name);
   return {
@@ -209,6 +209,35 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig): Lif
     display: snowlumaDisplayProjector,
     recordFormatter: snowlumaChatRecordFormatter,
     endsThought: tool => socialActions.has(tool),
+    // A voice message is AMR or SILK, which no model takes, so SnowLuma converts it; a video is fetched from QQ as it is (ADR-0029).
+    media: event => {
+      if (!Array.isArray(event.payload.message)) return [];
+      return event.payload.message
+        .filter((segment): segment is { type: string; data?: Record<string, unknown> } => Boolean(segment && typeof segment === 'object' && (segment.type === 'record' || segment.type === 'video')))
+        .map((segment): PluginMedia => {
+          const { file, url } = segment.data ?? {};
+          if (segment.type === 'record') return {
+            kind: 'voice',
+            ...(typeof file === 'string' && file && adapter ? {} : { missingReason: 'The voice message has no readable file.' }),
+            load: async (maxBytes, signal) => {
+              const record = await adapter!.execute('get_record', { file, out_format: 'mp3' }, signal) as { base64?: unknown } | undefined;
+              if (typeof record?.base64 !== 'string' || !record.base64) throw new Error('SnowLuma returned no converted audio; its server may have no audio converter.');
+              if (record.base64.length * 0.75 > maxBytes) throw new Error('The voice message exceeds the size limit.');
+              return { data: Buffer.from(record.base64, 'base64'), mimeType: 'audio/mpeg' };
+            },
+          };
+          return {
+            kind: 'video',
+            ...(typeof url === 'string' && url ? {} : { missingReason: 'The video has no readable address.' }),
+            load: async (maxBytes, signal) => {
+              const video = await fetchUrl(String(url), { timeoutMs: 60_000, maxBytes, signal });
+              // QQ's media host does not always name the type; the message's own file name does.
+              const mimeType = video.type.startsWith('video/') ? video.type : /\.mp4$/i.test(String(file ?? '')) ? 'video/mp4' : video.type;
+              return { data: video.data, mimeType };
+            },
+          };
+        });
+    },
     images: (event, helpers) => {
       if (!Array.isArray(event.payload.message)) return [];
       const ref = eventRef(event.id);

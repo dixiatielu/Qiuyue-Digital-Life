@@ -190,10 +190,11 @@ class TelegramChatRecordSession implements ChatRecordSession {
     if (message.photo) parts.push(this.ctx.observed ? '[image 0]' : '[image]');
     else if (message.sticker) parts.push(`[sticker${message.sticker.emoji ? ` ${message.sticker.emoji}` : ''}]`);
     else if (message.animation) parts.push('[animation]');
-    else if (message.video) parts.push('[video]');
-    else if (message.video_note) parts.push('[video note]');
-    else if (message.voice) parts.push('[voice]');
-    else if (message.audio) parts.push(`[audio${message.audio.title ? ` ${message.audio.title}` : ''}]`);
+    // An observation numbers what view_event_media can play; a message holds one such thing (ADR-0029).
+    else if (message.video) parts.push(this.ctx.observed ? '[video 0]' : '[video]');
+    else if (message.video_note) parts.push(this.ctx.observed ? '[video 0, a video note]' : '[video note]');
+    else if (message.voice) parts.push(this.ctx.observed ? '[voice 0]' : '[voice]');
+    else if (message.audio) parts.push(`[audio${this.ctx.observed ? ' 0' : ''}${message.audio.title ? ` ${message.audio.title}` : ''}]`);
     else if (message.document) parts.push(`[file${message.document.file_name ? ` ${message.document.file_name}` : ''}]`);
     else if (message.location) parts.push('[location]');
     else if (message.poll) parts.push(`[poll${message.poll.question ? ` ${message.poll.question}` : ''}]`);

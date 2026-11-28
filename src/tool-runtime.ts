@@ -6,7 +6,7 @@ import { Store, type RevisionReach } from './store.js';
 import { ActionNotDispatchedError, definitelyFailed, nativeErrorResult, nativeToolName, type NativeActionDefinition } from './platform.js';
 import type { AdapterInfo } from './plugin-sdk.js';
 import { fetchImage } from './web.js';
-import type { ContentBlock } from './media.js';
+import { mediaModality, mediaSeconds, type ContentBlock, type MediaContent } from './media.js';
 
 export interface ToolImage {
   label: string;
@@ -22,6 +22,34 @@ export interface ToolImage {
   load(signal?: AbortSignal): { data: Buffer; mimeType: string } | undefined | Promise<{ data: Buffer; mimeType: string } | undefined>;
   onShown?(): void;
 }
+/** A voice message, an audio file, or a video in an event, described before any of it is fetched (ADR-0029). */
+export interface ToolMedia {
+  kind: 'voice' | 'audio' | 'video';
+  /** Where the platform says so; otherwise the bytes are asked once they are loaded. */
+  seconds?: number;
+  bytes?: number;
+  /** If set, the media cannot be fetched at all, as when its message carries no address for it. */
+  missingReason?: string;
+  /** Fetch it in a form a model takes, refusing anything larger than `maxBytes`. */
+  load(maxBytes: number, signal?: AbortSignal): Promise<{ data: Buffer; mimeType: string; seconds?: number }>;
+}
+export const mediaLabel = (source: Pick<ToolMedia, 'kind'>, index: number, from: string) => `${source.kind} ${index} from ${from}`;
+const megabytes = (bytes: number) => `${(bytes / 1_000_000).toFixed(1)} MB`;
+/** Fetch one piece of media within the operator's limits, as the block a model perceives. */
+export async function loadEventMedia(limits: { maxMediaBytes: number; maxMediaSeconds: number }, source: ToolMedia, signal?: AbortSignal): Promise<MediaContent> {
+  if (source.missingReason) throw new Error(source.missingReason);
+  const tooLarge = (bytes: number) => new Error(`This ${source.kind} is ${megabytes(bytes)}; at most ${megabytes(limits.maxMediaBytes)} can be perceived.`);
+  const tooLong = (seconds: number) => new Error(`This ${source.kind} runs ${Math.round(seconds)}s; at most ${limits.maxMediaSeconds}s can be perceived.`);
+  if (source.bytes !== undefined && source.bytes > limits.maxMediaBytes) throw tooLarge(source.bytes);
+  if (source.seconds !== undefined && source.seconds > limits.maxMediaSeconds) throw tooLong(source.seconds);
+  const loaded = await source.load(limits.maxMediaBytes, signal);
+  if (loaded.data.byteLength > limits.maxMediaBytes) throw tooLarge(loaded.data.byteLength);
+  const modality = mediaModality(loaded.mimeType);
+  if (modality !== 'audio' && modality !== 'video') throw new Error(`Unsupported media format: ${loaded.mimeType || 'unknown'}.`);
+  const seconds = loaded.seconds ?? source.seconds ?? mediaSeconds(loaded.data, loaded.mimeType);
+  if (seconds !== undefined && seconds > limits.maxMediaSeconds) throw tooLong(seconds);
+  return { type: 'media', mimeType: loaded.mimeType, data: loaded.data.toString('base64'), ...(seconds === undefined ? {} : { seconds: Math.round(seconds * 10) / 10 }) };
+}
 export interface ToolExtensions {
   resolveMedia(value: unknown, actionName?: string): unknown;
   decorate(original: AgentTool, runtime: ToolRuntime): AgentTool;
@@ -32,6 +60,7 @@ export interface ToolExtensions {
   adapters(): readonly AdapterInfo[];
   chatTarget(tool: string, args: unknown, staleOnly?: boolean): string | undefined;
   images(event: EnvironmentEvent): ToolImage[];
+  media(event: EnvironmentEvent): ToolMedia[];
 }
 const emptyExtensions: ToolExtensions = {
   resolveMedia: value => value,
@@ -43,6 +72,7 @@ const emptyExtensions: ToolExtensions = {
   adapters: () => [],
   chatTarget: () => undefined,
   images: () => [],
+  media: () => [],
 };
 
 /** Every http(s) URL in an event's strings, with HTML's &amp; decoded, so an image named in a tool result can be viewed or referenced by its exact URL. */
@@ -96,6 +126,17 @@ export function resolveEventImage(
   };
 }
 
+/** Find one piece of media inside an event, deferring any network read to load(). */
+export function resolveEventMedia(store: Store, plugins: Pick<ToolExtensions, 'media'>, args: { id: string; index?: number }): { event: EnvironmentEvent; index: number; source: ToolMedia } {
+  const index = args.index ?? 0;
+  if (!Number.isSafeInteger(index) || index < 0) throw new Error('Media index must be a non-negative integer.');
+  const event = store.event(store.resolve(args.id));
+  if (!event) throw new Error('The experience does not exist or has been deleted.');
+  const source = plugins.media(event)[index];
+  if (!source) throw new Error('That event has no voice message, audio, or video at this index.');
+  return { event, index, source };
+}
+
 /** A review hands revisions affecting unfinished matters back to the conversations (ADR-0012). */
 export interface ThoughtContext { generation: number; sources: Set<string>; triggers: Set<string>; lifeOnly: boolean; reviewing?: boolean; /** A review that goes back over old memories (ADR-0027). */ revisiting?: boolean; handedOn?: { memory: Memory; reach: RevisionReach }[] }
 export function ensureCurrent(store: Store, context: ThoughtContext, signal?: AbortSignal) {
@@ -124,6 +165,7 @@ export class ToolRuntime {
   adapters() { return this.extensions.adapters(); }
   resolveMedia(value: unknown, actionName?: string): unknown { return this.extensions.resolveMedia(value, actionName ? this.name(actionName) : undefined); }
   resolveEventImage(args: { id: string; index?: number; url?: string }): ResolvedEventImage { return resolveEventImage(this.store, this.extensions, args); }
+  resolveEventMedia(args: { id: string; index?: number }) { return resolveEventMedia(this.store, this.extensions, args); }
   decorate(tool: AgentTool): AgentTool {
     const decorated = this.extensions.decorate({ ...tool, name: this.name(tool.name) }, this);
     return { ...decorated, name: tool.name };

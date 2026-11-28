@@ -111,6 +111,10 @@ export function nativeAdapterPlugin(adapter: NativeAdapterDefinition, store: Sto
       label: image.label, autoView: image.autoView ?? true, unavailable: 'This platform image is unavailable; its appearance has not been perceived.', deferred: `Use view_event_image with event ${event.id} and its image index to see it.`,
       load: async signal => { if (!active) throw new Error('Adapter is inactive.'); const loaded = await image.load(AbortSignal.any([controller.signal, ...(signal ? [signal] : [])])); return { ...loaded, data: Buffer.from(loaded.data) }; },
     })) : [],
+    media: event => event.source?.platform === adapter.platform && event.source.accountId === adapter.accountId ? (adapter.media?.(event) ?? []).map(item => ({
+      kind: item.kind, ...(item.seconds === undefined ? {} : { seconds: item.seconds }), ...(item.bytes === undefined ? {} : { bytes: item.bytes }),
+      load: async (maxBytes, signal) => { if (!active) throw new Error('Adapter is inactive.'); const loaded = await item.load(maxBytes, AbortSignal.any([controller.signal, ...(signal ? [signal] : [])])); return { ...loaded, data: Buffer.from(loaded.data) }; },
+    })) : [],
     tools: runtime => [...actions].map(([name, action]) => ({
       ...runtime.tool(name, `[${adapter.platform} account ${adapter.accountId}; ${adapter.instance}; API ${adapter.version}] ${(action.summary ?? action.name).split('\n')[0]}\nNative operation: ${action.name}. ${action.invariants.join(' ')} Parameters and results follow the native API; find_tools returns the full parameter documentation.`, schemas.get(name)!, async (args, signal) => {
         const validated = validateNativeArgs(name, schemas.get(name)!, args);

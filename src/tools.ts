@@ -7,7 +7,7 @@ import { actionSummary } from './runtime-context.js';
 import { ChatRecord } from './record.js';
 import type { SemanticRecall } from './recall.js';
 import { PluginHost, type PluginTool } from './plugins.js';
-import { ensureCurrent, jsonResult, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
+import { ensureCurrent, jsonResult, loadEventMedia, mediaLabel, ToolRuntime, type ThoughtContext } from './tool-runtime.js';
 import { validatedMemoryTool } from './memory-tool.js';
 import { loadsToolsOnDemand, type ModelOwner } from './model.js';
 export { ensureCurrent, type ThoughtContext } from './tool-runtime.js';
@@ -34,12 +34,12 @@ export interface ToolSet {
   readonly plugins: PluginHost;
 }
 /** A review reads what happened and keeps what it learns, and schedules a commitment it finds still owed; it sends nothing, and activity and life plans stay with the conversations (ADR-0012). */
-const reviewTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity', FIND_TOOLS]);
+const reviewTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'view_event_media', 'recall', 'inspect_actions', 'remember', 'retire_memory', 'schedule_activity', FIND_TOOLS]);
 /**
  * Calls that only look something up: they change nothing and reach no one. A thought that called nothing else leaves
  * none of them behind when it ends (ADR-0024). Read-only native operations count, and the plugin tools a review may use.
  */
-const lookupTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'recall', 'inspect_actions', FIND_TOOLS]);
+const lookupTools = new Set(['read_chat_record', 'read_context', 'read_event', 'view_event_image', 'view_event_media', 'recall', 'inspect_actions', FIND_TOOLS]);
 export function isLookup(tools: ToolSet, name: string): boolean { return lookupTools.has(name) || tools.plugins.reviewAllowed(name) || tools.plugins.readOnlyNative(name); }
 export function forReview(tools: ToolSet): ToolSet {
   return tools.only(tool => reviewTools.has(tool.name) || tools.plugins.reviewAllowed(tool.name), 'review');
@@ -65,6 +65,16 @@ export function createTools(config: Config, store: Store, context: () => Thought
         return { content: [{ type: 'text', text: resolved.label }, { type: 'image', data: picture.data.toString('base64'), mimeType: picture.mimeType }], details: {} };
       },
     },
+    // Declared whatever the model takes: the tools a working context declares are part of its identity, and a model that takes none reads a line saying so (ADR-0029).
+    runtime.tool('view_event_media', 'Listen to a voice message or an audio file, or watch a video, in an original event. index counts the voice, audio, and video in that event from 0, as an observation numbers them ([voice 0], [video 0]). You hear and see it yourself; what you cannot take comes back as a line saying so.',
+      Type.Object({ id: string('Event ID', 100), index: Type.Optional(Type.Integer({ minimum: 0, description: 'Which one in the event; 0 if omitted' })) }), async (args, signal) => {
+        const { event, index, source } = runtime.resolveEventMedia(args);
+        const media = await loadEventMedia(config.limits, source, signal);
+        ensureCurrent(store, context(), signal);
+        context().sources.add(event.id);
+        const label = mediaLabel(source, index, `event ${event.id}`);
+        return { content: [{ type: 'text', text: label[0]!.toUpperCase() + label.slice(1) }, media], details: {} };
+      }),
     tool('inspect_actions', 'View recent action outcomes; specify an id to read the full record in chunks.', Type.Object({ id: Type.Optional(string('Action ID', 100)), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), args => {
       if (args.id) {
         const action = store.actionById(args.id); if (!action) throw new Error('Action does not exist.');

@@ -31,7 +31,7 @@ export interface Config {
   review?: { model?: ModelConfig; limits?: { contextTokens?: number; outputReserveTokens?: number } };
   /** freeTime: a quiet stretch, drawn between quietMinMs and quietMaxMs each time, offers a life wake at least gapMs from any other, at most perDay a day (ADR-0015). */
   life: { enabled: boolean; allowFiction: boolean; minWakeMs: number; freeTime: { enabled: boolean; quietMinMs: number; quietMaxMs: number; gapMs: number; perDay: number } };
-  limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; maxPreemptions: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
+  limits: { batchSize: number; debounceMs: number; maxDelayMs: number; ambientDelayMs: number; maxPreemptions: number; tickMs: number; modelCallsPerDay: number | null; actionsPerHour: number | null; runTimeoutMs: number | null; maxTurnsPerRun: number | null; maxImages: number; maxMedia: number; maxMediaBytes: number; maxMediaSeconds: number; contextTokens: number; outputReserveTokens: number; contextSafetyTokens: number };
   compaction: { model?: ModelConfig; contextTokens?: number; keepRecentTokens: number; summaryMaxTokens: number; retries: number; idleRatio: number; idleAfterMs: number };
   memory: { retentionDays: number; recallLimit: number; recentEvents: number; reflectionEveryEvents: number; experienceChars: number; revisitBatch: number };
   development: { entryChars: number; scopeChars: number; personChars: number; people: number; recordLines: number };
@@ -82,7 +82,7 @@ export function loadConfig(path: string): Config {
     model: { provider: 'openai', id: '', apiKeyEnv: 'MODEL_API_KEY', ...raw.model },
     ...(review === undefined ? {} : { review: { ...(review.model === undefined ? {} : { model: readModel(review.model, 'review.model') }), ...(review.limits === undefined ? {} : { limits: review.limits }) } }),
     life: { enabled: false, allowFiction: false, minWakeMs: 60_000, ...raw.life, freeTime: { enabled: true, quietMinMs: 600_000, quietMaxMs: 1_200_000, gapMs: 3_600_000, perDay: 8, ...raw.life?.freeTime } },
-    limits: { batchSize: 20, debounceMs: 1200, maxDelayMs: 4000, ambientDelayMs: 120_000, maxPreemptions: 2, tickMs: 500, modelCallsPerDay: null, actionsPerHour: null, runTimeoutMs: null, maxTurnsPerRun: null, maxImages: 4, contextTokens: 262144, outputReserveTokens: 32768, contextSafetyTokens: 2048, ...raw.limits },
+    limits: { batchSize: 20, debounceMs: 1200, maxDelayMs: 4000, ambientDelayMs: 120_000, maxPreemptions: 2, tickMs: 500, modelCallsPerDay: null, actionsPerHour: null, runTimeoutMs: null, maxTurnsPerRun: null, maxImages: 4, maxMedia: 4, maxMediaBytes: 12_000_000, maxMediaSeconds: 300, contextTokens: 262144, outputReserveTokens: 32768, contextSafetyTokens: 2048, ...raw.limits },
     compaction: { keepRecentTokens: 12000, summaryMaxTokens: 2048, retries: 1, idleRatio: 0.85, idleAfterMs: 30_000, ...raw.compaction, ...(raw.compaction?.model === undefined ? {} : { model: readModel(raw.compaction.model, 'compaction.model') }) },
     memory: { retentionDays: 90, recallLimit: 8, recentEvents: 30, reflectionEveryEvents: 100, experienceChars: 600, revisitBatch: 4, ...raw.memory },
     development: { entryChars: 200, scopeChars: 2000, personChars: 600, people: 8, recordLines: 200, ...raw.development },
@@ -107,12 +107,13 @@ export function loadConfig(path: string): Config {
   for (const field of ['id', 'provider', 'apiKeyEnv'] as const) if (typeof config.model[field] !== 'string' || !config.model[field]) throw new Error(`model.${field} must not be empty.`);
   validateModelConfig(config.model);
   for (const name of [...builtinCredentialFields.map(([section, field]) => (config as Record<string, any>)[section]?.[field]), ...config.adapters.map(account => account.tokenEnv)]) if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Credential settings must be environment variable names.');
-  const { modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun, debounceMs, maxPreemptions, ...runLimits } = config.limits;
+  const { modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun, debounceMs, maxPreemptions, maxMedia, ...runLimits } = config.limits;
   for (const [key, value] of Object.entries({ modelCallsPerDay, actionsPerHour, runTimeoutMs, maxTurnsPerRun })) {
     if (value !== null && (!Number.isSafeInteger(value) || value <= 0)) throw new Error(`${key} must be a positive integer or null (unlimited).`);
   }
   if (!Number.isSafeInteger(debounceMs) || debounceMs < 0) throw new Error('debounceMs must be a non-negative integer; 0 starts thinking without waiting for quiet.');
   if (!Number.isSafeInteger(maxPreemptions) || maxPreemptions < 0) throw new Error('maxPreemptions must be a non-negative integer; 0 turns preemption off.');
+  if (!Number.isSafeInteger(maxMedia) || maxMedia < 0) throw new Error('maxMedia must be a non-negative integer; 0 leaves every voice message to be played on request.');
   const { enabled: _freeTime, ...freeTime } = config.life.freeTime;
   const { revisitBatch, ...memory } = config.memory;
   if (!Number.isSafeInteger(revisitBatch) || revisitBatch < 0) throw new Error('revisitBatch must be a non-negative integer; 0 stops going back over old memories.');

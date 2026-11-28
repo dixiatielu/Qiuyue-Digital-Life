@@ -23,6 +23,19 @@ export class TelegramClient {
       return { data: Buffer.concat(chunks), mimeType };
     } catch { throw new Error('Telegram image unavailable; its appearance has not been perceived.'); }
   }
+  /** A file as Telegram holds it. Its download names no type, so the caller takes that from the message. */
+  async media(fileId: string, maxBytes: number, signal: AbortSignal): Promise<Uint8Array> {
+    try {
+      const info = await this.call('getFile', { file_id: fileId }, signal);
+      if (typeof info.file_path !== 'string' || info.file_path.split('/').some((part: string) => part === '..') || info.file_size > maxBytes) throw new Error('Unavailable file');
+      const response = await this.fetcher(`${this.baseUrl.replace(/\/$/, '')}/file/bot${this.token}/${info.file_path.split('/').map(encodeURIComponent).join('/')}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(60_000)]), redirect: 'error' });
+      const reader = response.ok ? response.body?.getReader() : undefined; if (!reader) throw new Error('No file');
+      const chunks: Uint8Array[] = []; let size = 0;
+      while (true) { const chunk = await reader.read(); if (chunk.done) break; size += chunk.value.length; if (size > maxBytes) { await reader.cancel(); throw new Error('File too large'); } chunks.push(chunk.value); }
+      return Buffer.concat(chunks);
+    // Fetch errors can contain the request URL, which includes the bot token.
+    } catch { throw new Error('Telegram media unavailable; it has not been perceived.'); }
+  }
   async call(operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
     signal?.throwIfAborted();
     const form = new FormData(); let files = 0;
@@ -158,6 +171,20 @@ export function telegramAdapter(config: AdapterConfig, credential: CredentialRea
       const media = photo ?? (data?.document?.mime_type?.startsWith('image/') ? data.document : undefined) ?? data?.sticker?.thumbnail;
       if (!media?.file_id || !permits(config.tools, 'getFile')) return [];
       return [{ label: `Telegram ${photo ? 'photo' : data?.document ? 'image document' : 'sticker thumbnail'} from event ${event.id}`, load: signal => client.image(media.file_id, signal) }];
+    },
+    // Telegram's own formats, Ogg Opus for a voice message and MP4 for a video, are ones a model takes (ADR-0029).
+    media: event => {
+      const payload = event.payload as Record<string, any>;
+      const data = payload.message ?? payload.edited_message ?? payload.channel_post ?? payload.edited_channel_post ?? payload.business_message ?? payload.edited_business_message;
+      const found = data?.voice ? { kind: 'voice' as const, file: data.voice, type: 'audio/ogg' }
+        : data?.audio ? { kind: 'audio' as const, file: data.audio, type: 'audio/mpeg' }
+        : data?.video ?? data?.video_note ? { kind: 'video' as const, file: data.video ?? data.video_note, type: 'video/mp4' } : undefined;
+      if (!found?.file?.file_id || !permits(config.tools, 'getFile')) return [];
+      const { kind, file, type } = found;
+      return [{
+        kind, ...(Number.isFinite(file.duration) ? { seconds: Number(file.duration) } : {}), ...(Number.isFinite(file.file_size) ? { bytes: Number(file.file_size) } : {}),
+        load: async (maxBytes, signal) => ({ data: await client.media(file.file_id, maxBytes, signal), mimeType: typeof file.mime_type === 'string' && file.mime_type ? file.mime_type : type }),
+      }];
     },
     start: async ctx => {
       if (!/^[0-9]+:[A-Za-z0-9_-]+$/.test(token)) throw new Error(`Missing or invalid credential ${config.tokenEnv}.`);

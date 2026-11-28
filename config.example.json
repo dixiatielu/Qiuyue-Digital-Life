@@ -34,6 +34,9 @@
     "runTimeoutMs": null,
     "maxTurnsPerRun": null,
     "maxImages": 4,
+    "maxMedia": 4,
+    "maxMediaBytes": 12000000,
+    "maxMediaSeconds": 300,
     "contextTokens": 262144,
     "outputReserveTokens": 32768,
     "contextSafetyTokens": 2048

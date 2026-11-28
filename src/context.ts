@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { describeMedia, isMedia, mediaIn, mediaTokens } from './media.js';
+import { describeMedia, EVENT_MEDIA_VIEWER, isMedia, labelsEventMedia, mediaIn, mediaTokens, type MediaContent } from './media.js';
 import { getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type ImageContent, type Message, type TextContent, type ToolCall, type ToolResultMessage, type UserMessage } from '@earendil-works/pi-ai';
 
 export const SUMMARY_PREFIX = 'Earlier exchanges have been consolidated into a continuity summary';
@@ -66,10 +66,21 @@ export function estimatedContextTokens(messages: AgentMessage[]): number {
   return textTokens(getCurrentSystemPrompt(modelMessages)) + estimateTokens(getCurrentTools(modelMessages)) + messages.filter(message => message.role !== 'system').reduce((sum, message) => sum + messageTokens(message), 0);
 }
 function hash(value: unknown) { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+const mediaDigests = new WeakMap<MediaContent, string>();
+/** Media stands in a surface by a digest taken once, so megabytes are not hashed again at every measurement. */
+function surfaceContent(content: unknown): unknown {
+  if (!Array.isArray(content) || !content.some(isMedia)) return content;
+  return content.map(block => {
+    if (!isMedia(block)) return block;
+    let digest = mediaDigests.get(block);
+    if (!digest) mediaDigests.set(block, digest = createHash('sha256').update(block.data).digest('hex'));
+    return { type: 'media', mimeType: block.mimeType, digest };
+  });
+}
 function bodySurface(message: AgentMessage): unknown {
   const value = toModelMessages([message])[0]!;
   if (value.role === 'system') return value;
-  return { role: value.role, content: value.content, ...(value.role === 'toolResult' ? { toolCallId: value.toolCallId, toolName: value.toolName, isError: value.isError } : {}) };
+  return { role: value.role, content: surfaceContent(value.content), ...(value.role === 'toolResult' ? { toolCallId: value.toolCallId, toolName: value.toolName, isError: value.isError } : {}) };
 }
 export interface TokenAnchor { header: string; prefix: string[]; tokens: number }
 export interface TokenMeasurement { tokens: number; measuredTokens: number; estimatedTokens: number; basis: 'usage' | 'estimate' }
@@ -205,14 +216,27 @@ export function portableMessages(messages: AgentMessage[], options?: { flattenTo
 }
 export const portableSummaryMessages = portableMessages;
 
-/** Only persist visible messages; thinking blocks and tool-private details are never archived. */
+const FOLDED = '[Folded when the thought ended;';
+/** The note left where media was: what it was and, when it came from an event, how to perceive it again. */
+function foldedMedia(block: MediaContent, label: unknown): TextContent {
+  const again = typeof label === 'object' && label !== null && (label as TextContent).type === 'text' && labelsEventMedia((label as TextContent).text);
+  return { type: 'text', text: `${FOLDED} it was ${describeMedia(block)}${again ? `; ${EVENT_MEDIA_VIEWER} plays it again` : ''}]` };
+}
+function withoutMediaBytes<T>(content: T[]): T[] {
+  return content.some(isMedia) ? content.map((block, index, blocks) => isMedia(block) ? foldedMedia(block, blocks[index - 1]) as T : block) : content;
+}
+/**
+ * Only persist visible messages; thinking blocks and tool-private details are never archived. Nor are the bytes of
+ * audio and video: media is in view for the thought that perceives it, and a context restored in the middle of one
+ * holds the note a finished thought would have left (ADR-0029).
+ */
 export function persistableMessage(message: AgentMessage): AgentMessage {
   if (message.role === 'assistant') return { ...message, content: message.content.filter(block => block.type !== 'thinking') };
-  if (message.role === 'toolResult') return { ...message, details: undefined };
+  if (message.role === 'toolResult') return { ...message, details: undefined, content: withoutMediaBytes(message.content) };
+  if (message.role === 'observation') { const content = withoutMediaBytes(message.content); return content === message.content ? message : { ...message, content }; }
   return message;
 }
 export function contextRecordId(message: AgentMessage): string { return `ctx:${hash(persistableMessage(message))}`; }
-const FOLDED = '[Folded when the thought ended;';
 /** Replace every result of one tool with a pointer to its archived original, keeping the first line as a label. */
 export function foldToolResults(messages: AgentMessage[], toolName: string): { messages: AgentMessage[]; changed: number } {
   let changed = 0;
@@ -297,7 +321,7 @@ export function foldImages(messages: AgentMessage[], imageViewer: (label: string
   const folded = messages.map(message => {
     if ((message.role !== 'observation' && message.role !== 'toolResult') || !message.content.some(block => block.type === 'image' || isMedia(block))) return message;
     return { ...message, content: message.content.map((block, index, blocks) => {
-      if (isMedia(block)) { media++; return { type: 'text' as const, text: `${FOLDED} it was ${describeMedia(block)}]` }; }
+      if (isMedia(block)) { media++; return foldedMedia(block, blocks[index - 1]); }
       if (block.type !== 'image') return block;
       changed++; const label = blocks[index - 1];
       return { type: 'text' as const, text: `${FOLDED} view it again with ${label?.type === 'text' && imageViewer(label.text) || 'view_event_image'}]` };

@@ -94,3 +94,62 @@ export function outboundMessages<T extends { role: string; content?: unknown }>(
   });
   return changed ? outbound : messages;
 }
+
+/** Whether a line of text is the label of media attached from an event, which `view_event_media` can bring back. */
+export const EVENT_MEDIA_VIEWER = 'view_event_media';
+const eventMediaLabel = /^(?:The following is )?(?:voice|audio|video) \d+ from /i;
+export const labelsEventMedia = (text: string) => eventMediaLabel.test(text);
+
+const MP3_KBPS = {
+  1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+  2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+} as const;
+const MP3_HZ = { 3: [44_100, 48_000, 32_000], 2: [22_050, 24_000, 16_000], 0: [11_025, 12_000, 8_000] } as const;
+/** A Layer III frame header at this offset: its bit rate and the length of its frame. */
+function mp3Frame(data: Uint8Array, at: number): { kbps: number; length: number } | undefined {
+  if (at + 4 > data.length || data[at] !== 0xff || (data[at + 1]! & 0xe0) !== 0xe0) return;
+  const version = data[at + 1]! >> 3 & 3; const layer = data[at + 1]! >> 1 & 3; const rate = data[at + 2]! >> 4; const hz = data[at + 2]! >> 2 & 3;
+  // MPEG-1 is 3, MPEG-2 is 2 and MPEG-2.5 is 0; the other bit patterns are not a frame header.
+  if (version === 1 || layer !== 1 || rate === 0 || rate === 15 || hz === 3) return;
+  const kbps = MP3_KBPS[version === 3 ? 1 : 2][rate]!;
+  return { kbps, length: Math.floor((version === 3 ? 144_000 : 72_000) * kbps / MP3_HZ[version as 0 | 2 | 3][hz]!) + (data[at + 2]! >> 1 & 1) };
+}
+/** Playing time of an MP3 from its bit rate. A transcoder writes a constant rate; a variable one makes this a rough figure. */
+export function mp3Seconds(data: Uint8Array): number | undefined {
+  // An ID3v2 tag, where there is one, comes before the first frame and gives its own length.
+  let start = 0;
+  if (data.length > 10 && data[0] === 0x49 && data[1] === 0x44 && data[2] === 0x33) start = 10 + ((data[6]! & 0x7f) << 21 | (data[7]! & 0x7f) << 14 | (data[8]! & 0x7f) << 7 | data[9]! & 0x7f);
+  for (let at = start; at + 4 <= data.length && at < start + 65_536; at++) {
+    const first = mp3Frame(data, at);
+    if (!first) continue;
+    // An encoder's first frame is often an information frame at a rate of its own, so the second speaks for the audio.
+    const frame = mp3Frame(data, at + first.length) ?? first;
+    return (data.length - at) * 8 / (frame.kbps * 1000);
+  }
+}
+/** Playing time of an MP4 or QuickTime file from its movie header. */
+export function mp4Seconds(data: Buffer): number | undefined {
+  const box = (from: number, to: number, type: string): [number, number] | undefined => {
+    for (let at = from; at + 8 <= to;) {
+      let size = data.readUInt32BE(at); let header = 8;
+      if (size === 1) { if (at + 16 > to) return; size = Number(data.readBigUInt64BE(at + 8)); header = 16; }
+      else if (size === 0) size = to - at;
+      if (size < header || at + size > to) return;
+      if (data.toString('latin1', at + 4, at + 8) === type) return [at + header, at + size];
+      at += size;
+    }
+  };
+  const movie = box(0, data.length, 'moov'); const header = movie && box(movie[0], movie[1], 'mvhd');
+  if (!header) return;
+  const [at, end] = header; const wide = data[at] === 1;
+  if (at + (wide ? 32 : 20) > end) return;
+  const timescale = data.readUInt32BE(at + (wide ? 20 : 12));
+  const duration = wide ? Number(data.readBigUInt64BE(at + 24)) : data.readUInt32BE(at + 16);
+  return timescale ? duration / timescale : undefined;
+}
+/** How long media plays, where its own bytes say; a platform that says so itself is believed first. */
+export function mediaSeconds(data: Buffer, mimeType: string): number | undefined {
+  const type = mimeType.split(';', 1)[0]!.trim().toLowerCase();
+  if (type === 'audio/mpeg' || type === 'audio/mp3') return mp3Seconds(data);
+  if (type === 'video/mp4' || type === 'video/quicktime' || type === 'audio/mp4' || type === 'audio/x-m4a') return mp4Seconds(data);
+}

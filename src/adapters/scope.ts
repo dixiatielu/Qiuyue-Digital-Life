@@ -14,6 +14,7 @@ export function scopePlugin(plugin: LifePlugin, instance: string, actions: reado
     ...plugin,
     ...(plugin.observation ? { observation: (events, thought) => plugin.observation!(events.filter(matches), thought).map(instructions) } : {}),
     ...(plugin.images ? { images: (event, helpers) => matches(event) ? plugin.images!(event, helpers) : [] } : {}),
+    ...(plugin.media ? { media: event => matches(event) ? plugin.media!(event) : [] } : {}),
     ...(plugin.supplementalImages ? { supplementalImages: (events, thought) => plugin.supplementalImages!(events.filter(matches), thought) } : {}),
     ...(plugin.imageViewer ? { imageViewer: label => { const name = plugin.imageViewer!(label); return name ? qualify(name) : undefined; } } : {}),
     // The program's own events, such as a rest backlog, belong to no account; the faces in their records still need names.

@@ -1,7 +1,9 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
 import type { Config } from './config.js';
-import type { ContentBlock } from './media.js';
+import { isMedia, mediaTokens, type ContentBlock } from './media.js';
+import { loadEventMedia, mediaLabel } from './tool-runtime.js';
+import { eventRef } from './store.js';
 import type { EnvironmentEvent, Memory, MemoryKind, Observation } from './domain.js';
 import { parseConversationRef } from './identity.js';
 import type { Store } from './store.js';
@@ -12,7 +14,7 @@ import { actionSummary, type RuntimeSnapshot } from './runtime-context.js';
 import { ChatRecord, observationText, recordTime } from './record.js';
 import { memoriesInView, type SemanticRecall } from './recall.js';
 import type { OnlineActivity } from './plugins.js';
-import { requiresThoughtSignatures, type ModelOwner } from './model-config.js';
+import { mediaCarriage, requiresThoughtSignatures, type ModelOwner } from './model-config.js';
 
 export interface ObservationMessage {
   role: 'observation';
@@ -216,14 +218,35 @@ export async function buildObservationMessage(params: {
   const rests = observation.events.filter(event => event.kind === 'rest_backlog');
   const faces = await tools.plugins.emojiNames(observation.events, signal);
   // Lines in the form of the chat record, less than half the size of event objects (ADR-0019).
-  const content: (TextContent | ImageContent)[] = [{ type: 'text', text: `${OBSERVATION_PREFIX} (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(store, observation.events, faces, preview, tools.plugins.recordFormatters())}` }];
+  const content: ContentBlock[] = [{ type: 'text', text: `${OBSERVATION_PREFIX} (times +08:00; a #xxxxxxxx ref is an event ID; read_event shows the whole event):\n${observationText(store, observation.events, faces, preview, tools.plugins.recordFormatters())}` }];
   if (observation.events.some(event => event.kind === 'wake' && event.payload.wakeKind === 'life')) {
     content.push({ type: 'text', text: buildLifeContext({ config, store, tools, thought }) });
   }
   for (const rest of rests) content.push({ type: 'text', text: buildRestRecord({ store, tools, contextTokens, payload: rest.payload, faces }) });
   for (const text of tools.plugins.observation(observation.events, thought)) content.push({ type: 'text', text });
+  /** What the observation holds so far besides its images, which are counted as they are admitted. */
+  const held = () => estimateTokens(content.filter(item => item.type === 'text')) + content.reduce((sum, item) => sum + (isMedia(item) ? mediaTokens(item) : 0), 0);
+  // A model that takes audio hears a voice message as it reads the line that brought it; video and audio files wait to be asked for (ADR-0029).
+  if (mediaCarriage(model, 'audio')) {
+    let heard = 0;
+    for (const event of observation.events) {
+      if (event.source?.own) continue;
+      for (const [index, source] of tools.plugins.media(event).entries()) {
+        if (source.kind !== 'voice') continue;
+        const from = eventRef(event.id);
+        if (heard >= config.limits.maxMedia) { content.push({ type: 'text', text: `${mediaLabel(source, index, from)} was not loaded; use view_event_media to hear it` }); continue; }
+        let voice;
+        // The thought waits on this, so a conversion that hangs is given up on; the voice can still be asked for.
+        try { voice = await loadEventMedia(config.limits, source, AbortSignal.any([signal, AbortSignal.timeout(15_000)])); } catch { signal.throwIfAborted(); }
+        if (!voice) { content.push({ type: 'text', text: `${mediaLabel(source, index, from)} could not be read` }); continue; }
+        if (held() + mediaTokens(voice) > contextTokens * 0.4) { content.push({ type: 'text', text: `${mediaLabel(source, index, from)} was not loaded due to the context limit; use view_event_media to hear it` }); continue; }
+        content.push({ type: 'text', text: `The following is ${mediaLabel(source, index, from)}` }, voice);
+        heard++;
+      }
+    }
+  }
   let count = 0;
-  const fits = () => count++ < config.limits.maxImages && estimateTokens(content.filter(item => item.type !== 'image')) + count * IMAGE_TOKENS <= contextTokens * 0.4;
+  const fits = () => count++ < config.limits.maxImages && held() + count * IMAGE_TOKENS <= contextTokens * 0.4;
   // Plugin-produced pictures are seen before incoming chat images, within the same context budget.
   const eventImages = observation.events.flatMap(event => tools.plugins.images(event).filter(image => image.autoView));
   const orderedImages = [

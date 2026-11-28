@@ -50,7 +50,7 @@ const builtinFactories: Record<BuiltinPluginId, BuiltinFactory> = {
     return stickersPlugin(config, saved, semantics ? new StickerRecall(config.embedding, saved, semantics) : undefined);
   },
   'qq-faces': (config, store, _semantics, _credential, connection) => qqFacesPlugin(config, new FaceCatalog(store, connection!.adapter)),
-  'snowluma-tools': (config, _store, _semantics, _credential, connection) => snowlumaToolsPlugin(config, connection!.account),
+  'snowluma-tools': (config, _store, _semantics, _credential, connection) => snowlumaToolsPlugin(config, connection!.account, connection!.adapter),
 };
 
 export function createBuiltinPlugin(
