@@ -72,8 +72,8 @@ export function preferJpeg(url: string): string {
   const params = base.slice(query + 1).split('&').filter(param => !/^t=/.test(param));
   return [base.slice(0, query + 1) + params.join('&'), ...fragment].join('#');
 }
-export async function fetchImage(url: string, signal?: AbortSignal) {
-  const image = await publicFetch(preferJpeg(url), { timeoutMs: 10_000, maxBytes: 5_000_000, signal });
+export async function fetchImage(url: string, signal?: AbortSignal, fetchUrl: typeof publicFetch = publicFetch) {
+  const image = await fetchUrl(preferJpeg(url), { timeoutMs: 10_000, maxBytes: 5_000_000, signal });
   if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(image.type)) throw new Error('Unsupported image format.');
   return image;
 }

@@ -139,6 +139,38 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig, adap
     if (!url) throw new Error('The file has no readable address.');
     return (await fetchUrl(url, { timeoutMs: 60_000, maxBytes, signal })).data;
   };
+  /** The message's own ID. Events received before sources carried it have it only in the payload SnowLuma pushed. */
+  const messageIdOf = (event: EnvironmentEvent): number | undefined => {
+    const id = event.source?.messageId ?? event.payload.message_id;
+    return id != null && id !== '' && Number.isFinite(Number(id)) ? Number(id) : undefined;
+  };
+  /**
+   * Fetch an image or a video from the address its message came with. QQ lets that address lapse within a day, and
+   * the message read again carries a current one, so a refusal is answered by reading it again and trying once more.
+   */
+  const fetchSegment = async <T>(event: EnvironmentEvent, segment: Segment, fetchFrom: (url: string) => Promise<T>, signal?: AbortSignal): Promise<T> => {
+    const stored = typeof segment.data?.url === 'string' && segment.data.url ? segment.data.url : undefined;
+    const current = async () => {
+      const messageId = messageIdOf(event);
+      if (!adapter || messageId === undefined) return;
+      try {
+        const read = await adapter.execute('get_msg', { message_id: messageId }, signal) as { message?: unknown } | undefined;
+        const alike = (Array.isArray(read?.message) ? read.message : []).filter((item): item is Segment => Boolean(item && typeof item === 'object' && (item as Segment).type === segment.type));
+        const again = alike.find(item => item.data?.file === segment.data?.file) ?? alike[segmentsOf(event).filter(item => item.type === segment.type).indexOf(segment)];
+        return typeof again?.data?.url === 'string' && again.data.url ? again.data.url : undefined;
+      // The operator may not allow the lookup, or QQ may no longer hold the message.
+      } catch { signal?.throwIfAborted(); }
+    };
+    if (!stored) { const url = await current(); if (!url) throw new Error('The message has no readable address for it.'); return fetchFrom(url); }
+    try { return await fetchFrom(stored); }
+    catch (error) {
+      signal?.throwIfAborted();
+      // Only a refusal by the host is a lapsed address; too large or the wrong type would be so again.
+      const url = error instanceof Error && /^HTTP \d+/.test(error.message) ? await current() : undefined;
+      if (!url || url === stored) throw error;
+      return fetchFrom(url);
+    }
+  };
   const snowlumaCatalog = getSnowLumaCatalog().actions;
   for (const name of [...(account.tools.allow === '*' ? [] : account.tools.allow), ...account.tools.deny]) findSnowLumaAction(name);
   return {
@@ -247,9 +279,9 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig, adap
       }];
       if (segment.type === 'video') return [{
         kind: 'video',
-        ...(typeof url === 'string' && url ? {} : { missingReason: 'The video has no readable address.' }),
+        ...(typeof url === 'string' && url || adapter && messageIdOf(event) !== undefined ? {} : { missingReason: 'The video has no readable address.' }),
         load: async (maxBytes, signal) => {
-          const video = await fetchUrl(String(url), { timeoutMs: 60_000, maxBytes, signal });
+          const video = await fetchSegment(event, segment, address => fetchUrl(address, { timeoutMs: 60_000, maxBytes, signal }), signal);
           // QQ's media host does not always name the type; the message's own file name does.
           const mimeType = video.type.startsWith('video/') ? video.type : /\.mp4$/i.test(String(file ?? '')) ? 'video/mp4' : video.type;
           return { data: video.data, mimeType };
@@ -296,7 +328,7 @@ export function snowlumaToolsPlugin(config: Config, account: AdapterConfig, adap
             autoView: true,
             load: async signal => {
               if (typeof url !== 'string') return undefined;
-              const image = await fetchImage(url, signal);
+              const image = await fetchSegment(event, segment, address => fetchImage(address, signal, fetchUrl), signal);
               return { data: image.data, mimeType: image.type };
             },
           };

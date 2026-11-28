@@ -333,3 +333,50 @@ test('an observation numbers what a file can be asked for as, and leaves other f
     assert.match(text, /\[file huge\.jpg, image 0\]\[file paper\.pdf, document 0\]\[file archive\.zip\]\[file clip\.mp4, video 1\]/);
   } finally { f.store.close(); }
 });
+
+test('an image or video whose address has lapsed is fetched from the one the message carries when read again', async () => {
+  const cfg = config(); const account = cfg.adapters[0]!;
+  const read: unknown[] = []; let held = true;
+  const png = Buffer.from('renewed picture');
+  const adapter: SocialAdapter = { execute: async (action, args) => {
+    read.push([action, args.message_id]);
+    if (!held) throw new Error('message not found');
+    return { message: [{ type: 'image', data: { file: 'a.jpg', url: 'https://multimedia.nt.qq.com.cn/fresh-a' } }, { type: 'image', data: { file: 'b.jpg', url: 'https://multimedia.nt.qq.com.cn/fresh-b' } }, { type: 'video', data: { file: 'clip.mp4', url: 'https://multimedia.nt.qq.com.cn/fresh-clip' } }] };
+  } };
+  const fetched: string[] = [];
+  const plugin = snowlumaToolsPlugin(cfg, account, adapter, async (url, options) => {
+    fetched.push(url.split('/').at(-1)!);
+    if (url.includes('stale')) throw new Error('HTTP 400');
+    if (url.includes('oversized')) throw new Error('The response exceeds the size limit.');
+    return url.includes('clip') ? { data: mp4(1000, 3000), type: 'application/octet-stream', url } : { data: png, type: options.maxBytes === 5_000_000 ? 'image/png' : 'text/html', url };
+  });
+  const store = new Store(':memory:');
+  try {
+    const message = [
+      { type: 'image', data: { file: 'a.jpg', url: 'https://multimedia.nt.qq.com.cn/stale-a' } },
+      { type: 'image', data: { file: 'b.jpg', url: 'https://multimedia.nt.qq.com.cn/current-b' } },
+      { type: 'video', data: { file: 'clip.mp4', url: 'https://multimedia.nt.qq.com.cn/stale-clip' } },
+    ];
+    const event = store.receive(qqEvent({ key: 'qq:lapsed', kind: 'message', at: Date.now(), text: 'old', groupId: 100, actorId: 7, payload: { message_id: 555, message } }, store))!;
+    const [first, second] = plugin.images!(event);
+    assert.deepEqual(await first!.load(), { data: png, mimeType: 'image/png' });
+    assert.deepEqual(fetched, ['stale-a', 'fresh-a']); assert.deepEqual(read, [['get_msg', 555]]);
+    // An address that still answers is used as it is, without reading the message again.
+    await second!.load();
+    assert.deepEqual(fetched.slice(2), ['current-b']); assert.equal(read.length, 1);
+    const clip = await loadEventMedia(limits, plugin.media!(event)[0]!);
+    assert.equal(clip.seconds, 3); assert.deepEqual(fetched.slice(3), ['stale-clip', 'fresh-clip']);
+    // An event received before sources carried the message's ID has it in the payload SnowLuma pushed.
+    read.length = 0;
+    await plugin.images!({ ...event, source: { ...event.source!, messageId: undefined } })[0]!.load();
+    assert.deepEqual(read, [['get_msg', 555]]);
+    // When QQ no longer holds the message, the refusal stands.
+    held = false;
+    await assert.rejects(Promise.resolve(first!.load()), /HTTP 400/);
+    // Too large is not a lapsed address, and is not asked about again.
+    held = true; read.length = 0;
+    const large = store.receive(qqEvent({ key: 'qq:large', kind: 'message', at: Date.now(), text: 'big', groupId: 100, actorId: 7, payload: { message_id: 556, message: [{ type: 'video', data: { file: 'big.mp4', url: 'https://multimedia.nt.qq.com.cn/oversized' } }] } }, store))!;
+    await assert.rejects(plugin.media!(large)[0]!.load(1000), /exceeds the size limit/);
+    assert.deepEqual(read, []);
+  } finally { store.close(); }
+});
